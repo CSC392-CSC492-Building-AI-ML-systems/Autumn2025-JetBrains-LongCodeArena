@@ -154,7 +154,14 @@ class LineGeneratorHF(SpecificLineGenerator):
                 input_ids = self.tokenize(context)[..., -self.max_seq_len:]
                 if input_ids.size(-1) < 1:
                     new_size = torch.Size(list(input_ids.size())[:-1] + [1])
-                    input_ids = torch.full(new_size, self._tokenizer.bos_token_id)
+                    fill_id = getattr(self._tokenizer, 'bos_token_id', None)
+                    if fill_id is None:
+                        fill_id = getattr(self._tokenizer, 'eos_token_id', None)
+                    if fill_id is None:
+                        fill_id = getattr(self._tokenizer, 'pad_token_id', None)
+                    if fill_id is None:
+                        fill_id = 0
+                    input_ids = torch.full(new_size, fill_id, dtype=torch.long)
                 input_ids = input_ids.to(self.device)
                 out = self.model.generate(input_ids, **gen_config)
                 out = out[..., input_ids.size(-1):]
@@ -209,7 +216,7 @@ class LineGeneratorHF(SpecificLineGenerator):
         return self._tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)[0]
 
     def calculate_exact_match(self):
-        exact_match = load("exact_match")
+        exact_match = load("evaluate-metric/exact_match")
         results = dict()
         for sc_name, gen_res in self.generation_results.items():
             if len(gen_res.gt) > 0:
