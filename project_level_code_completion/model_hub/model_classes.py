@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoConfig, AutoModelForCausalLM, BitsAndBytesConfig
 
 
 class ModelBuilderBase:
@@ -14,9 +14,23 @@ class HFModelBuilder(ModelBuilderBase):
     def build_model(cls, checkpoint, **kwargs):
         kwargs = cls._update_kwargs(checkpoint, kwargs)
         device = cls._get_device()
-        model = AutoModelForCausalLM.from_pretrained(checkpoint,
-                                                     **kwargs
-                                                     )
+        config = AutoConfig.from_pretrained(checkpoint, trust_remote_code=True)
+        if hasattr(config, "attn_implementation"):
+            config.attn_implementation = "eager"
+
+        # ✅ Force FP16 explicitly
+        config.torch_dtype = torch.float16
+        kwargs['torch_dtype'] = torch.float16
+
+        model = AutoModelForCausalLM.from_pretrained(
+            checkpoint,
+            config=config,
+            torch_dtype=torch.float16,  # hard-coded safety net
+            **{k: v for k, v in kwargs.items() if k != 'torch_dtype'}  # avoid duplicate key
+        )
+
+        # ✅ Double-check all params converted
+        model = model.to(dtype=torch.float16)
         if cls.SEND_TO_DEVICE:
             model = model.to(device)
         model.eval()
@@ -35,10 +49,12 @@ class HFModelBuilder(ModelBuilderBase):
     def _update_kwargs(checkpoint, kwargs):
         if 'attn_implementation' not in kwargs:
             if 'starcoder' not in checkpoint:  # Quick fix for Flash-attention 2 and starcoder
-                kwargs['attn_implementation'] = 'flash_attention_2'
+                kwargs['attn_implementation'] = 'eager' #'flash_attention_2'
         if 'torch_dtype' not in kwargs:
-            kwargs['torch_dtype'] = torch.bfloat16
-
+            if torch.cuda.is_bf16_supported():
+                kwargs['torch_dtype'] = torch.bfloat16
+            else:
+                kwargs['torch_dtype'] = torch.float16
         return kwargs
 
 
