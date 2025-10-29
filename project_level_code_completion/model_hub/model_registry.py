@@ -17,6 +17,7 @@ MODEL_REGISTRY = {
     'starcoderbase': ModelMetainfo(builder=HFModelBuilder, checkpoint="bigcode/starcoderbase"),
 
     'starcoder2-3b': ModelMetainfo(builder=HFModelBuilder, checkpoint="bigcode/starcoder2-3b"),
+    'starcoder2-7b': ModelMetainfo(builder=HFModelBuilder, checkpoint="bigcode/starcoder2-7b"),
 
     'starcoderbase-1b-4bit': ModelMetainfo(builder=HFModelBuilder4bit, checkpoint="bigcode/starcoderbase-1b"),
     'starcoderbase-3b-4bit': ModelMetainfo(builder=HFModelBuilder4bit, checkpoint="bigcode/starcoderbase-3b"),
