@@ -1,4 +1,5 @@
 import os
+import inspect
 
 from openai import OpenAI
 
@@ -7,21 +8,25 @@ from .example_generation_model import ExampleGenerationModel
 
 class OpenAIModel(ExampleGenerationModel):
 
-    def __init__(self, model_name: str, use_bm25: bool = False):
+    def __init__(self, model_name: str, use_bm25: bool = False, n_selections: int = 0):
         self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
         self.model_name = model_name
         self.use_bm25 = use_bm25
+        self.n_selections = n_selections
 
     def generate(self, task_description: str, project_apis: list[str] = None) -> str:
         instruction = (
             self.get_prompt(task_description)
             if not self.use_bm25
-            else self.get_bm25_prompt(task_description, project_apis)
+            else self.get_bm25_prompt(task_description, project_apis, n_selections=self.n_selections)
         )
-
+        
+        extra_context = [f"Project element: {elem}\nDocstring: {str(inspect.getdoc(elem))}\n" for elem in project_apis]  # getdoc returns None if it fails
+        
         prompt = [
-            {"role": "user", "content": instruction},
+            {"role": "user", "content": instruction + "\nHere is a list of docstrings for each project element:\n" + '\n'.join(extra_context)},
         ]
+                
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=prompt,
