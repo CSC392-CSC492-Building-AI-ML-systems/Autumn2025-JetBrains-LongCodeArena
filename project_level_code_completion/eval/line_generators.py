@@ -281,6 +281,244 @@ class LineGeneratorHF(SpecificLineGenerator):
 
 
 
+class LineGeneratorOpenAI(SpecificLineGenerator):
+    """OpenAI-backed line generator that mirrors HF generator behavior but uses chat completions.
+
+    Notes:
+    - Expects DatapointCommitDataset instances with text fields `context` and `completion` present.
+    - Does not use tokenization or logits; crops long string context by characters.
+    - Saves per-sample predictions to results_path as jsonlines, same keys as HF generator.
+    """
+    def __init__(self, model_name: str, results_path: str, max_context_chars: int = 16000, language: str = "python", max_repo_ctx_tokens: int = 1024):
+        super().__init__(model=None, device="cpu", max_seq_len=0, results_path=results_path)
+        from openai import OpenAI
+        import os
+
+        self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        self.model_name = model_name
+        self.max_context_chars = max_context_chars
+        self.language = language
+        self.max_repo_ctx_tokens = max_repo_ctx_tokens
+        # Setup token encoding for safe truncation
+        try:
+            import tiktoken
+            try:
+                self._enc = tiktoken.encoding_for_model(model_name)
+            except Exception:
+                self._enc = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            self._enc = None  # fallback: will truncate by characters only
+        # Model token limits (approx). gpt-3.5-turbo supports 16385 tokens.
+        self._model_max_tokens = 16385
+        self._gen_max_tokens = 32
+        self._prompt_overhead = 600  # instruction, chat formatting, safety margin
+
+    def _system_message(self) -> str:
+        return (
+            "You are a precise code completion assistant.\n"
+            "Respond with EXACTLY one physical line of source code and nothing else.\n"
+            "Do NOT output markdown, triple backticks, XML/HTML tags, quotes, labels, or explanations.\n"
+            "Do NOT echo the words 'Next line', 'Answer', or any similar label.\n"
+            "Do NOT output '```python' or any newline '\n' characters. Only predict a SINGLE line."
+            "Preserve indentation exactly as required by the file.\n"
+            "Return only the characters of that line, with no leading or trailing blank lines.\n"
+            "If the next line is empty, return an empty string (no spaces, no text)."
+        )
+
+    def _build_prompt(self, repo_context: str, file_prefix: str, file_path: str) -> str:
+        header = (
+            f"Language: {self.language}\n"
+            f"File: {file_path}\n"
+            "Task: Predict the next single physical line that follows the prefix below.\n"
+            "Return ONLY the next line exactly as it should appear. Do not include any extra text or formatting.\n"
+        )
+        return (
+            f"{header}\n"
+            f"<REPO_CONTEXT>\n{repo_context}\n</REPO_CONTEXT>\n\n"
+            f"<FILE_PREFIX>\n{file_prefix}\n</FILE_PREFIX>\n\n"
+            f"Provide only the next line."
+        )
+
+    def _count_tokens(self, text: str) -> int:
+        if self._enc is None:
+            return len(text) // 4  # very rough fallback
+        return len(self._enc.encode(text))
+
+    def _trim_to_fit(self, repo_ctx: str, prefix: str) -> tuple[str, str, dict]:
+        """Trim repo_ctx first (from the head) to fit model token window, preserving prefix as much as possible.
+        If prefix alone is too long, trim its head as well (keep the tail).
+        Returns (repo_ctx_trimmed, prefix_trimmed, stats).
+        """
+        # initial char-based cap on repo_ctx
+        if len(repo_ctx) > self.max_context_chars:
+            repo_ctx = repo_ctx[-self.max_context_chars:]
+
+        # Compute allowed tokens for content
+        allowed = self._model_max_tokens - self._gen_max_tokens - self._prompt_overhead
+        # Estimate tokens for static parts of the prompt (tags + instruction). Roughly accounted in overhead.
+
+        if self._enc is None:
+            # If no tokenizer, apply coarse character trimming once more
+            combined = repo_ctx + "\n" + prefix
+            if len(combined) > allowed * 3:  # coarse 3 chars/token heuristic
+                keep_chars = allowed * 3
+                combined = combined[-keep_chars:]
+                # Naively split back: bias to keep prefix whole when possible
+                # Keep full prefix up to its length; the rest goes to repo ctx
+                pf_part = min(len(prefix), len(combined))
+                prefix_trimmed = combined[-pf_part:]
+                repo_ctx_trimmed = combined[: len(combined) - pf_part]
+                return repo_ctx_trimmed, prefix_trimmed, {
+                    'allowed_tokens': allowed,
+                    'tokenizer': 'approx_chars',
+                }
+            return repo_ctx, prefix, {'allowed_tokens': allowed, 'tokenizer': 'approx_chars'}
+
+        # Token-aware path
+        rc_ids = self._enc.encode(repo_ctx)
+        pf_ids = self._enc.encode(prefix)
+        rc_len = len(rc_ids)
+        pf_len = len(pf_ids)
+        # If prefix alone exceeds allowed, keep tail of prefix
+        if pf_len > allowed:
+            pf_ids = pf_ids[-allowed:]
+            return "", self._enc.decode(pf_ids), {
+                'allowed_tokens': allowed,
+                'repo_ctx_tokens': 0,
+                'prefix_tokens': len(pf_ids)
+            }
+        # Reserve space for full prefix, trim repo_ctx if needed
+        rc_allowed = max(0, allowed - pf_len)
+        # Cap repo context to avoid overwhelming prefix
+        rc_allowed = min(rc_allowed, self.max_repo_ctx_tokens)
+        if rc_len > rc_allowed:
+            rc_ids = rc_ids[-rc_allowed:]
+        return self._enc.decode(rc_ids), self._enc.decode(pf_ids), {
+            'allowed_tokens': allowed,
+            'repo_ctx_tokens': len(rc_ids),
+            'prefix_tokens': len(pf_ids)
+        }
+
+    def _chat_complete(self, system_text: str, prompt: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=self._gen_max_tokens,
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0,
+            stop=["\n"],
+        )
+        text = response.choices[0].message.content or ""
+        # Normalize newlines and strip
+        text = text.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+        return text
+
+    def generate_line(self, datapoint: DatapointBase, use_zero_context: bool = False) -> dict[str, int]:
+        dict_of_lines = self.load_lines(datapoint)
+        for sc_name, list_of_lines in dict_of_lines.items():
+            self.generation_results[sc_name] = GenerationResults(list(), list())
+            for line_num in list_of_lines:
+                if use_zero_context:
+                    prompt_prefix, gt_line = self._get_zero_context(datapoint, line_num)
+                    repo_ctx = ""
+                else:
+                    full_context, gt_line = self._get_context(datapoint, line_num)
+                    # full_context = context + "\n" + prefix; split to avoid duplication
+                    # We reconstruct repo context and file prefix explicitly
+                    repo_ctx = datapoint.context or ""
+                    prompt_prefix = datapoint.get_prefix(line_num)
+
+                # Token-aware trimming to fit within the model window
+                repo_ctx, prompt_prefix, fit_stats = self._trim_to_fit(repo_ctx, prompt_prefix)
+
+                # Determine file path for better grounding
+                if getattr(datapoint, "completion_dict", None):
+                    try:
+                        file_path = list(datapoint.completion_dict.keys())[0]
+                    except Exception:
+                        file_path = "<unknown>"
+                else:
+                    file_path = "<unknown>"
+
+                prompt = self._build_prompt(repo_ctx, prompt_prefix, file_path)
+                prediction = self._chat_complete(self._system_message(), prompt)
+                # Prefer content inside <line>...</line>
+                norm = prediction.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+                prediction_line = ""
+                if "<line>" in norm and "</line>" in norm:
+                    try:
+                        start = norm.index("<line>") + len("<line>")
+                        end = norm.index("</line>", start)
+                        prediction_line = norm[start:end]
+                    except ValueError:
+                        prediction_line = ""
+                if prediction_line == "":
+                    # Fallbacks: drop fences and pick first non-empty line
+                    lines = norm.split("\n") if norm else []
+                    non_fence_lines = [ln for ln in lines if not ln.strip().startswith("```")]
+                    for ln in non_fence_lines:
+                        clean_ln = ln
+                        if clean_ln.lstrip().lower().startswith("next line:"):
+                            parts = clean_ln.split(":", 1)
+                            clean_ln = parts[1] if len(parts) > 1 else ""
+                        if clean_ln.strip() != "":
+                            prediction_line = clean_ln
+                            break
+                    # Allow truly blank line as valid
+                    if prediction_line == "" and non_fence_lines and all(ln.strip() == "" for ln in non_fence_lines):
+                        prediction_line = ""
+                    # Final fallback
+                    if prediction_line == "" and lines:
+                        prediction_line = lines[0]
+
+                self.save_results({
+                    'original_prediction': prediction,
+                    'prediction_line': prediction_line,
+                    'ground_truth': gt_line,
+                    'line_class': sc_name,
+                    'zero_context': use_zero_context,
+                    'file_path': file_path,
+                    'repo_context_chars': len(repo_ctx),
+                    'prefix_chars': len(prompt_prefix),
+                    'allowed_tokens': fit_stats.get('allowed_tokens', None),
+                    'repo_ctx_tokens': fit_stats.get('repo_ctx_tokens', None),
+                    'prefix_tokens': fit_stats.get('prefix_tokens', None)
+                })
+                self.generation_results[sc_name].append_result(prediction=prediction_line, gt=gt_line)
+
+        return {k: len(v) for k, v in dict_of_lines.items()}
+
+    def calculate_exact_match(self):
+        exact_match = load("evaluate-metric/exact_match")
+        results = dict()
+        for sc_name, gen_res in self.generation_results.items():
+            if len(gen_res.gt) > 0:
+                results[sc_name] = exact_match.compute(
+                    references=[item.strip() for item in gen_res.gt],
+                    predictions=[item.strip() for item in gen_res.prediction],
+                )
+        return results
+
+    def calculate_edit_similarity(self):
+        similarity = 0.
+        count = 0
+        result = dict()
+        for sc_name, gen_res in self.generation_results.items():
+            similarity = 0.
+            count = 0
+            for pred, gt in zip(gen_res.prediction, gen_res.gt):
+                similarity += fuzz.ratio(pred, gt)
+                count += 1
+            if count > 0:
+                result[sc_name] = {'edit_similarity': similarity / count}
+        return result
+
+
 @torch.inference_mode()
 def evaluate_generation(args: GeneratorConfig):
     set_seed(args.seed)
