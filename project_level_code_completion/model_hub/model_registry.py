@@ -33,4 +33,6 @@ MODEL_REGISTRY = {
 
     'deepseek-coder-1b': ModelMetainfo(builder=HFModelBuilder, checkpoint="deepseek-ai/deepseek-coder-1.3b-base"),
     'deepseek-coder-7b': ModelMetainfo(builder=HFModelBuilder, checkpoint="deepseek-ai/deepseek-coder-6.7b-base"),
+    'granite_1b': ModelMetainfo(builder=HFModelBuilder, checkpoint="ibm-granite/granite-4.0-h-1b-base")
+
 }

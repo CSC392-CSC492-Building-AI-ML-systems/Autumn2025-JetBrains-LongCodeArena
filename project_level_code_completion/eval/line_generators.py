@@ -54,6 +54,44 @@ class GenerationResults:
         self.gt.append(gt)
 
 
+# ----------------------------
+# Robust Exact-Match utilities
+# ----------------------------
+def _compute_em_local(preds: list[str], refs: list[str]) -> Dict[str, float]:
+    """Local, dependency-free EM (case-sensitive, trimmed)."""
+    assert len(preds) == len(refs)
+    n = len(preds)
+    if n == 0:
+        return {"exact_match": 0.0}
+    hits = sum(1 for p, r in zip(preds, refs) if p.strip() == r.strip())
+    return {"exact_match": hits / n}
+
+
+def get_em_metric():
+    """
+    Try (1) repo-relative 'evaluate-metric/exact_match',
+        (2) hub 'exact_match',
+        else fallback to local Python EM.
+    Returns a callable: f(preds, refs) -> {'exact_match': float}
+    """
+    # 1) Old LCA layout
+    try:
+        metric = load("evaluate-metric/exact_match")
+        return lambda preds, refs: metric.compute(predictions=preds, references=refs)
+    except Exception:
+        pass
+
+    # 2) Hub short name
+    try:
+        metric = load("exact_match")
+        return lambda preds, refs: metric.compute(predictions=preds, references=refs)
+    except Exception:
+        pass
+
+    # 3) Local fallback
+    return _compute_em_local
+
+
 class LineGeneratorBase:
     def __init__(self, model, device, max_seq_len, results_path):
         self.model = model
@@ -79,7 +117,6 @@ class LineGeneratorBase:
         gt_line = datapoint.get_line(line_num)
         return context, gt_line
 
-
     def generate_line(self, datapoint):
         raise NotImplementedError
 
@@ -98,23 +135,19 @@ class LineGeneratorBase:
     def _get_generation_config(self):
         raise NotImplementedError
 
-    # @staticmethod
-    # def _get_completion_lines(datapoint):
-    #     return datapoint['completion'].split("\n")
-
     def aggregate_metric(self, metric_result):
-        agg_result = 0.
+        agg_result = 0.0
         agg_len = 0
         metric_name = None
         for sc_name, sc_score in metric_result.items():
             agg_result += list(sc_score.values())[0] * len(self.generation_results[sc_name].gt)
             agg_len += len(self.generation_results[sc_name].gt)
             metric_name = list(sc_score.keys())[0]
-        if len(metric_result) > 0:
+        if len(metric_result) > 0 and agg_len > 0:
             return {metric_name: agg_result / agg_len}
 
     def save_results(self, results):
-        with jsonlines.open(self.results_path, 'a') as writer:
+        with jsonlines.open(self.results_path, "a") as writer:
             writer.write(results)
 
 
@@ -136,49 +169,61 @@ class LineGeneratorHF(SpecificLineGenerator):
         self.tokenizer_path = tokenizer_path
         self._tokenizer: AutoTokenizer
         self._load_tokenizer()
+        # Prepare EM metric callable once
+        self._compute_em = get_em_metric()
 
     @torch.inference_mode()
     def generate_line(self, datapoint: DatapointBase, use_zero_context: bool = False) -> dict[str, int]:
         dict_of_lines = self.load_lines(datapoint)
         gen_config = self._get_generation_config()
         for sc_name, list_of_lines in dict_of_lines.items():
-            # print('='*25, sc_name, '='*25)
             self.generation_results[sc_name] = GenerationResults(list(), list())
             for line_num in list_of_lines:
                 context, gt_line = self._get_context(datapoint, line_num)
                 if use_zero_context:
                     context, gt_line = self._get_zero_context(datapoint, line_num)
-                # When the context is too long, we want to crop the beginning for more efficient tokenization
+                # When the context is too long, crop the beginning for more efficient tokenization
                 if len(context) > self.max_seq_len * 6:
-                    context = context[-self.max_seq_len * 6:]
-                input_ids = self.tokenize(context)[..., -self.max_seq_len:]
+                    context = context[-self.max_seq_len * 6 :]
+                input_ids = self.tokenize(context)[..., -self.max_seq_len :]
                 if input_ids.size(-1) < 1:
                     new_size = torch.Size(list(input_ids.size())[:-1] + [1])
-                    fill_id = getattr(self._tokenizer, 'bos_token_id', None)
+                    fill_id = getattr(self._tokenizer, "bos_token_id", None)
                     if fill_id is None:
-                        fill_id = getattr(self._tokenizer, 'eos_token_id', None)
+                        fill_id = getattr(self._tokenizer, "eos_token_id", None)
                     if fill_id is None:
-                        fill_id = getattr(self._tokenizer, 'pad_token_id', None)
+                        fill_id = getattr(self._tokenizer, "pad_token_id", None)
                     if fill_id is None:
                         fill_id = 0
                     input_ids = torch.full(new_size, fill_id, dtype=torch.long)
                 input_ids = input_ids.to(self.device)
-                out = self.model.generate(input_ids, **gen_config)
-                out = out[..., input_ids.size(-1):]
+
+                # Provide attention_mask to avoid warnings / undefined behavior
+                attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
+
+                out = self.model.generate(input_ids, attention_mask=attention_mask, **gen_config)
+                out = out[..., input_ids.size(-1) :]
                 prediction = self.decode(out)
                 prediction = prediction.strip("\n")
                 prediction_line = prediction.split("\n")[0]
-                self.save_results({'original_prediction': prediction, 'prediction_line': prediction_line, 'ground_truth': gt_line, 'line_class': sc_name, 'zero_context': use_zero_context})
+                self.save_results(
+                    {
+                        "original_prediction": prediction,
+                        "prediction_line": prediction_line,
+                        "ground_truth": gt_line,
+                        "line_class": sc_name,
+                        "zero_context": use_zero_context,
+                    }
+                )
                 self.generation_results[sc_name].append_result(prediction=prediction_line, gt=gt_line)
 
-        # datapoint.pop('completion_lines', None)
         return {k: len(v) for k, v in dict_of_lines.items()}
 
     def _load_tokenizer(self):
         self._tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
 
     def tokenize(self, text):
-        return self._tokenizer(text, return_tensors='pt', padding=False)['input_ids']
+        return self._tokenizer(text, return_tensors="pt", padding=False)["input_ids"]
 
     def _get_generation_config(self):
         class StopOnNewLine(StoppingCriteria):
@@ -186,7 +231,7 @@ class LineGeneratorHF(SpecificLineGenerator):
                 self.stop_ids = set()
                 for k, tok_id in tokenizer.vocab.items():
                     s = tokenizer.convert_tokens_to_string([k])
-                    if '\n' in s:
+                    if "\n" in s:
                         self.stop_ids.add(tok_id)
                 self._num_generated_tokens = 0
 
@@ -203,31 +248,28 @@ class LineGeneratorHF(SpecificLineGenerator):
                     return False
 
         stopping_criteria = StoppingCriteriaList([StopOnNewLine(self._tokenizer)])
-        # newline_token_id = self._tokenizer.encode('\n', add_special_tokens=False)[0]
         return {
-            'max_new_tokens': 100,
-            'do_sample': False,
-            'stopping_criteria': stopping_criteria,
-            'eos_token_id': self._tokenizer.eos_token_id,
-            'pad_token_id': self._tokenizer.eos_token_id,
+            "max_new_tokens": 100,
+            "do_sample": False,
+            "stopping_criteria": stopping_criteria,
+            "eos_token_id": self._tokenizer.eos_token_id,
+            "pad_token_id": self._tokenizer.eos_token_id,
         }
 
     def decode(self, generated_token_ids):
         return self._tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)[0]
 
     def calculate_exact_match(self):
-        exact_match = load("evaluate-metric/exact_match")
         results = dict()
         for sc_name, gen_res in self.generation_results.items():
             if len(gen_res.gt) > 0:
-                results[sc_name] = exact_match.compute(
-                    references=[item.strip() for item in gen_res.gt],
-                    predictions=[item.strip() for item in gen_res.prediction],
-                )
+                preds = [item.strip() for item in gen_res.prediction]
+                refs = [item.strip() for item in gen_res.gt]
+                results[sc_name] = self._compute_em(preds, refs)
         return results
 
     def calculate_edit_similarity(self):
-        similarity = 0.
+        similarity = 0.0
         count = 0
         result = dict()
         for sc_name, gen_res in self.generation_results.items():
@@ -235,9 +277,8 @@ class LineGeneratorHF(SpecificLineGenerator):
                 similarity += fuzz.ratio(pred, gt)
                 count += 1
             if count > 0:
-                result[sc_name] = {'edit_similarity': similarity / count}
+                result[sc_name] = {"edit_similarity": similarity / count}
         return result
-
 
 
 @torch.inference_mode()
@@ -256,11 +297,13 @@ def evaluate_generation(args: GeneratorConfig):
     def calculate_metrics(model=model, device=device, use_zero_context=False, args=args, input_data=input_data):
         em_dict = dict()
         es_dict = dict()
-        em_dict['all'] = list()
-        es_dict['all'] = list()
+        em_dict["all"] = list()
+        es_dict["all"] = list()
         sc_counts = None
         for datapoint in tqdm(input_data):
-            generator = LineGeneratorHF(model, device, max_seq_len=args.seq_max_len, tokenizer_path=args.tokenizer_path, results_path=args.results_path)
+            generator = LineGeneratorHF(
+                model, device, max_seq_len=args.seq_max_len, tokenizer_path=args.tokenizer_path, results_path=args.results_path
+            )
             el_counts = generator.generate_line(datapoint, use_zero_context=use_zero_context)
             if sc_counts is None:
                 sc_counts = el_counts
@@ -269,8 +312,8 @@ def evaluate_generation(args: GeneratorConfig):
                     sc_counts[k] += el_counts[k]
             em = generator.calculate_exact_match()
             es = generator.calculate_edit_similarity()
-            em_dict['all'].append(generator.aggregate_metric(em)['exact_match'])
-            es_dict['all'].append(generator.aggregate_metric(es)['edit_similarity'])
+            em_dict["all"].append(generator.aggregate_metric(em)["exact_match"])
+            es_dict["all"].append(generator.aggregate_metric(es)["edit_similarity"])
             for sc_name in em.keys():
                 if sc_name not in em_dict:
                     em_dict[sc_name] = list()
@@ -278,11 +321,11 @@ def evaluate_generation(args: GeneratorConfig):
                     es_dict[sc_name] = list()
 
                 try:
-                    em_dict[sc_name].append(em[sc_name]['exact_match'])
+                    em_dict[sc_name].append(em[sc_name]["exact_match"])
                 except KeyError:
                     pass
                 try:
-                    es_dict[sc_name].append(es[sc_name]['edit_similarity'])
+                    es_dict[sc_name].append(es[sc_name]["edit_similarity"])
                 except KeyError:
                     pass
         return em_dict, es_dict, sc_counts
@@ -290,13 +333,13 @@ def evaluate_generation(args: GeneratorConfig):
     def process_results(use_zero_context):
         em_dict, es_dict, sc_counts = calculate_metrics(use_zero_context=use_zero_context)
         if use_zero_context:
-            print(f'Final results for zero context:')
+            print(f"Final results for zero context:")
         else:
-            print(f'Final results for full context:')
+            print(f"Final results for full context:")
         for sc_name in em_dict.keys():
             em_list = em_dict[sc_name]
             es_list = es_dict[sc_name]
-            print(f'Metrics for {sc_name} lines: EM {sum(em_list) / len(em_list):.2f}, ES {sum(es_list) / len(es_list):.2f}')
+            print(f"Metrics for {sc_name} lines: EM {sum(em_list) / len(em_list):.2f}, ES {sum(es_list) / len(es_list):.2f}")
 
         return em_dict, es_dict, sc_counts
 
@@ -309,46 +352,43 @@ def evaluate_generation(args: GeneratorConfig):
     for sc_name in em_dict.keys():
         em_list = em_dict[sc_name]
         em_list_0 = em_dict_0[sc_name]
-        assert len(em_list) == len(em_list_0), 'your score has different lengths'
+        assert len(em_list) == len(em_list_0), "your score has different lengths"
         em_diff_dict[sc_name] = {
-            'positive': sum([(sc - sc_0) > 0 for sc, sc_0 in zip(em_list, em_list_0)]) / len(em_list),
-            'negative': sum([(sc - sc_0) < 0 for sc, sc_0 in zip(em_list, em_list_0)]) / len(em_list),
-            'zero': sum([(sc - sc_0) == 0 for sc, sc_0 in zip(em_list, em_list_0)]) / len(em_list),
+            "positive": sum([(sc - sc_0) > 0 for sc, sc_0 in zip(em_list, em_list_0)]) / len(em_list),
+            "negative": sum([(sc - sc_0) < 0 for sc, sc_0 in zip(em_list, em_list_0)]) / len(em_list),
+            "zero": sum([(sc - sc_0) == 0 for sc, sc_0 in zip(em_list, em_list_0)]) / len(em_list),
         }
 
     return [
         {
-            'em_zero': {sc_name: sum(m_list) / len(m_list) for sc_name, m_list in em_dict_0.items()},
-            'es_zero': {sc_name: sum(m_list) / len(m_list) for sc_name, m_list in es_dict_0.items()},
-            'em': {sc_name: sum(m_list) / len(m_list) for sc_name, m_list in em_dict.items()},
-            'es': {sc_name: sum(m_list) / len(m_list) for sc_name, m_list in es_dict.items()},
+            "em_zero": {sc_name: sum(m_list) / len(m_list) for sc_name, m_list in em_dict_0.items()},
+            "es_zero": {sc_name: sum(m_list) / len(m_list) for sc_name, m_list in es_dict_0.items()},
+            "em": {sc_name: sum(m_list) / len(m_list) for sc_name, m_list in em_dict.items()},
+            "es": {sc_name: sum(m_list) / len(m_list) for sc_name, m_list in es_dict.items()},
         },
         {
-            'em_zero_list': em_dict_0,
-            'es_zero_list': es_dict_0,
-            'em_list': em_dict,
-            'es_list': es_dict,
+            "em_zero_list": em_dict_0,
+            "es_zero_list": es_dict_0,
+            "em_list": em_dict,
+            "es_list": es_dict,
         },
         em_diff_dict,
-        line_counts
+        line_counts,
     ]
 
 
-    # print(f'Final results for zero context: '
-    #       f'EM {sum(em_list) / len(em_list):.2f}, ES {sum(es_list) / len(es_list):.2f}')
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = GeneratorConfig(
         input_data_path="/home/glukhov/long_code_arena/lca/data/python/smol/model_inputs_composer_path_distance.json",
         seq_max_len=3500 - 30,
         context_max=3500,
         model="starcoder1b",
         device="cuda",
-        best_perplexity=0.,
+        best_perplexity=0.0,
         tokenizer_path="bigcode/starcoderbase-1b",
         composer="path_distance",
-        seed=42
+        seed=42,
+        results_path="results.jsonl",
     )
     print(args.input_data_path)
     out = evaluate_generation(args)

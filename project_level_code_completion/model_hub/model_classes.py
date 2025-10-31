@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig # , AutoConfig
 
 
 class ModelBuilderBase:
@@ -8,39 +8,74 @@ class ModelBuilderBase:
         raise NotImplementedError
 
 
+# class HFModelBuilder(ModelBuilderBase):
+#     SEND_TO_DEVICE = True
+#     @classmethod
+#     def build_model(cls, checkpoint, **kwargs):
+#         kwargs = cls._update_kwargs(checkpoint, kwargs)
+#         device = cls._get_device()
+#         model = AutoModelForCausalLM.from_pretrained(checkpoint,
+#                                                      **kwargs
+#                                                      )
+#         if cls.SEND_TO_DEVICE:
+#             model = model.to(device)
+#         model.eval()
+#         # model = model.to_bettertransformer()
+#         print('model is ready')
+#         return model, device
+
+#     @staticmethod
+#     def _get_device() -> torch.device:
+#         if torch.cuda.is_available():
+#             return torch.device('cuda')
+#         else:
+#             return torch.device('cpu')
+
+#     @staticmethod
+#     def _update_kwargs(checkpoint, kwargs):
+#         if 'attn_implementation' not in kwargs:
+#             kwargs['attn_implementation'] = 'sdpa'
+#             # if 'starcoder' not in checkpoint:  # Quick fix for Flash-attention 2 and starcoder
+#             #     kwargs['attn_implementation'] = 'flash_attention_2'
+#         if 'torch_dtype' not in kwargs:
+#             kwargs['torch_dtype'] = torch.bfloat16
+
+#         return kwargs
+
+
+class ModelBuilderBase:
+    @classmethod
+    def build_model(cls, **kwargs):
+        raise NotImplementedError
 class HFModelBuilder(ModelBuilderBase):
+    """FP16/BF16 (no quant) path."""
     SEND_TO_DEVICE = True
+
     @classmethod
     def build_model(cls, checkpoint, **kwargs):
         kwargs = cls._update_kwargs(checkpoint, kwargs)
         device = cls._get_device()
-        model = AutoModelForCausalLM.from_pretrained(checkpoint,
-                                                     **kwargs
-                                                     )
+        model = AutoModelForCausalLM.from_pretrained(checkpoint, **kwargs)
         if cls.SEND_TO_DEVICE:
             model = model.to(device)
         model.eval()
-        # model = model.to_bettertransformer()
         print('model is ready')
         return model, device
 
     @staticmethod
     def _get_device() -> torch.device:
-        if torch.cuda.is_available():
-            return torch.device('cuda')
-        else:
-            return torch.device('cpu')
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     @staticmethod
     def _update_kwargs(checkpoint, kwargs):
-        if 'attn_implementation' not in kwargs:
-            if 'starcoder' not in checkpoint:  # Quick fix for Flash-attention 2 and starcoder
-                kwargs['attn_implementation'] = 'flash_attention_2'
-        if 'torch_dtype' not in kwargs:
-            kwargs['torch_dtype'] = torch.bfloat16
-
+        # Use SDPA universally (stable with Granite); avoid flash_attn.
+        kwargs.setdefault('attn_implementation', 'sdpa')
+        # Transformers warns that torch_dtype is deprecated; prefer dtype.
+        # Keep backward compatibility if downstream still passes torch_dtype.
+        if 'dtype' not in kwargs and 'torch_dtype' not in kwargs:
+            kwargs['dtype'] = torch.bfloat16
         return kwargs
-
+        
 
 class HFModelBuilder4bit(HFModelBuilder):
     SEND_TO_DEVICE = False
