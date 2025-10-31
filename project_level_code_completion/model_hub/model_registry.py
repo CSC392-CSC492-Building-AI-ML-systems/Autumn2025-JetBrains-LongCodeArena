@@ -33,4 +33,10 @@ MODEL_REGISTRY = {
 
     'deepseek-coder-1b': ModelMetainfo(builder=HFModelBuilder, checkpoint="deepseek-ai/deepseek-coder-1.3b-base"),
     'deepseek-coder-7b': ModelMetainfo(builder=HFModelBuilder, checkpoint="deepseek-ai/deepseek-coder-6.7b-base"),
+    
+    'codeqwen1.5-7b': ModelMetainfo(builder=HFModelBuilder, checkpoint="Qwen/CodeQwen1.5-7B"),
+    'codeqwen1.5-7b-4bit': ModelMetainfo(builder=HFModelBuilder4bit, checkpoint="Qwen/CodeQwen1.5-7B"),
+    
+    'olympiccoder-7b': ModelMetainfo(builder=HFModelBuilder, checkpoint="open-r1/OlympicCoder-7B"),
+    'olympiccoder-7b-4bit': ModelMetainfo(builder=HFModelBuilder4bit, checkpoint="open-r1/OlympicCoder-7B"),
 }
