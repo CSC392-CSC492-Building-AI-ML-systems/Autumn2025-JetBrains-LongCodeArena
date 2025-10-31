@@ -15,17 +15,21 @@ class TogetherModel(ExampleGenerationModel):
         self.n_selections = n_selections
 
     def generate(self, task_description: str, project_apis: list[str] = None) -> str:
-        instruction = (
-            self.get_prompt(task_description)
-            if not self.use_bm25
-            else self.get_bm25_prompt(task_description, project_apis, n_selections=self.n_selections)
-        )
-
-        extra_context = [f"Project element: {elem}\nDocstring: {str(inspect.getdoc(elem))}\n" for elem in project_apis]  # getdoc returns None if it fails
+                
+        if not self.use_bm25:
+            instruction = self.get_prompt(task_description)
         
-        prompt = [
-            {"role": "user", "content": instruction + "\nHere is a list of docstrings for each project element:\n" + '\n'.join(extra_context)},
-        ]
+            prompt = [
+                {"role": "user", "content": instruction}
+            ]
+            
+        else:
+            instruction, recommended = self.get_bm25_prompt(task_description, project_apis, n_selections=self.n_selections)
+            extra_context = [f"{elem}: {str(inspect.signature(elem) if callable(elem) else 'None') }\n" for elem in recommended]
+            
+            prompt = [
+                {"role": "user", "content": instruction + "\nHere is a list of function headers for each project element:\n" + '\n'.join(extra_context)},
+            ]
 
         response = self.client.chat.completions.create(
             model=self.model_name,

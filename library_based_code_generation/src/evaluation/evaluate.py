@@ -87,8 +87,6 @@ def evaluate_together(model_name, use_bm25=False, n_selections=0):
 
 
 if __name__ == "__main__":
-    # evaluate_openai("gpt-3.5-turbo-0125")
-    # evaluate_openai("gpt-4-0125-preview")
     # evaluate_together("codellama/CodeLlama-7b-Instruct-hf")
     # evaluate_together("codellama/CodeLlama-70b-Instruct-hf")
     # evaluate_together("mistralai/Mistral-7B-Instruct-v0.3")
@@ -100,6 +98,21 @@ if __name__ == "__main__":
     # evaluate_together("mistralai/Mistral-7B-Instruct-v0.3", use_bm25=True)
     # evaluate_together("mistralai/Mixtral-8x7B-Instruct-v0.1", use_bm25=True)
     
-    # evaluate_openai("gpt-4.1-2025-04-14", use_bm25=True)
+    
 
-    pass
+    openai_models = ["gpt-3.5-turbo-0125", "gpt-4-0125-preview", "gpt-4.1-2025-04-14"]
+    
+    n_selections = [0, 20, 50, 200]
+    
+    
+    for model in openai_models:
+        
+        for n in n_selections:
+            if n_selections == 0:
+                evaluate_openai(model, False)
+                
+            else:
+                evaluate_openai(model, True, n)
+    
+    
+    # python -m Autumn2025-JetBrains-LongCodeArena.library_based_code_generation.src.evaluation.evaluate

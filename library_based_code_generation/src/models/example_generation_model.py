@@ -39,4 +39,4 @@ class ExampleGenerationModel(ABC):
             + "You can find the following APIs from the library helpful:\n"
             + ", ".join(predictions)
         )
-        return self.get_prompt(bm25_instruction)
+        return self.get_prompt(bm25_instruction), predictions
