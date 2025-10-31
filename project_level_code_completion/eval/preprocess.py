@@ -7,6 +7,7 @@ from composers.composer_registry import COMPOSERS
 PREPROCESSORS = {
     'starcoder': {'module': 'eval.preprocessors', 'name': 'StarcoderPreprocessor'},
     'huggingface': {'module': 'eval.preprocessors', 'name': 'HFPreprocessor'},
+    'openai_text': {'module': 'eval.preprocessors', 'name': 'TextOnlyPreprocessor'},
 }
 
 
