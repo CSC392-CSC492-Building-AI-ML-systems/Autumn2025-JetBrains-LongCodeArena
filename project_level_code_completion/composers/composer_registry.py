@@ -2,7 +2,7 @@ COMPOSERS = {
     'none': None,
     # 'naive': {'module': 'composers.naive_composer', 'name': 'NaiveComposer'},
     # 'alphabetical': {'module': 'composers.alphabetical_composer', 'name': 'AlphabeticalComposer'},
-    'path_distance': {'module': 'composers.path_distance_composer', 'name': 'PathDistanceComposer'},
+    # 'path_distance': {'module': 'composers.path_distance_composer', 'name': 'PathDistanceComposer'},
     # 'file_length': {'module': 'composers.file_length_composer', 'name': 'FileLengthComposer'},
     # 'half_memory': {'module': 'composers.half_memory_composer', 'name': 'HalfMemoryComposer'},
     # 'half_memory_path_distance':
