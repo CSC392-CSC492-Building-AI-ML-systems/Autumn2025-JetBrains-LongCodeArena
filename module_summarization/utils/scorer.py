@@ -40,7 +40,7 @@ class OptionsScoringModel:
         for opt in options:
             tok_ids = self.tokenizer.encode(opt)
             assert len(tok_ids) == 1, 'Only single token options are supported'
-            logit_bias[tok_ids[0]] = 100 
+            logit_bias[tok_ids[0]] = 100
         
         completion = self.model.chat.completions.create(
             model=self.model_name,
@@ -77,7 +77,7 @@ class OptionsScoringModel:
         for opt in options:
             tok_ids = self.tokenizer.encode(opt)
             assert len(tok_ids) == 1, 'Only single token options are supported'
-            logit_bias[str(tok_ids[0])] = 100 
+            logit_bias[str(tok_ids[0])] = 100
         
         completion = self.model.chat.completions.create(
             model=self.model_name,
@@ -88,8 +88,7 @@ class OptionsScoringModel:
             max_tokens=1,
             temperature=0.3,
             n=1,
-            logprobs=True,
-            top_logprobs=20,
+            logprobs=1,
             logit_bias=logit_bias
         )
 
@@ -98,10 +97,12 @@ class OptionsScoringModel:
         opt_to_idx = {t: n for n, t in enumerate(options)}
         min_lp = 0
         
-        for tok, lp in choice.logprobs.top_logprobs[0].items():
-            min_lp = min(min_lp, lp)
-            if tok in opt_to_idx:
-                logprobs[opt_to_idx[tok]] = lp
+        if choice.logprobs and choice.logprobs.top_logprobs:
+            for token_dict in choice.logprobs.top_logprobs:
+                for tok, lp in token_dict.items():
+                    min_lp = min(min_lp, lp)
+                    if tok in opt_to_idx:
+                        logprobs[opt_to_idx[tok]] = lp
         
         logprobs[np.isnan(logprobs)] = min_lp - 2.3
         assert not np.isnan(logprobs).any()
