@@ -88,7 +88,7 @@ class OptionsScoringModel:
             max_tokens=1,
             temperature=0.3,
             n=1,
-            logprobs=1,
+            logprobs=20,
             logit_bias=logit_bias
         )
 
