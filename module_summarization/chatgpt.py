@@ -56,7 +56,7 @@ def generate_all(config, client):
         code_context = prepare_code_context(row, max_context_toks, tokenizer)
         generate_res = generate_one(row, code_context, client, model_name)
 
-        with open(f"{save_dir}/{row_idx}.txt", 'w') as f:
+        with open(f"{save_dir}/{row_idx}.txt", 'w', encoding='utf-8') as f:
             f.write(generate_res)
 
 

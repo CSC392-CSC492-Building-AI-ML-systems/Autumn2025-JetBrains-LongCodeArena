@@ -39,7 +39,7 @@ def score_one_model(scorer, dataset, direct, max_cont_len, tokenizer, use_pbar=F
     golds, preds, intents, codes = [], [], [], []
     
     for idx in range(len(dataset)):
-        with open(f"{direct}/{idx}.txt", 'r') as f:
+        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8') as f:
             pred = f.read()
         gld = dataset[idx]['target_text']
         golds.append(gld)
@@ -96,7 +96,6 @@ if __name__ == '__main__':
     hf_api_key = config.get("hf_api_key")
     api_key = config.get("api_key")
     model_name = config.get("model_name")
-    device = config.get("device")
     hf_tokenizer_checkpoint = config.get("hf_tokenizer_checkpoint")
     max_context_toks = config.get("max_context_toks", None)
     
@@ -104,7 +103,7 @@ if __name__ == '__main__':
                                               token=hf_api_key)
     
 
-    scorer = OptionsScoringModel(model_name, device)
+    scorer = OptionsScoringModel(model_name)
     dataset = load_dataset("JetBrains-Research/lca-module-summarization",
                                token=hf_api_key)['test']
     
@@ -117,6 +116,10 @@ if __name__ == '__main__':
             if '_eval' not in file_path:
                 config = load_config(file_path)
                 save_dir = config.get("save_dir")
+                
+                if not os.path.exists(save_dir):
+                    print(f'Skipping {save_dir} - directory does not exist')
+                    continue
                 
                 model_metric = np.mean(
                     score_one_model(
