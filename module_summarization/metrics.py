@@ -9,6 +9,7 @@ from utils.context_utils import collect_good_context, trim_context
 from utils.files_utils import load_config
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from utils.scorer import OptionsScoringModel
+from bert_score import score as bert_score
 
 
 def get_metric(scorer, intent, code_context, gold_doc, pred_doc):
@@ -81,6 +82,29 @@ def score_gold(scorer, dataset, max_cont_len, tokenizer, use_pbar=False):
     return metrics
 
 
+def get_bert_scores(dataset, direct, model_name):
+    golds, preds = [], []
+
+    for idx in range(len(dataset)):
+        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8') as f:
+            pred = f.read()
+        gld = dataset[idx]['target_text']
+        golds.append(gld)
+        preds.append(pred)
+        
+    scores = []
+    for idx in range(len(dataset)):
+        m = solo_bert_score(pred[idx], golds[idx], model_name)
+        scores.append(m)
+    
+    return scores
+    
+
+def solo_bert_score(pred, gold, model_name):
+    P, R, F1 = bert_score([pred], [gold], lang="en", model_type=model_name)
+    return float(F1[0])
+ 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Script with YAML config and command line arguments."
@@ -128,8 +152,11 @@ if __name__ == '__main__':
                     )
                 )
                 
-                print(f'Metric for {save_dir} = {model_metric}')
-                path2metric[save_dir] = model_metric
+                mean_bert_score = np.mean(
+                    get_bert_scores(dataset, save_dir, model_name)
+                )
+                
+                path2metric[save_dir] = {"model_score": model_metric, "bert_score": mean_bert_score}
 
     with open('result_gold.json', 'w') as f:
         json.dump(path2metric, f)
