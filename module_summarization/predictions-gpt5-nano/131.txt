@@ -1,0 +1,101 @@
+Verification Scheme for FITS Data
+=================================
+
+Overview
+--------
+This document describes the verification scheme used to check FITS data for correctness and consistency. The scheme is implemented around a small, extensible verification engine that collects errors, reports them in a structured way, optionally fixes fixable issues, and controls output through a set of options.
+
+Key concepts
+------------
+- VerifyError / VerifyWarning: exception and warning types raised by the verifier.
+- _ErrList: a nested list structure that holds verification messages organized by hierarchical levels.
+- _Verify: the core verification engine responsible for running checks, applying fix logic, and formatting output.
+- VERIFY_OPTIONS: the allowed strings that control verification behavior.
+
+What the verifier does
+----------------------
+- Collects verification errors via a _verify method implemented by a concrete verifier.
+- Formats errors into a nested, hierarchical structure (_ErrList) and optional per-item information.
+- Produces output according to the chosen option, which can:
+  - ignore: perform no action
+  - warn: emit warnings for issues
+  - exception: raise a VerifyError for issues
+  - fix: attempt to fix fixable issues and report the outcome
+  - silentfix: fixable issues are fixed without reporting
+  - combinations with +ignore, +warn, or +exception to control reporting behavior alongside fixing
+
+Detailed behavior
+-----------------
+- run_option(self, option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+  - If option is "warn" or "exception": the issue is not fixable (fixable becomes False).
+  - If not fixable and no fix is provided: result text is prefixed with "Unfixable error:".
+  - If a fix is provided and the issue is fixable: the fix is executed and "Fixed." is appended to the message.
+  - Returns a tuple (fixable, text).
+
+- verify(self, option="warn")
+  - Validates the option against VERIFY_OPTIONS.
+  - If option is "ignore": does nothing.
+  - Delegates to self._verify(option) to collect problems as an _ErrList.
+  - If the option contains "+", splits into fix_opt and report_opt; otherwise uses defaults:
+    - "fix" or "silentfix" imply report_opt is "exception" so unfixable errors raise unless fixed.
+    - Other options set fix_opt=None and report_opt to the given option.
+  - Special-case: silentfix with report ignore yields no output.
+  - Builds a line_filter to control which messages are included in the report, depending on fix_opt and report_opt.
+  - Iterates errs via iter_lines(filter=line_filter) and accumulates messages.
+  - If there are messages:
+    - Prepend "Verification reported errors:" and append a note about zero-based indexing.
+    - If silentfix and there are no unfixable errors, return without reporting.
+    - If reporting should warn, emit warnings for each line.
+    - Otherwise, raise VerifyError with the full message block.
+
+- _ErrList
+  - A list subclass that represents nested verification messages.
+  - unit attribute provides a header for the next level in the hierarchy.
+  - iter_lines(filter=None, shift=0) yields tuples of (fixed_flag, line) in a hierarchical, indented form.
+  - __str__ prints the joined lines for easy display.
+
+Usage pattern
+-------------
+- Implement a concrete verifier by subclassing _Verify and providing a _verify(self, option) method, which returns an _ErrList populated with verification messages.
+- Each message in the _ErrList is a pair (fixable, message), where fixable indicates whether the issue can be fixed.
+- Call verifier.verify(option) to process and report results according to the desired behavior.
+
+Example
+-------
+.. code-block:: python
+
+   from your_module_verification import _Verify, _ErrList, VerifyWarning, VerifyError
+
+   class MyFITSVerifier(_Verify):
+       def _verify(self, option):
+           errs = _ErrList(unit="Dataset")
+           # Example: add a non-fatal, fixable issue
+           errs.append((True, ("Value out of range", "Expected 0-100, got 150")))
+           # Example: add an unfixable issue
+           errs.append((False, ("Missing required keyword", "DATE-OBS not found")))
+           return errs
+
+   v = MyFITSVerifier()
+   v.verify("fix+warn")
+
+Notes on output
+---------------
+- The verifier prefixes error blocks with "Verification reported errors:" and ends with a note about zero-based indexing used by astropy.io.fits.
+- The behavior of fix and reporting is controlled by the chosen option, including support for silent fixes and combinations like fix+ignore or fix+warn.
+
+API reference
+-------------
+- VerifyError: exception raised when verification fails under non-warning mode.
+- VerifyWarning: warning type raised during verification.
+- VERIFY_OPTIONS: [
+  "ignore", "warn", "exception", "fix", "silentfix",
+  "fix+ignore", "fix+warn", "fix+exception",
+  "silentfix+ignore", "silentfix+warn", "silentfix+exception",
+]
+- _Verify.run_option(option, err_text, fix_text, fix, fixable): evaluate a single verification item and return (fixable, text).
+- _Verify.verify(option): run all verifications with the given option and report or fix accordingly.
+- _ErrList: nested error list with iter_lines(filter=None, shift=0) for structured reporting.
+
+License and compatibility
+-------------------------
+The verification scheme is designed to integrate with the FITS data verification workflow as used in the project. It relies on standard Python and numpy, along with astropy utilities for indentation in output messages.

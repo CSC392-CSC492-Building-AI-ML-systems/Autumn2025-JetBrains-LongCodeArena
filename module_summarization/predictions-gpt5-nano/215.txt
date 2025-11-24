@@ -1,0 +1,91 @@
+An asynchronous producer/consumer pattern for coroutines (Queues)
+====================================================================
+
+Overview
+--------
+
+The tornado.queues module provides asynchronous queue classes used to coordinate multiple producers and consumers of work within Tornado coroutines. The behavior is similar to Python’s asyncio.Queue but is tailored for Tornado and is not thread-safe. To use these queues from another thread, transfer control to the IOLoop thread with IOLoop.add_callback before calling any queue methods.
+
+Key concepts
+------------
+
+- Max size: A queue with maxsize=0 is unbounded. A positive maxsize limits the number of items in the queue.
+- Async producers/consumers: Producers can put items into the queue and await until a slot is available; consumers can get items as they become available.
+- Async iteration: The queue supports async for iteration, enabling idioms like “for item in queue” in coroutines.
+- Task tracking: task_done() must be called when a consumer finishes processing an item; join() blocks until all items have been processed.
+- Timeouts: put() and get() can accept a timeout to raise a TimeoutError if the operation doesn’t complete in time.
+- Variants: In addition to Queue, there are PriorityQueue and LifoQueue variants.
+
+Queue API
+---------
+
+- Queue(maxsize=0)
+  - Creates a queue with the given maximum size.
+- put(item, timeout=None) -> Future[None]
+  - Put an item into the queue, awaiting until there is room if necessary.
+  - Returns a Future that resolves when the item is enqueued or raises a TimeoutError on timeout.
+- put_nowait(item) -> None
+  - Put an item into the queue without blocking.
+  - Raises QueueFull if there is no available slot.
+- get(timeout=None) -> Awaitable[_T]
+  - Remove and return an item from the queue, awaiting if needed.
+  - Returns an awaitable that resolves to the item, or raises a TimeoutError on timeout.
+- qsize() -> int
+  - Number of items in the queue.
+- empty() -> bool
+  - True if the queue is empty.
+- full() -> bool
+  - True if the queue is full (only relevant when maxsize > 0).
+- maxsize -> int
+  - The maximum size of the queue (0 means unlimited).
+- async for item in queue
+  - Iterate over the queue asynchronously as items become available.
+- task_done() and join()
+  - Call task_done() when a consumer finishes processing an item.
+  - join() blocks until all items have been processed (i.e., the count of unfinished tasks reaches zero).
+- Exceptions
+  - QueueFull: Raised by put_nowait when the queue is full.
+  - QueueEmpty: Raised by get_nowait (if implemented) or used to signal an empty queue situation in certain code paths.
+
+Notes
+-----
+
+- Not thread-safe: Do not access these queues from multiple threads without marshaling to the IOLoop thread (e.g., via IOLoop.add_callback).
+- The implementation supports a lightweight producer/consumer pattern using coroutines, with optional timeouts on operations.
+- Versions: versionchanged:: 4.3 Added async for support in Python 3.5.
+
+Example
+-------
+
+A simple producer/consumer using a queue (requires Python 3.5+ for async for support):
+
+.. code-block:: python
+
+   import asyncio
+   from tornado.ioloop import IOLoop
+   from tornado.queues import Queue
+
+   q = Queue(maxsize=2)
+
+   async def consumer():
+       async for item in q:
+           try:
+               print('Doing work on %s' % item)
+               await asyncio.sleep(0.01)
+           finally:
+               q.task_done()
+
+   async def producer():
+       for item in range(5):
+           await q.put(item)
+           print('Put %s' % item)
+
+   async def main():
+       IOLoop.current().spawn_callback(consumer)
+       await producer()     # Wait for producer to put all tasks
+       await q.join()       # Wait for consumer(s) to finish all tasks
+       print('Done')
+
+   asyncio.run(main())
+
+For more advanced usage, see PriorityQueue and LifoQueue for different ordering guarantees.

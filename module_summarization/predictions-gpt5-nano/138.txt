@@ -1,0 +1,84 @@
+Array Best Practices
+====================
+
+Overview
+--------
+This document summarizes practical patterns used in dask.array for backend dispatch and
+masked-array integrations. It highlights how dispatch registries enable backend-specific
+implementations and how numpy.ma-based operations are implemented in a lazy, chunked
+fashion to preserve performance and scalability.
+
+Dispatch and backends
+---------------------
+- Use a dedicated Dispatch registry for each operation to enable backend-specific
+  implementations. Examples include concatenate, tensordot, einsum, empty, divide,
+  percentile, numel, nannumel, and dispatchers for numpy/cupy backends.
+- Create per-operation lookup objects (e.g., concatenate_lookup, tensordot_lookup, etc.)
+  to route to the appropriate backend at runtime.
+- Extend backends by registering new implementations with the existing Dispatch objects,
+  allowing seamless switching between backends (NumPy, CuPy, etc.) without changing user
+  code.
+- Keep the public API stable by using derived_from and token normalization to preserve
+  signatures and behavior across backends.
+
+Masked arrays and numpy.ma integration
+--------------------------------------
+- Integrate numpy.ma masked arrays with dask.array by normalizing tokens for masked arrays.
+  This ensures consistent token representation for caching, hashing, and graph
+  reuse across blocks.
+- Provide masked-array wrappers that operate blockwise on chunks, preserving dtype and
+  chunk structure. The typical pattern uses asanyarray to accept either numpy arrays or
+  dask arrays, and then applies the operation via map_blocks or blockwise.
+- Use a common wrapper (_wrap_masked) to implement several masked operations
+  (e.g., masked_greater, masked_greater_equal, masked_less, masked_less_equal,
+  masked_not_equal) in a consistent, lazy fashion. This wrapper aligns input and value
+  axes, computes the output axes, and delegates to blockwise with the appropriate dtype.
+- Expose a broader set of masked operations to match numpy.ma functionality, including:
+  masked_equal, masked_invalid, masked_inside, masked_outside, masked_where,
+  masked_values, fix_invalid, getdata, and getmaskarray.
+- Maintain API surface via derived_from to preserve external docstrings and expectations.
+
+Common patterns and best practices
+-----------------------------
+- Normalize inputs with normalize_token for masked arrays to ensure consistent caching
+  and token handling across blocks.
+- Use asanyarray to accept both standard and masked numpy arrays as inputs.
+- Favor blockwise for elementwise and axis-aligned operations that require broadcasting
+  adjustments across inputs; prefer it for operations where input shapes must align.
+- Propagate dtypes explicitly (e.g., dtype=a.dtype) to avoid surprises when combining blocks.
+- Validate shapes and broadcasting rules where necessary (e.g., in masked_where, ensure
+  condition shape matches input shape to avoid ambiguous results).
+- For operations with array-valued inputs (e.g., masked_equal with an array value), raise
+  clear errors to avoid silent broadcast inconsistencies.
+- Use shrink parameter in masked_values to control result size and performance.
+- Rely on existing wrappers and utilities (blockwise, map_blocks, _nonzero, reduction) to
+  maintain consistent semantics and performance characteristics.
+
+Practical usage notes
+---------------------
+- To perform a masked comparison across blocks, prefer the dedicated wrappers
+  (e.g., masked_greater, masked_less_equal) that are built on top of the _wrap_masked
+  pattern for efficient, chunk-wise computation.
+- For conditional masking, use masked_where with proper shape checks to ensure inputs align
+  and to prevent misaligned broadcasting.
+- When integrating with custom backends, extend the relevant Dispatch registry rather than
+  reimplementing logic, ensuring consistent behavior across the ecosystem.
+
+Example patterns (high level)
+----------------------------
+- Define backend-specific behavior via a Dispatch registry:
+  concatenate_lookup = Dispatch("concatenate")
+  tensordot_lookup = Dispatch("tensordot")
+  einsum_lookup = Dispatch("einsum")
+
+- Implement masked-array operations using a shared wrapper:
+  _wrap_masked(f) -> returns a function that applies f via blockwise with proper axis
+  alignment and dtype handling, e.g., for masked_greater, masked_less, etc.
+
+- Normalize and expose masked operations with API consistency:
+  @normalize_token.register(np.ma.masked_array)
+  def normalize_masked_array(x): ...
+
+By following these practices, array code remains scalable, backend-agnostic, and
+consistent with NumPy’s masked-array semantics while taking advantage of Dask’s lazy,
+block-structured computation.

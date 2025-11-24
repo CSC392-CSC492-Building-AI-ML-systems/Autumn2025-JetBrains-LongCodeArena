@@ -1,0 +1,103 @@
+How Mitogen Works
+==================
+
+Overview
+--------
+
+Mitogen is a high-performance framework for Python that enables remote execution,
+parallelism, and inter-process communication across machines. A small bootstrap
+implementation is sent to every new slave context, after which a larger, feature
+rich runtime handles module loading, function invocation, logging, and routing
+through a brokered message-passing system.
+
+Bootstrap and messaging
+-----------------------
+
+The bootstrap code is intentionally kept small and is separate from non-essential
+code to reduce the initial size sent to slaves. The bootstrap implements the core
+wire protocol and routing infrastructure that the rest of the Mitogen package relies on.
+
+Wire protocol and message types
+------------------------------
+
+Mitogen uses a simple, numeric message protocol. The following message types are
+defined (each assigned a numeric code):
+
+- GET_MODULE = 100
+- CALL_FUNCTION = 101
+- FORWARD_LOG = 102
+- ADD_ROUTE = 103
+- DEL_ROUTE = 104
+- ALLOCATE_ID = 105
+- SHUTDOWN = 106
+- LOAD_MODULE = 107
+- FORWARD_MODULE = 108
+- DETACHING = 109
+- CALL_SERVICE = 110
+- STUB_CALL_SERVICE = 111
+
+Sentinel for disconnection or undeliverable routing
+---------------------------------------------------
+
+IS_DEAD = 999
+
+When the reply_to field contains this value, it signals disconnection or the
+inability to route a message. It commonly triggers a ChannelError or cleanup in
+routing logic.
+
+Data types, compatibility, and encoding
+---------------------------------------
+
+Mitogen’s bootstrap is designed to work across Python 2 and Python 3:
+
+- PY24 indicates Python 2.4-era compatibility checks.
+- PY3 indicates Python 3 compatibility; type aliases adapt to the Python version:
+
+  - b is the string/bytes constructor (vends to encode on Py3)
+  - BytesType, UnicodeType describe the concrete byte/string types
+  - FsPathTypes describes filesystem path types
+  - BufferType abstracts a buffer view for performance
+  - Long is Python 3’s int
+  - The code also defines a memoryview-based BufferType for efficient IO
+
+LATIN1_CODEC
+------------
+
+A Latin-1 codec instance is prepared for encoding/decoding operations that require
+direct, byte-oriented processing without the overhead of full Unicode handling.
+
+Logging and IO
+-------------
+
+- LOG = logging.getLogger('mitogen')
+- IOLOG = logging.getLogger('mitogen.io')
+- IOLOG is configured at an INFO level to capture IO-related events
+
+Bootstrap constraints and minification
+--------------------------------------
+
+The directive # !mitogen: minify_safe indicates a focus on safe, small bootstrap
+code that can be sent to new slave contexts without pulling in non-essential
+dependencies.
+
+Performance considerations
+--------------------------
+
+- The default buffer size for Side.read/Side.write and socketpair buffers is 128 KiB
+  to balance throughput and memory usage.
+- Large messages benefit from larger OS socket buffers up to a point, while
+  overly large buffers can waste RAM and increase latency if not matched to the
+  underlying transport.
+
+What this means in practice
+---------------------------
+
+- A master process communicates with one or more slaves via a brokered channel
+  and a Router that manages routing rules and handlers.
+- Modules may be loaded (LOAD_MODULE / FORWARD_MODULE) and functions executed
+  (CALL_FUNCTION) on remote slaves.
+- Logging and service calls can be forwarded (FORWARD_LOG, CALL_SERVICE) and
+  cleanups triggered (DETACHING, SHUTDOWN) as part of lifecycle management.
+- The system is designed to efficiently serialize/deserialize messages, minimize
+  bootstrap size, and provide robust handling of disconnections and routing
+  changes via the IS_DEAD sentinel.

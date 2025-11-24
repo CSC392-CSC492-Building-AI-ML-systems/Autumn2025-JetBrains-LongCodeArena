@@ -1,0 +1,155 @@
+Feature Extraction
+==================
+
+Overview
+--------
+This module provides utilities for building feature extractors from existing models by selecting intermediate graph nodes. It exposes a simple API to discover the graph nodes and to wrap a model so that it returns a dictionary of requested intermediate features.
+
+Public API
+----------
+- get_graph_node_names(model)
+  - Description: Return a list of graph node names for the given model. Node names correspond to the FX graph nodes that appear during a forward pass. This is useful to discover which intermediate outputs can be extracted.
+  - Example: node_names = get_graph_node_names(model)
+
+- create_feature_extractor(model, return_nodes)
+  - Description: Wrap an existing model with a feature extractor that returns selected intermediate tensors as a dictionary. return_nodes specifies which graph nodes to expose and what keys to use for the outputs.
+  - Arguments:
+    - model: The base torch.nn.Module to wrap.
+    - return_nodes: A mapping from graph node names to desired output keys. For example, {"layer1.0.relu": "feat1", "layer3.0": "feat2"} means the corresponding intermediate tensors will be returned under keys "feat1" and "feat2".
+  - Returns: An nn.Module that, when called, returns a dict of the requested feature maps, e.g., {"feat1": Tensor, "feat2": Tensor}.
+
+Internal helpers and classes
+----------------------------
+- LeafModuleAwareTracer
+  - An FX Tracer that allows a set of leaf modules to be specified. Such modules are not traced through; instead, their forward is recorded as single nodes.
+
+- NodePathTracer
+  - An FX tracer that records, for every operation, a node name describing the path to that operation. Node names are used to derive the graph-node-to-name mapping and to disambiguate repeated node names.
+
+- _warn_graph_differences(train_tracer, eval_tracer)
+  - Utility to warn if there are differences between train-time and eval-time traced graphs. Helps detect mismatches in node names when selecting outputs in different modes.
+
+Usage examples
+--------------
+
+Basic usage with a simple custom model
+--------------------------------------
+The following example demonstrates discovering graph node names and creating a feature extractor that returns a couple of intermediate features.
+
+.. code-block:: python
+
+    import torch
+    import torch.nn as nn
+    from torchvision.models.feature_extraction import get_graph_node_names, create_feature_extractor
+
+    class SimpleCNN(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv1 = nn.Conv2d(1, 4, 3)
+            self.relu = nn.ReLU()
+            self.conv2 = nn.Conv2d(4, 8, 3)
+            self.pool = nn.AdaptiveAvgPool2d((1, 1))
+            self.fc = nn.Linear(8, 2)
+
+        def forward(self, x):
+            x = self.conv1(x)
+            x = self.relu(x)
+            x = self.conv2(x)
+            x = self.pool(x)
+            x = x.view(x.size(0), -1)
+            x = self.fc(x)
+            return x
+
+    model = SimpleCNN()
+    # Discover graph node names for the model
+    node_names = get_graph_node_names(model)
+    print("Graph nodes:", node_names)
+
+    # Choose nodes to extract and map them to output keys
+    # (These keys should be chosen to be meaningful for downstream usage)
+    return_nodes = {
+        "conv1": "feat_conv1",
+        "conv2": "feat_conv2",
+        "fc": "logits"
+    }
+
+    feature_extractor = create_feature_extractor(model, return_nodes)
+
+    x = torch.randn(1, 1, 28, 28)
+    features = feature_extractor(x)
+    # features is a dict: {"feat_conv1": Tensor, "feat_conv2": Tensor, "logits": Tensor}
+    print({k: v.shape for k, v in features.items()})
+
+Using a pre-defined model
+------------------------
+You can wrap any model that is compatible with TorchScript-friendly tracing. Start by inspecting the graph nodes with get_graph_node_names, then select the desired nodes to extract using create_feature_extractor.
+
+.. code-block:: python
+
+    import torch
+    import torchvision
+    from torchvision.models.feature_extraction import get_graph_node_names, create_feature_extractor
+
+    # Example with a pretrained ResNet-18 (or any other model)
+    model = torchvision.models.resnet18(pretrained=False)
+    node_names = get_graph_node_names(model)
+    print("ResNet-18 graph nodes:", node_names)
+
+    # Extract features after the first conv layer and after a middle residual block
+    return_nodes = {
+        "conv1": "initial_conv",
+        "layer1.0.relu": "early_feature",
+        "layer4": "final_feature"
+    }
+
+    extractor = create_feature_extractor(model, return_nodes)
+
+    inp = torch.randn(1, 3, 224, 224)
+    out = extractor(inp)
+    print(list(out.keys()))
+    # e.g., ['initial_conv', 'early_feature', 'final_feature']
+
+Notes
+-----
+- The exact graph node names depend on the model architecture and the version of torchvision/FX used. Use get_graph_node_names to determine valid keys for return_nodes.
+- If train and eval graphs differ, _warn_graph_differences will emit a warning suggesting you may need mode-specific output selections.
+
+Example project snippet
+------------------------
+This section shows a self-contained example that can be pasted into a script to exercise the API end-to-end. It uses a tiny custom model to keep the example simple and deterministic.
+
+.. code-block:: python
+
+    import torch
+    import torch.nn as nn
+    from torchvision.models.feature_extraction import get_graph_node_names, create_feature_extractor
+
+    class TinyNet(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.features = nn.Sequential(
+                nn.Conv2d(1, 2, 3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(2, 4, 3, padding=1),
+                nn.ReLU(),
+            )
+            self.classifier = nn.Linear(4, 2)
+
+        def forward(self, x):
+            x = self.features(x)
+            x = torch.mean(x, dim=[2, 3])
+            x = self.classifier(x)
+            return x
+
+    m = TinyNet()
+    names = get_graph_node_names(m)
+    # Suppose we want outputs after the two ReLU layers
+    return_nodes = { "features.1": "relu1", "features.3": "relu2" }
+    extractor = create_feature_extractor(m, return_nodes)
+
+    x = torch.randn(1, 1, 28, 28)
+    out = extractor(x)
+    for k, v in out.items():
+        print(k, v.shape)
+
+This documentation page provides a concise reference and practical start for using the feature extraction utilities, including how to discover available graph nodes and how to obtain intermediate feature maps from a wrapped model.

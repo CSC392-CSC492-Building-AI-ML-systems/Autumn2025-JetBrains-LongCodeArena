@@ -1,0 +1,147 @@
+Connect to Remote Data
+======================
+
+Overview
+--------
+
+This section explains how to connect to and read data from remote or non-local storage
+using fsspec-backed filesystems and Dask. Data can be read in parallel as blocks,
+with optional header sampling and support for various delimiters and compression
+formats. The API is designed to handle single or multiple paths and can work with
+glob patterns or explicit path lists.
+
+API: read_bytes
+---------------
+
+The primary API for connecting to remote data is read_bytes. It returns a header sample
+and a collection of delayed blocks that can be computed to yield bytes from the remote
+files. The path may be a single file, a glob pattern, or a list of paths. Remote files
+systems can be specified using a protocol like s3://, hdfs://, or via a local path.
+
+Parameters
+----------
+
+- urlpath: string or list
+  Absolute or relative filepath(s). Prefix with a protocol like s3:// to read from
+  alternative filesystems. To read from multiple files you can pass a globstring
+  or a list of paths; all paths should have the same protocol.
+
+- delimiter: bytes
+  An optional delimiter on which to split blocks. Blocks begin after a delimiter
+  and end on the delimiter.
+
+- not_zero: bool
+  If True, force seeking of the start-of-file delimiter, discarding the header.
+
+- blocksize: int or str
+  Chunk size in bytes. Defaults to "128 MiB". If set to None, reads are non-chunked.
+
+- sample: int, str, or bool
+  Whether to return a header sample. False means no sample. An integer or string
+  value like 2**20 or "1 MiB" specifies the size of the sample to read. If True,
+  a default of 10 KiB is used for backwards compatibility.
+
+- compression: string or None
+  Compression type (e.g., 'gzip', 'xz'). Must support efficient random access.
+  If set to "infer", the compression is inferred from the file extension.
+
+- include_path: bool
+  Include the path with the bytes representing a particular file. Default is False.
+
+- kwargs: dict
+  Extra options that apply to the storage connection (e.g., host, port, username,
+  password, etc.).
+
+Return values
+-------------
+
+- sample: bytes
+  The sample header read from the first file (or first non-empty portion if a
+  delimiter is specified).
+
+- blocks: list of lists of dask.delayed
+  Each inner list corresponds to a file, and each delayed object computes to a
+  block of bytes from that file.
+
+- paths: list of strings (only if include_path is True)
+  List of the same length as blocks, where each item is the path to the file
+  represented in the corresponding block.
+
+Behavior notes
+--------------
+
+- The function validates input types and resolves the filesystem, token, and paths
+  using fsspec (get_fs_token_paths).
+
+- If blocksize is provided, it is converted to an integer number of bytes. If blocksize
+  is None, entire files are read as single blocks.
+
+- For chunked reads, the code computes offsets and lengths for each file. If compression
+  is set (not None) and a chunked read is requested, a ValueError is raised since
+  chunked reads on compressed files are not supported.
+
+- When blocksize is None, offsets and lengths indicate a single, full-file read per path.
+
+- Sampling reads the first file to obtain the header or sample block. If delimiter is given,
+  sampling respects the delimiter to capture a representative sample.
+
+- If include_path is True, the returned sample and blocks are accompanied by the corresponding
+  file paths.
+
+- Example: compressed files require blocksize=None for non-seekable reads; otherwise,
+  the function cannot determine random access.
+
+Examples
+--------
+
+- Read a sample and blocks from a set of CSV files using a delimiter:
+
+  .. code-block:: python
+
+     sample, blocks = read_bytes('2015-*-*.csv', delimiter=b'\n')  # doctest: +SKIP
+
+- Read from a remote filesystem (e.g., S3) with a delimiter:
+
+  .. code-block:: python
+
+     sample, blocks = read_bytes('s3://bucket/2015-*-*.csv', delimiter=b'\n')  # doctest: +SKIP
+
+- Read a single file pattern and include the file paths in the result:
+
+  .. code-block:: python
+
+     sample, paths, blocks = read_bytes('2015-*-*.csv', include_path=True)  # doctest: +SKIP
+
+Notes
+-----
+
+- To read a compressed file in a chunked fashion, set blocksize=None. Chunked reads are not
+  supported for compressed files because random access within compressed streams is not
+  generally possible.
+
+- If you need to reference remote files with different protocols, ensure each call to read_bytes
+  uses paths sharing the same protocol.
+
+- The implementation uses Dask delayed objects to enable parallel computation of blocks,
+  and uses tokenize to generate deterministic keys for each block.
+
+See Also
+--------
+
+- fsspec.OpenFile
+- fsspec.get_fs_token_paths
+- dask.delayed
+- dask.base.tokenize
+- fsspec.utils.infer_compression
+- fsspec.utils.read_block
+- read_block_from_file (internal helper)
+
+Internal helpers (for reference)
+-------------------------------
+
+- read_block_from_file(lazy_file, off, bs, delimiter)
+  Reads a block from a lazy file-like object at a given offset and size, respecting a delimiter
+  if provided.
+
+- zip_compress(data)
+  Utility function example for compressing data into a zip archive (shown for completeness).

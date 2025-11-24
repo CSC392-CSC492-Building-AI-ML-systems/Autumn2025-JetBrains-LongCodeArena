@@ -1,0 +1,79 @@
+Overview
+This module provides SQLite-specific type adapters and converters to align SQLite behavior with other backends (e.g., Postgres), and an asynchronous batch reader (AsyncBatch) that integrates with Piccolo’s batching and Query system to fetch results in chunks using asyncio and aiosqlite.
+
+Key components
+- Type adapters (to_sqlite) and converters (from_sqlite)
+  - convert_numeric_in / convert_numeric_out
+  - convert_uuid_in / convert_uuid_out
+  - convert_time_in / convert_time_out
+  - convert_date_in / convert_date_out
+  - convert_datetime_in / convert_timestamp_out / convert_timestamptz_out
+  - convert_timedelta_in / convert_seconds_out
+  - convert_array_in / convert_array_out
+  - convert_M2M_out
+- sqlite3 registration
+  - sqlite3.register_converter(...) calls mapping database types to Python types
+  - sqlite3.register_adapter(...) calls mapping Python types to database types
+- AsyncBatch
+  - A subclass of Piccolo’s Batch that streams results asynchronously using an active aiosqlite connection
+  - Works with async for / await syntax
+  - Manages a Cursor and connection lifecycle via async context manager
+
+Adapters and converters
+- Purpose: ensure SQLite returns/accepts Python types that resemble those used by other backends.
+- Core functions:
+  - convert_numeric_in(value): Decimals -> float for storage
+  - convert_uuid_in(value) / convert_uuid_out(value): UUID <-> string
+  - convert_time_in(value) / convert_time_out(value): Time <-> ISO string
+  - convert_date_in(value) / convert_date_out(value): Date <-> ISO string
+  - convert_datetime_in(value) / convert_timestamp_out / convert_timestamptz_out: Datetime (with optional UTC handling) <-> string
+  - convert_timedelta_in(value) / convert_seconds_out: Timedelta <-> seconds
+  - convert_array_in(value) / convert_array_out(value): JSON-serialized arrays
+  - convert_M2M_out(value): M2M values as comma-separated strings
+- Registration (examples from code):
+  - sqlite3.register_converter("Date", convert_date_out)
+  - sqlite3.register_adapter(datetime.date, convert_date_in)
+  - sqlite3.register_converter("Array", convert_array_out)
+  - sqlite3.register_adapter(list, convert_array_in)
+
+AsyncBatch: usage and API
+- Purpose: asynchronously fetch results in batches from a Piccolo Query using aiosqlite.
+- Core fields:
+  - connection: the aiosqlite Connection
+  - query: a Piccolo Query object
+  - batch_size: number of rows per fetch
+  - _cursor: internal Cursor (optional until enter)
+- API:
+  - cursor property: returns the underlying Cursor or raises if not yet set
+  - next(): fetches the next batch and processes results via the query
+  - __aiter__(): enables async for iteration
+  - __anext__(): yields the next batch or stops
+  - __aenter__(): opens the cursor and prepares the query for execution
+  - __aexit__(): closes the cursor and the connection
+- Usage pattern (example):
+  - async with AsyncBatch(connection=conn, query=query, batch_size=100) as batch:
+      async for page in batch:
+          process(page)
+
+Transaction type
+- TransactionType: an enum intended to represent transaction modes for SQLite (details are truncated in the source, but it is defined as an enum in the module).
+- Note: Use this as part of any higher-level transaction control you implement around SQLite if your workflow requires explicit transaction modes.
+
+Example usage (minimal)
+- Acquire an aiosqlite connection (example):
+  - conn = await aiosqlite.connect("database.sqlite3")
+- Build a Piccolo query (example; your actual query will depend on your ORM model setup):
+  - query = MyTable.select(MyTable.id, MyTable.name).where(MyTable.is_active == True)
+- Read results asynchronously in batches:
+  - async with AsyncBatch(connection=conn, query=query, batch_size=100) as batch:
+      async for rows in batch:
+          handle(rows)
+
+See also
+- sqlite3 documentation for converters and adapters
+- aiosqlite for asynchronous SQLite connections
+- Piccolo ORM query and batch interfaces
+
+Notes
+- The module heavily relies on type adapters/converters to emulate Postgres-like behavior in SQLite.
+- AsyncBatch is designed to work within Piccolo’s Query system and requires an aiosqlite connection.

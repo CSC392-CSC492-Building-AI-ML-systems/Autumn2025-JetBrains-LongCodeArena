@@ -1,0 +1,46 @@
+Short overview of Dask best practices
+======================================
+
+Dask provides a parallel, out-of-core execution model with a pandas-like API for DataFrame workloads. The key is to express work as lazy operations on distributed data, and to trigger computation only when results are needed. The following best practices help maximize correctness, performance, and scalability.
+
+Lazy execution and computation
+- Build a task graph by chaining operations, then call compute(), persist(), or to_parquet/etc. only when you need the result.
+- Use persist() to keep frequently reused results in memory across workers; this avoids recomputing shared results.
+
+Partitions and data layout
+- Keep partitions at a reasonable size to balance parallelism and overhead. Too many tiny partitions or a few oversized ones can degrade performance.
+- Repartition if needed to adjust partition sizes or to coarsen/fine-grain work:
+  - dd.repartition or map_partitions-based transforms can help tune parallelism.
+
+I/O and metadata
+- When reading data, supply sensible block sizes and know how many partitions your workload benefits from.
+- Dask uses meta information (metadata) to construct empty outputs efficiently. If you implement custom operations, provide appropriate meta where possible to avoid unnecessary computation.
+- When combining datasets with different dtypes or categories, rely on the built-in behavior (e.g., concatenation and union dispatch) to preserve consistency. For categoricals, you can control behavior such as sorting and ignoring category order during unions.
+
+Concatenation and unions
+- Use dd.concat to join datasets; it handles edge cases such as:
+  - Unions of categoricals across partitions
+  - Ignoring empty partitions
+- When needed, use parameters like ignore_index to control index handling across partitions.
+- For categoricals with strict category alignment, you can specify sort_categories and ignore_order to control how categories are merged.
+
+Indexing and selection
+- DD supports iloc-like and loc-like indexing, but always consider the distributed nature of data. Avoid excessive per-partition Python-level logic in hot paths; prefer vectorized operations and map_partitions where appropriate.
+
+Performance tips
+- Favor vectorized operations over Python loops. Use map_partitions for custom per-partition logic, but minimize per-row Python overhead.
+- Use the distributed scheduler for large workloads and monitor with the dashboard to identify bottlenecks.
+- Minimize data movement: drop unused columns early, and filter data before heavy transformations when possible.
+- When chaining multiple heavy operations, consider computing in stages and persisting intermediate results to avoid recomputation.
+
+Debugging, testing, and reliability
+- Test with small samples (e.g., using .head() or small compute) to validate behavior and dtypes.
+- Use meta information to validate shapes/dtypes of intermediate results and catch mismatches early.
+- Visualize task graphs with .visualize() during development to diagnose performance hotspots.
+
+Example usage snippets
+- Basic concatenation with safe index handling:
+  - df = dd.concat([df1, df2], ignore_index=True)
+- Reading and processing with awareness of partitions:
+  - df = dd.read_csv("data-*.csv", blocksize="64MB")
+  - result = df.groupby("key").agg({"value": "sum"}).compute()

@@ -1,0 +1,174 @@
+Managers
+========
+
+Overview
+--------
+
+This module provides a lightweight set of classes to manage JSON-RPC-like requests against a provider, plus a mixin to assist with sending signed Ethereum transactions. It includes a blocking request interface, an asynchronous wrapper, and a mixin that helps construct and send raw transactions with nonce management.
+
+Classes
+-------
+
+RequestManager
+--------------
+
+Purpose
+  - A small request manager that delegates to a provider for JSON-RPC style calls. It supports both blocking and asynchronous request patterns and normalizes responses.
+
+Initialization
+  - __init__(provider): stores the provider and initializes an empty pending_requests map.
+
+Public API
+  - setProvider(provider)
+    - Replace the current provider with a new one.
+
+  - request_blocking(method, params)
+    - Performs a synchronous request via the provider.
+    - Normalizes the provider response:
+      - If the raw response is a string, it is parsed as JSON after forcing text.
+      - If the raw response is already an object, it is used as-is.
+    - If the response contains an "error" key, a ValueError is raised.
+    - Returns response['result'].
+
+  - request_async(method, params)
+    - Starts a blocking request in a greenlet (gevent) and stores it in pending_requests.
+    - Returns a request_id for later retrieval.
+
+  - receive_blocking(request_id, timeout=None)
+    - Retrieves the background request by its id.
+    - If not found, raises a KeyError.
+    - If a timeout is provided, applies a gevent timeout.
+    - Awaits the result, decodes it as JSON, raises ValueError on error, and returns response['result'].
+
+  - receive_async(request_id, *args, **kwargs)
+    - Not implemented. Delegates to NotImplementedError.
+
+Notes
+  - This class abstracts away the low-level provider interaction and presents a uniform interface for both blocking and asynchronous usage.
+
+ManagerWrapper
+--------------
+
+Purpose
+  - A thin wrapper around a wrapped_manager that exposes the wrapped manager’s interface and delegates all calls to it.
+
+Initialization
+  - __init__(wrapped_manager): stores the wrapped manager instance.
+
+Public API
+  - provider (read-only property)
+    - Returns wrapped_manager.provider.
+
+  - pending_requests (read-only property)
+    - Returns wrapped_manager.pending_requests.
+
+  - setProvider(provider)
+    - Sets wrapped_manager.provider to the given provider.
+
+  - request_blocking, request_async, receive_blocking, receive_async
+    - All methods proxy their calls to the corresponding methods on the wrapped manager.
+
+BaseSendRawTransactionMixin
+---------------------------
+
+Purpose
+  - A mixin that adds logic to sign and send raw transactions, with basic nonce tracking and transaction state management.
+
+Initialization
+  - __init__(*args, **kwargs)
+    - Initializes:
+      - _known_transactions: defaultdict(set) to track known transaction hashes per address.
+      - _known_nonces: defaultdict(set) to track known nonces per address.
+    - Calls super().__init__(*args, **kwargs).
+
+Internal state
+  - _known_transactions: maps address -> set of known transaction hashes.
+  - _known_nonces: maps address -> set of known nonces.
+
+Public API and behavior
+  - _get_nonces_and_cleanup(addr, chain_nonce)
+    - Fetches all known transactions for addr via eth_getTransactionByHash.
+    - For each transaction, derives its nonce and:
+      - If nonce < chain_nonce, removes the transaction hash from the known set.
+      - Otherwise, yields the nonce.
+    - Cleans up old nonces in _known_nonces that are lower than chain_nonce.
+    - Yields nonces that are non-conflicting with the current chain nonce.
+
+  - get_chain_nonce(addr)
+    - Queries the blockchain for the pending nonce with eth_getTransactionCount(addr, 'pending').
+    - Returns the chain nonce as a decimal.
+
+  - get_nonce(addr)
+    - Computes the effective nonce as the maximum of:
+      - chain_nonce
+      - tracked nonces from _get_nonces_and_cleanup
+    - If the computed nonce is 0 and there are no tracked nonces, returns -1 (no known nonce).
+    - Otherwise returns the computed nonce.
+
+  - get_transaction_signature(serialized_txn)
+    - NotImplementedError; must be implemented by subclasses.
+
+  - sign_and_serialize_transaction(transaction)
+    - Serializes the transaction, obtains its signature via get_transaction_signature, applies the signature to obtain a signed transaction, and RLP-encodes it as a Transaction.
+
+  - construct_full_transaction(base_transaction)
+    - Builds a full transaction by filling in defaults:
+      - nonce: get_nonce(from) + 1 (if not provided)
+      - gasPrice: eth_gasPrice
+      - gas: hex(90000)
+      - value: '0x0'
+      - to: ''
+      - data: ''
+    - Returns the completed transaction dictionary.
+
+  - TXN_SENDING_METHODS
+    - A set of methods that are involved in sending transactions:
+      - eth_sendTransaction
+      - eth_sendRawTransaction
+      - personal_signAndSendTransaction
+      - personal_sendTransaction
+
+  - request_blocking(method, params)
+    - Special handling for eth_sendTransaction:
+      - Takes the first base transaction, constructs a full transaction, signs and serializes it, encodes it as hex, and forwards it to eth_sendRawTransaction via a recursive call to request_blocking.
+    - For other methods, forwards to the superclass implementation.
+    - If the method is in TXN_SENDING_METHODS and the method is eth_sendRawTransaction, there is a code path in the provided source that suggests additional processing (via rlp.decode(decode_hex(...))), but the snippet appears incomplete. Documentation reflects that there is intended additional handling for these methods in this section, though the exact behavior is dependent on the missing portion of the implementation.
+
+Notes
+  - get_transaction_signature must be provided by subclasses.
+  - This mixin relies on the surrounding framework for provider access and on the Transaction type for RLP encoding/decoding.
+
+Usage examples (illustrative)
+--------------------------------
+
+- Basic request usage
+  - manager = RequestManager(provider)
+  - result = manager.request_blocking('eth_blockNumber', [])
+
+- Async request usage
+  - request_id = manager.request_async('eth_blockNumber', [])
+  - result = manager.receive_blocking(request_id)
+
+- Subclassing BaseSendRawTransactionMixin
+  - Implement a concrete subclass that provides get_transaction_signature, then use the mixin to handle nonce tracking and signed raw transaction submission.
+
+Dependencies
+------------
+
+- Python standard library: json, collections, uuid
+- gevent for asynchronous request handling
+- rlp for transaction encoding
+- web3.utils.* for helpers such as sha3, force_text, to_address, and various encoding/decoding utilities
+- A provider object implementing make_request(method, params)
+
+See Also
+--------
+
+- web3.utils.transactions for Transaction type and helpers
+- web3.utils.encoding for encode_hex / decode_hex
+- eth_* RPC methods referenced by the mixin (eth_getTransactionCount, eth_getTransactionByHash, eth_sendRawTransaction, eth_gasPrice)
+
+Notes about code completeness
+-----------------------------
+
+The provided code snippet for BaseSendRawTransactionMixin.request_blocking includes an incomplete branch for handling eth_sendRawTransaction, ending with a truncated rlp.decode(decode_hex( ... )). Documentation reflects the presence of this branch but cannot describe its full behavior due to the missing portion.
