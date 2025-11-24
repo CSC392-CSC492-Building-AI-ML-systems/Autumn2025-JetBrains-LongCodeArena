@@ -1,0 +1,197 @@
+Feature Extraction
+==================
+
+This module provides utilities for extracting intermediate features from PyTorch models using Torch FX-based tracing. It allows users to specify which layers or operations they want to extract features from and returns a new model that outputs those features.
+
+Overview
+--------
+
+The feature extraction functionality enables users to:
+
+1. Extract intermediate activations from any part of a model
+2. Create feature extractors that return specific layer outputs
+3. Get node names from models for feature extraction configuration
+4. Handle different behavior between train and eval modes
+
+Key Components
+--------------
+
+create_feature_extractor
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Creates a feature extractor from a given model by specifying return nodes.
+
+.. code-block:: python
+
+    def create_feature_extractor(
+        model: nn.Module,
+        return_nodes: Optional[Union[List[str], Dict[str, str]]] = None,
+        train_return_nodes: Optional[Union[List[str], Dict[str, str]]] = None,
+        eval_return_nodes: Optional[Union[List[str], Dict[str, str]]] = None,
+        tracer_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> fx.GraphModule:
+
+**Parameters:**
+
+- ``model`` (nn.Module): The model to be traced and transformed into a feature extractor.
+- ``return_nodes`` (Optional[Union[List[str], Dict[str, str]]]): Node names from the model to be returned as outputs. If a dictionary is provided, keys are node names and values are the corresponding output names. If a list is provided, node names are used as output names.
+- ``train_return_nodes`` (Optional[Union[List[str], Dict[str, str]]]): Node names to be returned when the model is in train mode. If not specified, ``return_nodes`` is used for both train and eval modes.
+- ``eval_return_nodes`` (Optional[Union[List[str], Dict[str, str]]]): Node names to be returned when the model is in eval mode. If not specified, ``return_nodes`` is used for both train and eval modes.
+- ``tracer_kwargs`` (Optional[Dict[str, Any]]): Additional keyword arguments passed to the tracer.
+
+**Returns:**
+
+- ``fx.GraphModule``: A new model that returns intermediate features as specified.
+
+get_graph_node_names
+^^^^^^^^^^^^^^^^^^^^
+
+Retrieves the node names from a model's computational graph for both train and eval modes.
+
+.. code-block:: python
+
+    def get_graph_node_names(
+        model: nn.Module,
+        tracer_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[List[str], List[str]]:
+
+**Parameters:**
+
+- ``model`` (nn.Module): The model to trace and extract node names from.
+- ``tracer_kwargs`` (Optional[Dict[str, Any]]): Additional keyword arguments passed to the tracer.
+
+**Returns:**
+
+- ``Tuple[List[str], List[str]]``: A tuple containing lists of node names for train mode and eval mode respectively.
+
+Examples
+--------
+
+Basic Feature Extraction
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: python
+
+    import torch
+    import torchvision.models as models
+    from torchvision.models.feature_extraction import create_feature_extractor
+
+    # Load a pretrained model
+    model = models.resnet18(pretrained=True)
+    
+    # Specify which layers to extract features from
+    return_nodes = {
+        'layer1.1.relu_1': 'layer1',  # Return output of layer1 with name 'layer1'
+        'layer2.1.relu_1': 'layer2',  # Return output of layer2 with name 'layer2'
+        'layer3.1.relu_1': 'layer3',  # Return output of layer3 with name 'layer3'
+        'layer4.1.relu_1': 'layer4'   # Return output of layer4 with name 'layer4'
+    }
+    
+    # Create feature extractor
+    feature_extractor = create_feature_extractor(model, return_nodes=return_nodes)
+    
+    # Use the feature extractor
+    input_tensor = torch.randn(1, 3, 224, 224)
+    features = feature_extractor(input_tensor)
+    
+    print(features['layer1'].shape)  # torch.Size([1, 64, 56, 56])
+    print(features['layer2'].shape)  # torch.Size([1, 128, 28, 28])
+    print(features['layer3'].shape)  # torch.Size([1, 256, 14, 14])
+    print(features['layer4'].shape)  # torch.Size([1, 512, 7, 7])
+
+Getting Node Names
+^^^^^^^^^^^^^^^^^^
+
+.. code-block:: python
+
+    from torchvision.models.feature_extraction import get_graph_node_names
+    
+    model = models.resnet18()
+    
+    # Get all node names in the model
+    train_nodes, eval_nodes = get_graph_node_names(model)
+    
+    print("Train mode nodes:")
+    for node in train_nodes[:10]:  # Print first 10 nodes
+        print(f"  {node}")
+    
+    print("\nEval mode nodes:")
+    for node in eval_nodes[:10]:  # Print first 10 nodes
+        print(f"  {node}")
+
+Different Features for Train/Eval Modes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: python
+
+    model = models.resnet18()
+    
+    # Specify different return nodes for train and eval modes
+    train_return_nodes = {
+        'layer1.0.relu_1': 'features_train'
+    }
+    eval_return_nodes = {
+        'layer1.1.relu_1': 'features_eval'
+    }
+    
+    feature_extractor = create_feature_extractor(
+        model, 
+        train_return_nodes=train_return_nodes,
+        eval_return_nodes=eval_return_nodes
+    )
+    
+    input_tensor = torch.randn(1, 3, 224, 224)
+    
+    # Train mode
+    feature_extractor.train()
+    train_features = feature_extractor(input_tensor)
+    print("Train mode output keys:", list(train_features.keys()))
+    
+    # Eval mode
+    feature_extractor.eval()
+    eval_features = feature_extractor(input_tensor)
+    print("Eval mode output keys:", list(eval_features.keys()))
+
+Using Leaf Modules
+^^^^^^^^^^^^^^^^^^
+
+.. code-block:: python
+
+    from torch import nn
+    
+    class CustomModule(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv = nn.Conv2d(3, 64, 3)
+            self.relu = nn.ReLU()
+        
+        def forward(self, x):
+            return self.relu(self.conv(x))
+    
+    model = CustomModule()
+    
+    # Treat nn.ReLU as a leaf module (don't trace through it)
+    tracer_kwargs = {'leaf_modules': [nn.ReLU]}
+    
+    train_nodes, eval_nodes = get_graph_node_names(model, tracer_kwargs=tracer_kwargs)
+    
+    # Create feature extractor with custom tracer settings
+    return_nodes = {'relu': 'features'}
+    feature_extractor = create_feature_extractor(
+        model, 
+        return_nodes=return_nodes,
+        tracer_kwargs=tracer_kwargs
+    )
+
+Notes
+-----
+
+1. **Node Naming**: Node names follow a hierarchical structure separated by dots. The top-level module name is not included in the node names.
+
+2. **Train vs Eval Modes**: Some models have different computational graphs in train and eval modes (e.g., due to dropout or batch normalization). The feature extractor can handle different return nodes for each mode.
+
+3. **Leaf Modules**: By default, most modules are traced through. You can specify leaf modules that should not be traced into using the ``leaf_modules`` parameter in ``tracer_kwargs``.
+
+4. **Performance**: Feature extraction adds minimal overhead as it reuses the model's computation graph.
+
+5. **Limitations**: Not all models can be traced successfully. Models with dynamic control flow or data-dependent operations may not work correctly.

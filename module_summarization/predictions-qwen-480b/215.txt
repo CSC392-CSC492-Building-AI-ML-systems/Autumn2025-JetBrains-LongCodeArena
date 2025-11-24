@@ -1,0 +1,120 @@
+An asynchronous producer / consumer pattern for coroutines
+==========================================================
+
+Tornado provides asynchronous queue implementations that allow you to coordinate
+producer and consumer coroutines efficiently. These queues are similar to those
+in the standard library's `asyncio` package but are designed to work within
+Tornado's event loop.
+
+Basic Usage
+-----------
+
+The core idea is to use a queue to pass data between producer and consumer
+coroutines. Producers add items to the queue using `put()`, and consumers
+retrieve items using `get()`. Both operations are asynchronous and won't block
+the event loop.
+
+.. code-block:: python
+
+    import asyncio
+    from tornado.ioloop import IOLoop
+    from tornado.queues import Queue
+
+    q = Queue(maxsize=2)
+
+    async def consumer():
+        async for item in q:
+            try:
+                print('Doing work on %s' % item)
+                await asyncio.sleep(0.01)
+            finally:
+                q.task_done()
+
+    async def producer():
+        for item in range(5):
+            await q.put(item)
+            print('Put %s' % item)
+
+    async def main():
+        # Start consumer without waiting (since it never finishes).
+        IOLoop.current().spawn_callback(consumer)
+        await producer()     # Wait for producer to put all tasks.
+        await q.join()       # Wait for consumer to finish all tasks.
+        print('Done')
+
+    asyncio.run(main())
+
+Queue Types
+-----------
+
+Tornado provides three types of queues:
+
+1. `Queue` - FIFO (first in, first out)
+2. `PriorityQueue` - items are retrieved in priority order
+3. `LifoQueue` - LIFO (last in, first out)
+
+All queues support the same interface but differ in how items are ordered when
+retrieved.
+
+Queue Methods
+-------------
+
+- `put(item, timeout=None)` - Add an item to the queue, waiting if necessary
+- `put_nowait(item)` - Add an item without blocking
+- `get(timeout=None)` - Remove and return an item, waiting if necessary
+- `get_nowait()` - Remove and return an item without blocking
+- `join()` - Wait until all items have been processed
+- `task_done()` - Indicate that a retrieved item has been processed
+
+Error Handling
+--------------
+
+- `QueueFull` is raised when trying to add to a full queue with `put_nowait()`
+- `QueueEmpty` is raised when trying to retrieve from an empty queue with `get_nowait()`
+- `tornado.gen.TimeoutError` is raised when operations time out
+
+Thread Safety
+-------------
+
+.. warning::
+
+   Queue classes are not thread-safe. To use them from another thread, you must
+   use `.IOLoop.add_callback` to transfer control to the `.IOLoop` thread before
+   calling any queue methods.
+
+Example with Multiple Consumers
+-------------------------------
+
+.. code-block:: python
+
+    import asyncio
+    from tornado.ioloop import IOLoop
+    from tornado.queues import Queue
+
+    q = Queue()
+
+    async def consumer(name):
+        while True:
+            item = await q.get()
+            try:
+                print(f'Consumer {name} processing {item}')
+                await asyncio.sleep(1)
+            finally:
+                q.task_done()
+
+    async def producer():
+        for i in range(10):
+            await q.put(f'item_{i}')
+            print(f'Produced item_{i}')
+        # Wait for all items to be processed
+        await q.join()
+
+    async def main():
+        # Start multiple consumers
+        for i in range(3):
+            IOLoop.current().spawn_callback(consumer, f'worker_{i}')
+        
+        await producer()
+        print('All items processed')
+
+    asyncio.run(main())
