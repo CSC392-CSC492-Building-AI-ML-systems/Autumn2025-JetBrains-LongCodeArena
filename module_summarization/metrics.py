@@ -40,7 +40,7 @@ def score_one_model(scorer, dataset, direct, max_cont_len, tokenizer, use_pbar=F
     golds, preds, intents, codes = [], [], [], []
     
     for idx in range(len(dataset)):
-        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8') as f:
+        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8', errors='replace') as f:
             pred = f.read()
         gld = dataset[idx]['target_text']
         golds.append(gld)
@@ -161,4 +161,4 @@ if __name__ == '__main__':
 
 
     with open('result_gold.json', 'w') as f:
-        json.dump(path2metric, f)
+        json.dump(path2metric, f, ensure_ascii=False)
