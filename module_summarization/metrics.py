@@ -94,13 +94,13 @@ def get_bert_scores(dataset, direct, model_name):
         
     scores = []
     for idx in range(len(dataset)):
-        m = solo_bert_score(pred[idx], golds[idx], model_name)
+        m = solo_bert_score(preds[idx], golds[idx])
         scores.append(m)
     
     return scores
     
 
-def solo_bert_score(pred, gold, model_name):
+def solo_bert_score(pred, gold, model_name="roberta-large"):
     P, R, F1 = bert_score([pred], [gold], lang="en", model_type=model_name)
     return float(F1[0])
  
