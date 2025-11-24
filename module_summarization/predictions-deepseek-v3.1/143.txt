@@ -1,0 +1,84 @@
+Managing Memory in Dask Distributed
+===============================
+
+The Dask Distributed system provides several mechanisms to manage memory usage across the cluster. This document covers the key aspects of memory management when working with the distributed scheduler.
+
+Future Objects and Memory References
+------------------------------------
+
+The ``Future`` class plays a crucial role in memory management by maintaining references to remote computations:
+
+```python
+class Future(WrappedKey):
+    """A remotely running computation
+    
+    A Future is a local proxy to a result running on a remote worker. A user
+    manages future objects in the local Python process to determine what
+    happens in the larger cluster.
+    """
+```
+
+Key memory management behaviors:
+
+1. **Reference Counting**: When a Future is created, it increments the reference count for the corresponding key on the scheduler:
+   ```python
+   if self._client and not self._state:
+       self._client._inc_ref(self.key)
+   ```
+
+2. **Client Registration**: Futures register their interest in specific keys with the scheduler:
+   ```python
+   self._client._send_to_scheduler({
+       "op": "client-desires-keys",
+       "keys": [self.key],
+       "client": self._client.id,
+   })
+   ```
+
+3. **State Management**: Each future maintains state information through a ``FutureState`` object that tracks the computation status.
+
+Global Client Management
+------------------------
+
+The system maintains global client references using weak references to avoid memory leaks:
+
+```python
+_global_clients: weakref.WeakValueDictionary[int, Client] = weakref.WeakValueDictionary()
+```
+
+This ensures that clients can be garbage collected when no longer referenced, while still allowing access to active clients through the weak reference dictionary.
+
+Memory Tracking Utilities
+-------------------------
+
+The system includes utilities for measuring object sizes:
+
+```python
+from distributed.sizeof import sizeof
+```
+
+This function helps in understanding the memory footprint of objects being processed and transferred across the cluster.
+
+Garbage Collection and Cleanup
+------------------------------
+
+The system employs several cleanup mechanisms:
+
+1. **Automatic Reference Management**: When futures are garbage collected, they should properly release their references to remote data.
+
+2. **Connection Pooling**: The ``ConnectionPool`` class manages network connections efficiently to avoid excessive memory usage from open connections.
+
+3. **Thread Management**: The system uses ``ThreadPoolExecutor`` for concurrent operations with proper cleanup procedures.
+
+Best Practices
+--------------
+
+1. **Explicit Future Management**: Always close or cancel futures when they are no longer needed to release remote references.
+
+2. **Monitor Memory Usage**: Use the dashboard and logging facilities to monitor memory usage across workers.
+
+3. **Proper Client Cleanup**: Ensure clients are properly closed using ``client.close()`` to release all associated resources.
+
+4. **Batch Operations**: Use batched operations (``BatchedSend``) when appropriate to reduce memory overhead from many small communications.
+
+The memory management system is designed to automatically handle most common scenarios, but users should be aware of these mechanisms to optimize memory usage in large-scale distributed computations.
