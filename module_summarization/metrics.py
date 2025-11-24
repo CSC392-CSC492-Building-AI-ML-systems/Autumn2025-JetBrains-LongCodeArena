@@ -86,7 +86,7 @@ def get_bert_scores(dataset, direct, model_name):
     golds, preds = [], []
 
     for idx in range(len(dataset)):
-        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8') as f:
+        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8', errors='replace') as f:
             pred = f.read()
         gld = dataset[idx]['target_text']
         golds.append(gld)
