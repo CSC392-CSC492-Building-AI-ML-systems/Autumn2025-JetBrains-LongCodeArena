@@ -1,0 +1,89 @@
+camera_geometry
+===============
+
+Overview
+--------
+This section documents how camera geometry, camera descriptions, optics and telescope-level metadata are represented and used when working with Cherenkov camera images or multi-telescope data cubes. The objects described here are central to constructing, indexing, transforming and aggregating per-camera images into array-level data cubes for analysis and visualization.
+
+Core objects
+------------
+- CameraGeometry
+  - Encodes the pixel layout of a camera: pixel positions, shapes, neighbor relations and pixel ID ordering. It is the base description used to interpret 1D image arrays as 2D camera images, to compute pixel centers and to perform coordinate transforms within the camera plane.
+- CameraDescription
+  - Bundles CameraGeometry with readout and camera-specific metadata (gain/channel information, pixel types). Used to know how to interpret raw camera readout samples or integrated charges for a specific camera model.
+- CameraReadout
+  - Describes readout properties such as number of samples, ordering of waveform data and which channels are present. Important when converting waveform arrays to integrated image values.
+- OpticsDescription
+  - Describes optical properties (e.g. mirror geometry and effective focal length). The focal length kind (e.g. nominal, effective) influences projection of photons to the camera plane and conversion between angles and pixel offsets.
+- TelescopeDescription
+  - Combines CameraDescription and OpticsDescription with telescope-level metadata (mount, mirror area, pointing conventions). Used to interpret pixel positions relative to telescope pointing and optics.
+
+Subarray description and ground coordinates
+------------------------------------------
+- SubarrayDescription
+  - Collects TelescopeDescription objects for all telescopes in an array together with their positions on the ground.
+  - Attributes and properties useful for image/cube construction:
+    - name: subarray name
+    - positions: dict[tel_id] -> (x,y,z) Earth-referenced positions (astropy quantities)
+    - tel: dict[tel_id] -> TelescopeDescription
+    - n_tels / __len__: number of telescopes in the subarray
+    - tel_coords: SkyCoord (GroundFrame) of all telescopes (lazy property)
+    - tel_ids: numpy array of telescope IDs (lazy property)
+    - tel_indices: dict mapping tel_id -> compact index (0..n_tels-1)
+    - tel_index_array: array mapping tel_id -> index, with -1 for missing IDs (useful for fast lookup)
+    - tel_ids_to_indices(tel_ids): convert arbitrary tel id(s) to compact indices
+    - tel_ids_to_mask(tel_ids): build boolean mask of length n_tels selecting a subset of telescopes
+    - info(printer=print): human-readable summary including per-type counts and footprint
+
+Indexing and masks
+------------------
+- Compact indexing vs tel_id space:
+  - Telescope IDs (tel_id) are often sparse or non-contiguous. Use tel_indices to obtain compact 0..N-1 indices suitable for building fixed-shape arrays where axis corresponds to telescopes.
+  - tel_index_array enables direct indexing by tel_id but includes -1 for missing IDs; safe when tel_id range is small.
+- Masks:
+  - tel_ids_to_mask(tel_ids) yields a boolean mask of length n_tels that can select a subset of telescopes from per-telescope arrays (e.g. selecting only telescopes of a given type when stacking images into a cube).
+
+Organizing images and data cubes
+-------------------------------
+- Per-camera image representation:
+  - A camera image is typically represented as a 1D array of length N_pixels following the CameraGeometry pixel ordering. CameraGeometry provides pixel (x, y) positions in the camera plane required to map these 1D arrays onto a 2D layout for plotting or for spatial operations (smoothing, morphological filters).
+  - Use CameraDescription to interpret channel ordering and to convert raw readout waveforms (CameraReadout) into integrated charges per pixel.
+- Array-level data cube:
+  - A common organization for multi-telescope data is a 3D cube with axes (n_tels, n_pixels, features) or (n_tels, height, width) depending on whether you keep cameras as flattened pixel vectors or reproject them to a common grid.
+  - When stacking 1D camera images into a (n_tels, n_pixels) cube, use SubarrayDescription.tel_indices to place each telescope's image into the correct slice.
+  - For heterogeneous camera geometries (different numbers of pixels or pixel layouts across telescope types) you can:
+    - Keep a ragged structure (list of 1D arrays) indexed by tel index; or
+    - Reproject all cameras to a common reference grid (e.g. angular projection onto a common camera plane) before stacking; or
+    - Pad flattened arrays to a common length and use tel masks to ignore padded elements.
+- Handling missing or inactive pixels:
+  - Pixel masks (bad pixels, low-gain channels) should be carried alongside images. Operations that combine pixels across telescopes must respect per-camera masks.
+  - Use CameraGeometry neighbor relations to compute cleaning, smoothing, or morphological operations that depend on pixel adjacency.
+
+Coordinate systems and transforms
+--------------------------------
+- CameraFrame and GroundFrame
+  - CameraFrame: camera-centered coordinate frame for pixel positions and directions on the focal plane. Use CameraFrame when projecting image pixels into sky direction or when converting direction vectors to camera coordinates.
+  - GroundFrame / SkyCoord for telescope positions: SubarrayDescription.tel_coords returns telescope positions as SkyCoord in GroundFrame. A reference EarthLocation is used as the origin when interpreting positions.
+- Converting between focal-plane offsets and sky angles
+  - OpticsDescription (focal length) and CameraGeometry pixel positions allow conversion from focal-plane distances to incident angles on the sky (small-angle approximations or full optical projection depending on the optics model).
+  - When deriving event-level directions from per-camera images, account for individual telescope optics and pointing (TelescopeDescription).
+
+Practical notes
+---------------
+- Units: pixel positions and telescope positions are astropy quantities; maintain explicit units (meters, degrees, radians) when doing geometric computations.
+- Lazy properties: tel_coords, tel_ids, tel_indices and related attributes are implemented as lazy properties to avoid repeated recomputation.
+- Versioning: SubarrayDescription supports table-version metadata (CURRENT_TAB_VERSION, COMPATIBLE_VERSIONS) for serialized representations; ensure compatibility when reading/writing array metadata.
+
+Common workflows
+----------------
+- Build per-event cube of images:
+  1. For each triggered telescope, read raw readout and use CameraReadout + CameraDescription to produce an integrated image (1D array of length N_pixels).
+  2. Map each telescope's tel_id to a compact index via SubarrayDescription.tel_indices (or tel_ids_to_indices) and insert the image into the (n_tels, n_pixels) cube slice.
+  3. Provide a telescope mask (tel_ids_to_mask) for downstream selection (e.g. only MSTs or SSTs).
+  4. Attach per-pixel masks and telescope-level metadata (pointing, optics) for further processing (cleaning, image parameterization, stereoscopic reconstruction).
+- Reproject and combine:
+  - For camera-level stacking in a common geometry (e.g., for deep-learning inputs), reproject each camera image to a uniform pixel grid using pixel center coordinates from CameraGeometry and telescope optics; then stack reprojected images into a dense (n_tels, H, W) tensor.
+
+Reference
+---------
+This document describes the roles and main interfaces of CameraGeometry, CameraDescription, CameraReadout, OpticsDescription, TelescopeDescription and SubarrayDescription when working with Cherenkov camera images and array-level data cubes. Use the objects and utilities above to manage pixel layouts, telescope indexing, coordinate transforms and to build consistent, mask-aware multi-telescope data products.

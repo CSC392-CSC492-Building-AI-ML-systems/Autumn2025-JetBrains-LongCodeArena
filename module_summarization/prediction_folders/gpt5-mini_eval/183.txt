@@ -1,0 +1,175 @@
+Feature selection and dimensionality reduction
+=============================================
+
+This page summarizes common strategies and scikit-learn tools for reducing the
+number of features in a dataset (feature selection) or replacing the original
+features by a lower-dimensional set of derived features
+(dimensionality reduction). Guidance and short examples are provided for typical
+workflows on sample sets.
+
+When to use which approach
+--------------------------
+- Feature selection (subsetting): pick a subset of original features. Use when
+  interpretability or sparsity is important, or when you want to preserve the
+  original meaning of features.
+- Dimensionality reduction (projection): produce new features that are
+  combinations of the original ones. Use when you want to capture most of the
+  variance or structure with fewer features and don't need feature-level
+  interpretability.
+
+Supervised vs unsupervised
+--------------------------
+- Supervised methods use the target (labels) to guide selection or projection
+  (e.g. SelectKBest with mutual information, model-based selection,
+  supervised manifold learning).
+- Unsupervised methods ignore the target (e.g. PCA, TruncatedSVD, Feature
+  Agglomeration).
+
+Key considerations
+------------------
+- Avoid data leakage: fit selectors / transformers on training data only (use
+  pipelines and cross-validation to tune selection).
+- Scaling: many methods (PCA, K-PCA, Lasso) require centering or scaling.
+- Sparsity: TruncatedSVD works directly with sparse input; PCA requires dense
+  arrays. Chi-squared and NMF assume non-negative data.
+- Sample weighting: some estimators accept sample_weight in fit; if using
+  SelectFromModel or other model-based selectors, ensure the wrapped estimator
+  supports sample weights if needed.
+- Multi-output problems: wrap single-output estimators with
+  MultiOutputRegressor (or use estimators that natively support multioutput)
+  when using model-based selection in multioutput settings.
+- Interpretability: selection keeps original features; projection methods
+  produce linear/nonlinear combinations that may be harder to interpret.
+
+Common feature selection methods (supervised)
+---------------------------------------------
+- Univariate selection
+  - SelectKBest, SelectPercentile: score each feature individually (f‑test,
+    mutual information, chi2 for non-negative counts).
+- Model-based selection
+  - SelectFromModel: use an estimator exposing coef_ or feature_importances_
+    (linear models with L1, tree-based models).
+  - L1 regularization (Lasso, LogisticRegression with penalty="l1"): induces
+    sparsity in coefficients.
+- Recursive feature elimination
+  - RFE, RFECV: recursively remove least important features, optionally with
+    cross-validation to choose the number of features.
+- Sequential feature selection
+  - SequentialFeatureSelector: forward or backward greedy search for a subset.
+
+Common dimensionality reduction techniques (unsupervised and supervised)
+------------------------------------------------------------------------
+- Linear methods
+  - PCA: principal component analysis, preserves variance, centered data.
+  - TruncatedSVD: randomized/iterative SVD for large or sparse matrices.
+  - NMF: non-negative matrix factorization (non-negative data, parts-based
+    representations).
+- Sparse / structured methods
+  - SparsePCA, MiniBatchSparsePCA: learn sparse components.
+- Kernel / nonlinear methods
+  - KernelPCA, Isomap, LocallyLinearEmbedding: capture nonlinear manifolds.
+- Manifold learning / visualization
+  - t-SNE (visualization), UMAP (external package) for low-dimensional
+    embedding, not generally for preprocessing for downstream supervised
+    learning.
+- Feature agglomeration
+  - FeatureAgglomeration: hierarchical clustering of features into groups.
+- Hashing / feature hashing
+  - FeatureHasher: dimensionality reduction via hashing (useful for text).
+
+Practical usage patterns
+------------------------
+- Use a Pipeline to chain preprocessing, selection/dimensionality-reduction,
+  and estimator. This ensures no leakage and makes cross-validation correct.
+- Use GridSearchCV or RandomizedSearchCV (inside a pipeline) to tune how many
+  features or components to keep.
+- Fit selectors / transformers only on training folds when evaluating with
+  cross validation. Tools like cross_val_score or cross_validate together with
+  pipeline handle this automatically.
+- To inspect selected features, call get_support() on selector objects.
+  For projection methods, inspect components_ (PCA) or transform/ inverse_transform.
+
+API notes and useful classes
+---------------------------
+- Feature selectors:
+  - sklearn.feature_selection.SelectKBest, SelectPercentile
+  - sklearn.feature_selection.SelectFromModel
+  - sklearn.feature_selection.RFE, RFECV
+  - sklearn.feature_selection.VarianceThreshold
+  - sklearn.feature_selection.SequentialFeatureSelector
+- Dimensionality reducers:
+  - sklearn.decomposition.PCA, TruncatedSVD, NMF, SparsePCA
+  - sklearn.decomposition.KernelPCA
+  - sklearn.manifold.Isomap, LocallyLinearEmbedding
+  - sklearn.cluster.FeatureAgglomeration
+- Wrappers and utilities:
+  - sklearn.pipeline.Pipeline, sklearn.model_selection.GridSearchCV,
+    sklearn.model_selection.RandomizedSearchCV
+  - sklearn.multioutput.MultiOutputRegressor for model-based selection with
+    multi-output estimators
+  - sklearn.feature_selection.SelectFromModel supports estimators with
+    coef_ or feature_importances_
+  - get_support(), transform(), inverse_transform() methods for selectors /
+    transformers
+
+Short examples
+--------------
+Select K best features (supervised) and evaluate with cross validation::
+
+  from sklearn.feature_selection import SelectKBest, mutual_info_classif
+  from sklearn.pipeline import Pipeline
+  from sklearn.ensemble import RandomForestClassifier
+  from sklearn.model_selection import cross_val_score
+
+  pipe = Pipeline([
+      ("select", SelectKBest(score_func=mutual_info_classif, k=20)),
+      ("clf", RandomForestClassifier())
+  ])
+  scores = cross_val_score(pipe, X, y, cv=5)
+
+Model-based selection with a tree and SelectFromModel::
+
+  from sklearn.feature_selection import SelectFromModel
+  from sklearn.ensemble import RandomForestClassifier
+
+  selector = SelectFromModel(RandomForestClassifier(n_estimators=100), threshold="median")
+  selector.fit(X_train, y_train)
+  X_train_sel = selector.transform(X_train)
+  selected_features = selector.get_support()
+
+PCA in a pipeline (unsupervised projection)::
+
+  from sklearn.decomposition import PCA
+  from sklearn.linear_model import LogisticRegression
+  from sklearn.pipeline import Pipeline
+
+  pipe = Pipeline([
+      ("scaler", StandardScaler()),
+      ("pca", PCA(n_components=10)),
+      ("clf", LogisticRegression())
+  ])
+  pipe.fit(X_train, y_train)
+
+TruncatedSVD for large sparse count matrices::
+
+  from sklearn.decomposition import TruncatedSVD
+  svd = TruncatedSVD(n_components=50)
+  X_reduced = svd.fit_transform(X_sparse)
+
+Tips and pitfalls
+-----------------
+- Always fit the selector/transformer on training data only; use pipelines to
+  avoid leakage.
+- For sparse inputs prefer TruncatedSVD over PCA; some selectors (chi2,
+  FeatureHasher) require non-negative inputs.
+- Model-based selection quality depends on the chosen model; consider using
+  stability selection or cross-validated strategies (RFECV).
+- For very high dimensionality, consider randomized or incremental algorithms
+  (randomized PCA, mini-batch methods).
+- When working with multi-output targets, ensure the selection method and the
+  underlying estimator support multi-output, or wrap with MultiOutputRegressor.
+
+Further reading
+---------------
+- scikit-learn user guide sections: feature selection, dimensionality
+  reduction, pipelines and model selection.

@@ -1,0 +1,170 @@
+Condition syntax
+================
+
+This document describes the condition syntax accepted by PyTables when selecting
+rows from a Table (for example, in Table.where, Table.read_where,
+Table.get_where_list and similar APIs).  Conditions may be provided as
+expression strings or as precompiled condition objects.  The same expression
+language is used throughout the library.
+
+Overview
+--------
+
+A condition is a boolean expression that is evaluated once per row (or on
+vectorized blocks internally) and selects those rows that satisfy it.  A
+condition expression may reference one or more table columns by name and may
+combine comparisons, arithmetic and logical operators.  Parentheses may be
+used to control precedence.
+
+PyTables will attempt to evaluate condition expressions efficiently using the
+numexpr engine (when available).  When numexpr is not available or a part of
+the expression is not supported by numexpr, PyTables falls back to a safe
+Python evaluation mode.  Because of these two evaluation paths, some complex
+Python-only constructs may work in the fallback mode but will not benefit
+from numexpr acceleration.
+
+Basic usage examples
+--------------------
+
+Selecting rows where a numeric column meets a comparison:
+
+    rows = table.read_where('age > 30')
+
+Combining comparisons with logical operators (bitwise operators &&, || are
+represented by & and | in the condition string):
+
+    rows = table.read_where('(age >= 18) & (age <= 65)')
+
+Comparing to string columns (strings are normally stored as bytes; use byte
+literals if your column is a fixed-width bytes column):
+
+    rows = table.read_where('name == "Smith"')
+    rows = table.read_where('name == b"Smith"')   # if name is stored as bytes
+
+Using arithmetic in expressions:
+
+    rows = table.read_where('weight / (height*height) > 25.0')
+
+Negation:
+
+    rows = table.read_where('~(status == 0)')    # rows with status != 0
+
+Notes:
+- Use & (and), | (or) and ~ (not) for logical combinations. Do not use the
+  Python keywords and/or/not inside condition strings.
+- Use parentheses to make combinations explicit and to avoid precedence issues.
+
+Supported operators
+-------------------
+
+The most commonly used operators supported in condition expressions are:
+
+- Comparison: ==, !=, >, >=, <, <=
+- Logical: & (and), | (or), ~ (not)
+- Arithmetic: +, -, *, /, //, %, ** (subject to evaluation engine support)
+- Parentheses: ( ... ) to group sub-expressions
+
+Operator precedence follows standard arithmetic and bitwise precedence rules.
+When in doubt, add parentheses.
+
+Column references and constants
+-------------------------------
+
+- Refer to columns simply by their column name as it appears in the Table
+  description. Do not put column names in quotes.
+- Constants may be numeric literals, booleans (True/False), or string
+  literals (single or double quoted). When comparing to a bytes column,
+  prefer byte-string literals (prefix b").
+
+Examples:
+
+    'age > 30'
+    'salary <= 50000'
+    '(score > 80) & (grade == "A")'
+    'active == True'
+
+Special cases and types
+-----------------------
+
+Numeric types:
+- Comparisons and arithmetic with integer and floating-point columns are
+  supported.  NaNs in floating point columns are handled carefully; comparisons
+  involving NaNs follow NumPy semantics (NaN is not equal to anything).
+
+String types:
+- Equality and inequality (==, !=) are the usual way to test fixed-width
+  string/bytes columns.  More advanced string operations (substring searches,
+  regex) may not be supported by numexpr and might require a Python-level
+  post-filter (see the fallback evaluation note above).
+
+Boolean columns:
+- Boolean columns can be used directly in conditions:
+
+    'flag'           # equivalent to 'flag == True'
+    '~flag'          # rows where flag is False
+
+Membership / complex predicates
+-------------------------------
+
+Simple membership or complex predicates expressed with Python constructs may
+work in the Python fallback mode but are not guaranteed to be supported by
+the numexpr path.  If you require complex logic that cannot be expressed with
+the basic operators above, prefer one of these approaches:
+
+- Precompute a helper column or array in Python (using NumPy) and use it in
+  the selection.
+- Retrieve a broader slice and apply Python filtering on the result in memory.
+
+Precompiled conditions
+----------------------
+
+If you perform the same selection repeatedly, consider using a precompiled
+condition object (where available in the API) to avoid parsing/compilation
+overhead.  Precompiled conditions are evaluated in the same engines and may
+carry the same acceleration benefits as raw condition strings.
+
+Performance tips
+----------------
+
+- Install and enable numexpr to get faster, block-wise vectorized evaluation
+  of conditions (this can give large speed-ups for large tables).
+- Prefer simple expressions using numeric comparisons and bitwise logical
+  combinations, since they compile well to numexpr.
+- Avoid per-row Python callbacks inside condition expressions; these force the
+  slower Python evaluation path.
+- If multiple conditions are combined, consider splitting filters and
+  applying the cheapest/most selective ones first (either by combining them
+  in the expression or in successive filtering steps).
+
+Safety and escaping
+-------------------
+
+- Condition strings are evaluated in a restricted and controlled environment.
+  Nevertheless, avoid constructing condition strings by concatenating untrusted
+  user input. When you must build expressions dynamically, validate and escape
+  values properly (especially strings) to avoid unexpected behavior.
+- Use quoting for string literals and prefer byte-literals when dealing with
+  fixed-width bytes columns.
+
+Examples summary
+----------------
+
+- Simple numeric filter:
+
+    table.get_where_list('age >= 18')
+
+- Compound filter:
+
+    table.get_where_list('(age >= 18) & (age <= 30) & (country == "US")')
+
+- Using arithmetic:
+
+    table.read_where('income - expenses > 10000')
+
+Further information
+-------------------
+
+See the API reference for Table.where, Table.read_where and related methods
+for concrete examples, available precompiled-condition helpers, and details
+about which Python functions and operators are supported by the numexpr
+engine used by PyTables.

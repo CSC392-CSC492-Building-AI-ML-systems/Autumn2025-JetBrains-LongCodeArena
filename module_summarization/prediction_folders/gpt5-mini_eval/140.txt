@@ -1,0 +1,148 @@
+Short overview of Dask best practices
+===================================
+
+This short guide collects practical recommendations and patterns for working
+with Dask (especially dask.dataframe) to get correct, performant, and
+maintainable code. It combines general Dask advice with details that arise
+from dataframe internals — metadata, categorical handling, partitioning,
+indexing and extension points.
+
+Principles
+----------
+- Prefer expressing computations at a high level (DataFrame/Array/Series
+  methods) so Dask can build a fused task graph and optimize execution.
+- Avoid calling .compute() early. Do final .compute() (or .to_parquet(),
+  .to_csv(), etc.) once per workflow, or use .persist() for repeated reuse.
+- Use vectorized operations and built-in Dask/dataframe methods instead of
+  Python-level loops and row-wise apply where possible.
+
+Partitions and parallelism
+--------------------------
+- Choose an appropriate number of partitions: too many small partitions
+  increases task overhead; too few reduces parallelism. Tune by data size
+  (typical partition size: tens to hundreds of MB).
+- Repartition when necessary (repartition, set_index). Use divisions when
+  possible to enable fast distributed joins and range-based ops.
+- Use .persist() to keep intermediate results in memory when reused across
+  many tasks; this avoids repeated computation and can drastically improve
+  throughput.
+- When writing output (parquet/csv), write in reasonably sized files to
+  avoid many tiny files.
+
+Metadata (meta) and dtypes
+--------------------------
+- Dask dataframes carry lightweight metadata (. _meta) describing columns
+  and dtypes. Correct metadata is crucial for many operations (shapes,
+  type inference,
+  planning).
+- Provide explicit metadata where automatic inference fails: use
+  make_meta-like helpers or supply meta to operations such as map_partitions,
+  groupby-apply, and concat.
+- For custom or third-party array/dataframe-like types, implement/ register
+  the appropriate dispatch hooks (make_meta_dispatch / make_meta_obj /
+  __dask_tokenize__ etc.) so Dask can infer metadata and produce stable task
+  keys.
+
+Categoricals and unions
+-----------------------
+- When concatenating or combining partitions with categorical columns, be
+  explicit about how categories should be combined. Use utilities that
+  perform union_categoricals (or equivalent) to avoid inconsistent dtypes
+  across partitions.
+- If you know categories are uniform across partitions, mark that (e.g.
+  uniform=True in concat-like helpers) to avoid expensive unions.
+- When order of categories does not matter, allow ignoring order (ignore_order)
+  to simplify unions and speed operations.
+
+Concatenation and joins
+-----------------------
+- Use dask.dataframe.concat and its options (axis, join, ignore_index,
+  uniform) to combine partitions correctly. When concatenating many frames,
+  filter out empty partitions to reduce work.
+- For joins, prefer joins on indexed columns (set_index) and ensure divisions
+  are meaningful to enable efficient shuffles and avoid full data movement
+  where possible.
+
+Indexing, iloc and selection
+----------------------------
+- Prefer label-based selection (loc) and column selection (df[col]) over
+  fancy iloc patterns when working with Dask DataFrames. iloc has limited
+  support and is intended mainly for column-based selection: DataFrame.iloc
+  must be used like df.iloc[:, column_indexer].
+- When selecting columns by position on DataFrames with unique column names,
+  prefer translating the positional selection to label-based selection to
+  leverage normal dataframe dispatch and metadata.
+- When writing custom indexers or objects used in tasks, implement
+  __dask_tokenize__ so identical operations share task keys and caching works.
+
+Map/Apply patterns
+------------------
+- Use map_partitions for partition-wise custom functions; always return correct
+  meta. Provide meta explicitly if result's dtype or columns differ from input.
+- For per-row operations, prefer vectorized methods or use apply with caution —
+  apply can be slow and may require careful metadata handling.
+
+IO and storage
+--------------
+- For parquet and other columnar formats, prefer fast engines (pyarrow), and
+  use partition_on for downstream filtering. When reading, supply metadata
+  (schema/dtypes) if automatic inference is expensive.
+- Writing out many partitions produces many files; consider coalescing
+  partitions (repartition or repartition(npartitions=...)) to produce fewer,
+  larger files.
+
+Performance and memory
+----------------------
+- Monitor memory and task graph size: leverage the dashboard to find hotspots
+  and long-running tasks.
+- Avoid unnecessary object serialization: keep data in native numpy/pandas
+  types where possible.
+- Use appropriate workers, memory limits and spill-to-disk settings for large
+  datasets.
+
+Schedulers and diagnostics
+--------------------------
+- Use the scheduler best suited for your environment: threaded for
+  CPU-bound single-machine workloads, processes for GIL-sensitive code, and
+  distributed for cluster workloads.
+- Use the Dask dashboard and profiling tools to inspect graph structure, task
+  durations and data movement. Visualize graphs for large operations to spot
+  inefficiencies.
+
+Extending Dask (dispatch patterns)
+----------------------------------
+- Dask uses dispatch utilities (e.g., make_meta_dispatch, concat_dispatch,
+  union_categoricals_dispatch) to support multiple backends and custom types.
+  Registering dispatch functions enables Dask to:
+  - Construct appropriate metadata for new object types (make_meta / make_meta_obj).
+  - Concatenate or union categorical-like columns correctly.
+  - Convert to/from backend-specific formats (pyarrow schemas, tables).
+- When adding custom collection-like types, implement:
+  - Metadata creation (make_meta_dispatch / make_meta_obj),
+  - A stable tokenization (__dask_tokenize__) for deterministic task keys,
+  - Serialization and to_pandas/to_pyarrow conversions where applicable.
+
+Correctness checklist
+---------------------
+- Verify dtypes and metadata (. _meta) before executing expensive computations.
+- Ensure categorical columns have compatible categories or explicitly union them.
+- Use divisions/indexes for operations requiring sorted or range-based semantics.
+- Test map_partitions functions on a single partition (or with meta_nonempty)
+  and provide explicit meta when needed.
+
+Quick practical tips
+--------------------
+- Start with a small subset of the data (one or a few partitions) and use
+  .head(), .compute(), and the dashboard to iterate.
+- Persist intermediate results when reused.
+- Avoid creating very large graphs: combine and simplify steps locally if
+  beneficial before distributing.
+- Prefer built-in Dask/dataframe functions and registered dispatches rather
+  than low-level custom loops to benefit from Dask optimizations.
+
+References
+----------
+- Dask documentation and the distributed dashboard for profiling and cluster
+  management.
+- Look at the DataFrame "_meta" patterns and dispatch points when you see
+  type/memory mismatches or when extending Dask to new array/dataframe types.

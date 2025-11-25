@@ -1,0 +1,153 @@
+Utilities for Developers
+========================
+
+This module provides a collection of small utilities and compatibility shims used
+by scikit-learn developers to isolate differences between Python, NumPy,
+SciPy, and third‑party libraries across versions. These utilities are intended
+for internal use to keep the codebase simpler and to centralize version-based
+workarounds.
+
+Main purposes
+-------------
+- Provide fallback implementations or thin wrappers for functionality that
+  moved between versions of dependencies (NumPy, SciPy, threadpoolctl,
+  importlib.resources).
+- Expose short helper functions used in multiple places in the codebase.
+- Keep deprecation wrappers for transitional imports while preserving a
+  single place to remove compatibility code when the minimum supported
+  dependency versions increase.
+
+Compatibility containers
+------------------------
+The module defines lists of sparse container classes to be used when checking
+or accepting sparse inputs. These lists include both sparse matrices and,
+when available (SciPy >= 1.8), sparse arrays:
+
+- CSR_CONTAINERS
+- CSC_CONTAINERS
+- COO_CONTAINERS
+- LIL_CONTAINERS
+- DOK_CONTAINERS
+- BSR_CONTAINERS
+
+Each list contains the corresponding scipy.sparse.*_matrix class and, for
+SciPy >= 1.8, the corresponding *_array class as well. Use these lists to
+test for or accept sparse inputs in a version-robust way.
+
+Version parsing
+---------------
+parse_version is used to compare dependency versions robustly. The module
+initializes:
+- np_version — parsed NumPy version
+- sp_version — parsed SciPy version
+- sp_base_version — parsed SciPy base version
+
+Small helpers
+-------------
+_object_dtype_isnan(X)
+    Fast test for NaNs in object-dtype arrays. Returns an array of booleans
+    where NaN positions are True. Implementation relies on NaN != NaN.
+
+percentile(a, q, *, method="linear", **kwargs)
+    Compatibility wrapper around numpy.percentile that normalizes the
+    keyword name for interpolation/method across NumPy versions:
+
+    - For NumPy < 1.22, the function accepts method but passes it to the
+      deprecated interpolation argument.
+    - For NumPy >= 1.22, the wrapper uses numpy.percentile directly.
+
+Threadpool control
+------------------
+The module provides compatibility behavior for threadpoolctl (>=3.0.0) and
+exposes two functions mirroring threadpoolctl's public API:
+
+threadpool_limits(limits=None, user_api=None)
+    Context manager or function to limit the number of threads used by
+    external thread pools (OpenMP, BLAS, etc.). If threadpoolctl provides a
+    global ThreadpoolController (threadpoolctl >= 3.0.0) a single global
+    controller is created and reused via the sklearn module attribute
+    _sklearn_threadpool_controller. Otherwise it falls back to calling
+    threadpoolctl.threadpool_limits directly.
+
+threadpool_info()
+    Return information about detected threadpools. Uses the global
+    ThreadpoolController when available; otherwise falls back to
+    threadpoolctl.threadpool_info.
+
+Both functions copy their docstrings from threadpoolctl so behavior and usage
+match that library.
+
+Deprecated import wrapper
+-------------------------
+delayed(function)
+    Deprecated alias that re-exports sklearn.utils.parallel.delayed. The
+    import path from sklearn.utils.fixes is deprecated and will be removed in
+    a future release. The wrapper is decorated with a deprecation message.
+
+SciPy compatibility helpers
+---------------------------
+_mode(a, axis=0)
+    Compatibility wrapper for scipy.stats.mode with behavior adjustments for
+    SciPy versions:
+
+    - For SciPy >= 1.9.0: calls scipy.stats.mode(a, axis=axis, keepdims=True).
+      For SciPy >= 1.10.999 there is an additional shape adjustment when
+      axis is None (see SciPy changes in returned shapes).
+    - For older SciPy versions: calls scipy.stats.mode(a, axis=axis).
+
+_sparse_linalg_cg(A, b, **kwargs)
+    Backward-compatibility wrapper for scipy.sparse.linalg.cg. This adapts
+    keyword names and defaults for older SciPy versions (when SciPy <
+    1.12.0):
+
+    - If "rtol" is provided, it will be renamed to "tol".
+    - If "atol" is not provided, it defaults to "legacy" for older SciPy
+      behavior.
+
+Line search imports
+-------------------
+line_search_wolfe1, line_search_wolfe2
+    Imported from the appropriate module path depending on SciPy version:
+    newer SciPy moved these functions; the module chooses the correct import
+    to preserve compatibility.
+
+Backport of importlib.resources API
+----------------------------------
+A small set of helpers provide a consistent interface for reading package
+resource files across Python versions (Python 3.9 introduced a new API):
+
+_open_text(data_module, data_file_name)
+    Open a resource file for text reading. Uses resources.files(...).joinpath(...)
+    for Python >= 3.9 and resources.open_text for older Pythons.
+
+_open_binary(data_module, data_file_name)
+    Same as _open_text but opens the file in binary mode.
+
+_read_text(descr_module, descr_file_name)
+    Read and return the text content of a resource file. Uses the modern
+    resources.files(...).read_text() when available.
+
+_path(data_module, data_file_name)
+    Return a context manager or path-like object for a resource file using
+    resources.as_file on Python >= 3.9; returns None for older versions
+    where this helper is not applicable.
+
+Notes about removal
+-------------------
+Compatibility branches and TODO comments in the code indicate when pieces of
+this module can be removed:
+- Sparse array handling in the container lists can be simplified once SciPy
+  1.8 is the minimum supported SciPy.
+- The _mode compatibility code may be removed once SciPy 1.11 is the minimum.
+- The _sparse_linalg_cg wrapper may be removed once SciPy 1.12 is the minimum.
+- The importlib.resources backports may be removed when Python 3.9 is the
+  minimum supported Python.
+
+Guidance for developers
+-----------------------
+- Prefer adding general-purpose fixes here only when they are needed in
+  multiple modules or when they isolate a version-dependent behavior.
+- Keep changes minimal and document the dependency version that makes the
+  compatibility workaround unnecessary (use code comments).
+- When removing compatibility code, also remove associated tests that exist
+  solely to guard the workaround for older versions.

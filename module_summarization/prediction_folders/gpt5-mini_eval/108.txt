@@ -1,0 +1,193 @@
+Polynomial factorization routines in characteristic zero
+======================================================
+
+This module implements factorization routines for polynomials over characteristic
+zero domains (primarily the integer ring and algebraic number fields). The
+implementation is provided as a mixin class, _Factor, intended to be used by
+ring/polynomial classes that provide the necessary algebraic operations and
+attributes (domain, gens, degree, LC, monic, sqf_part, primitive, etc.).
+
+Overview
+--------
+
+The factorization workflow implemented here includes:
+
+- Trial division to recover multiplicities and remove trivial integer factors.
+- Zassenhaus and enhanced/extended Zassenhaus strategies for factoring
+  primitive square-free univariate polynomials in Z[x].
+- Hensel lifting to lift modular factorizations to integer factorizations.
+- Cyclotomic and irreducibility shortcuts when enabled by configuration.
+- Reduction of multivariate problems to univariate cases via evaluation /
+  Wang's algorithm and recursive factorization of coefficient rings.
+- AA-Trager style factorization for polynomials over algebraic number fields.
+
+Typical return conventions
+--------------------------
+
+Most high-level factorization entry points follow the convention:
+
+- For Z-factorization: returns (content, [(factor_1, k1), ..., (factor_n, kn)]).
+- For algebraic/number-field factorization: returns (leading_coefficient, list_of_factors)
+- For internal factor lists: lists of polynomial factors (optionally with multiplicity).
+
+Class: _Factor
+--------------
+
+Mixin providing factorization-related methods. Requires the host polynomial/ring
+object to expose attributes and operations used throughout (domain, gens,
+is_univariate, LC, degree, monic, primitive, sqf_part, sqf_norm, set_domain,
+compose, eject, inject, max_norm, etc.).
+
+Methods
+-------
+
+_trial_division(f, factors)
+    Perform trial division of polynomial f by a sequence of factor polynomials.
+    Repeatedly divides f by each candidate factor to recover multiplicities and
+    returns a sorted list of (factor, multiplicity) pairs.
+
+    Parameters
+    - f: polynomial to be divided
+    - factors: iterable of factor polynomials to try
+
+    Returns
+    - list of (factor, multiplicity) tuples, sorted using internal sorting
+      utility.
+
+_aa_factor_trager(f)
+    Factor multivariate polynomials over algebraic number fields using an
+    approach akin to the Trager / algebraic-trace techniques.
+
+    Behavior highlights
+    - Works with the polynomial's algebraic number field domain.
+    - Makes the input monic and separates the leading coefficient.
+    - For ground polynomials returns the leading coefficient and an empty factor
+      list.
+    - Computes square-free part and normalizes the square-free factorization
+      (via sqf_norm).
+    - Factors the resulting polynomial r in the underlying number-field domain,
+      adjusts cofactors back to the original domain and recovers multiplicities
+      via trial division.
+
+    Returns
+    - (leading_coefficient, [(factor, multiplicity), ...])
+
+_zz_factor(f)
+    Factor polynomials with integer coefficients (Z[X]). Handles both
+    univariate and multivariate polynomials.
+
+    Behavior highlights
+    - For univariate polynomials:
+      - Extracts content and primitive part.
+      - Uses irreducibility checks (configurable via query('USE_IRREDUCIBLE_IN_FACTOR')).
+      - Computes square-free part and attempts cyclotomic factorization if enabled
+        (query('USE_CYCLOTOMIC_FACTOR')).
+      - Falls back to Zassenhaus (or EEZ variant) using Hensel lifting.
+      - Uses trial division to recover multiplicities and returns content and
+        factor list.
+    - For multivariate polynomials:
+      - Extracts content, reduces to a polynomial in the first variable (using
+        eject/inject), factors recursively the coefficient ring, and uses Wang's
+        method to reduce to an effectively univariate factoring problem when
+        possible.
+      - Returns content and a sorted list of (factor, multiplicity) in the
+        original ring.
+
+    Returns
+    - (content, [(factor_1, k1), ..., (factor_n, kn)])
+
+    Examples
+    - Univariate:
+      >>> _, x = ring('x', ZZ)
+      >>> (2*x**4 - 2).factor_list()
+      (2, [(x - 1, 1), (x + 1, 1), (x**2 + 1, 1)])
+    - Multivariate:
+      >>> _, x, y = ring('x y', ZZ)
+      >>> (2*x**2 - 2*y**2).factor_list()
+      (2, [(x - y, 1), (x + y, 1)])
+
+_zz_mignotte_bound(f)
+    Compute a Mignotte-type bound for multivariate polynomials with integer
+    coefficients.
+
+    Formula (used internally)
+    - Let a = max norm of coefficients of f (max |coeff|)
+    - b = |LC(f)|
+    - n = sum of degrees in all variables
+    - Returns sqrt(n + 1) * 2^n * a * b (as an element of the integer domain)
+
+    Purpose
+    - This bound is used to determine lifting precision and to certify factor
+      reconstruction in the Zassenhaus algorithm.
+
+_zz_zassenhaus(f)
+    Factor a primitive square-free univariate polynomial f in Z[x] using the
+    Zassenhaus algorithm (with heuristics and bounds to control modular choices
+    and lifting).
+
+    Algorithm overview
+    - Assumes f is primitive and square-free and that the coefficient domain
+      is the integer ring.
+    - For degree n == 1 returns [f].
+    - Chooses small primes p for which f modulo p is square-free and factors
+      f over GF(p). Collects candidate modular factorizations.
+    - Uses a Mignotte bound to determine lifting precision l and performs
+      Hensel lifting of the modular factors to modulus p**l.
+    - Searches subsets of lifted factors to recover integer factors by checking
+      divisibility constraints (e.g. constant coefficient divisibility).
+    - Returns a list of irreducible integer factors of f (without multiplicities).
+
+    Notes
+    - The implementation includes heuristics to select the modular prime p and
+      to bound the number of modular factorizations examined.
+    - The routine relies on helper methods like _zz_hensel_lift and on integer
+      arithmetic in the polynomial domain.
+
+Configuration and shortcuts
+---------------------------
+
+Several behaviors are controlled by global configuration queries:
+
+- query('USE_IRREDUCIBLE_IN_FACTOR'):
+  If enabled, performs an irreducibility test on certain polynomials to avoid
+  expensive factoring when the polynomial is already irreducible.
+
+- query('USE_CYCLOTOMIC_FACTOR'):
+  If enabled, attempts to extract cyclotomic factors from a polynomial
+  before running general Zassenhaus factoring.
+
+Related algorithms and helpers
+------------------------------
+
+- Hensel lifting: used to lift modular factors to high-precision integer
+  factors. Implemented in helper methods (e.g. _zz_hensel_lift).
+- Cyclotomic factor detection: attempts to find cyclotomic factors quickly,
+  reducing the burden on general factorization.
+- Wang's algorithm / evaluation reduction: reduces multivariate factorization
+  to smaller problems by evaluating some variables and lifting factors back.
+
+Exceptions
+----------
+
+The routine set may raise standard polynomial-related exceptions from the
+polyerrors module, including (but not limited to):
+
+- CoercionFailedError
+- DomainError
+- EvaluationFailedError
+- ExtraneousFactorsError
+
+References
+----------
+
+- Gathen, J. von zur, & Gerhard, J. (1999). Modern Computer Algebra.
+  (Discusses Zassenhaus, Hensel lifting, Mignotte bounds and related
+  polynomial factorization algorithms.)
+
+See also
+--------
+
+- ntheory.factorint, ntheory.isprime, ntheory.nextprime: used to select primes
+  and to perform number-theoretic checks.
+- modular.symmetric_residue: used for modular arithmetic helpers.
+- polyutils._sort_factors: used to provide deterministic sorting of factor lists.

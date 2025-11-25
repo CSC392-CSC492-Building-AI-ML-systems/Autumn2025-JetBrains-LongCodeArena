@@ -1,0 +1,109 @@
+Transforming the prediction target
+==================================
+
+Overview
+--------
+Sometimes improving a supervised learning model requires transforming the target variable y rather than — or in addition to — the features X. Transformations can stabilize variance, reduce skew, make relationships more linear, or satisfy model assumptions. Common transformations include log, power/Box–Cox, scaling, or more general learned transforms. When using a transformed target, predictions must be mapped back to the original scale using the inverse transform.
+
+When to transform the target
+----------------------------
+- Heteroscedasticity: variance of y grows with magnitude (log or Box–Cox can help).
+- Skewed distributions: heavy right/left skew (log1p, power transforms).
+- Stabilize training or improve optimization: e.g., neural nets or linear models.
+- Interpretability: model and residuals easier to interpret on transformed scale.
+
+Do not transform classification labels (except for encoding); target transforms apply to continuous targets (regression, some multilabel regression).
+
+Key tool: TransformedTargetRegressor
+------------------------------------
+scikit-learn provides a wrapper to apply a transformer to y during fitting and to automatically inverse-transform predictions:
+
+- The wrapper expects a regressor and a transformer implementing fit, transform and inverse_transform.
+- On fit: the transformer is fit on y (often reshaped to 2D), y is transformed and the regressor is fit on X and transformed y.
+- On predict: the regressor predicts on X to give predictions on the transformed scale; these are inverse-transformed to return predictions on the original scale.
+- Works with pipelines, cross-validation and model selection utilities.
+- Supports 1d and 2d targets (multioutput regression). The transformer must accept/produce the corresponding array shape; use FunctionTransformer or wrap with reshape/validate flags if needed.
+- Sample weights supplied to fit are forwarded to the regressor’s fit method.
+
+Basic usage
+-----------
+Create a simple log-target regressor with inverse transform using FunctionTransformer:
+
+::
+    from sklearn.compose import TransformedTargetRegressor
+    from sklearn.preprocessing import FunctionTransformer
+    from sklearn.ensemble import RandomForestRegressor
+    import numpy as np
+
+    log = FunctionTransformer(func=np.log1p, inverse_func=np.expm1, validate=False)
+    ttr = TransformedTargetRegressor(regressor=RandomForestRegressor(),
+                                     transformer=log)
+
+    # Fit and predict (y can be 1d)
+    ttr.fit(X_train, y_train)
+    y_pred = ttr.predict(X_test)   # predictions on original scale
+
+Transformer choices
+-------------------
+- FunctionTransformer: for simple, stateless transforms (log, exp, Box–Cox wrappers, custom functions).
+- Scikit-learn estimators implementing TransformerMixin (e.g., StandardScaler). Note: many transformers expect 2D arrays; the target may need shape (n_samples, 1).
+- Custom transformer: implement fit/transform/inverse_transform. Ensure shape handling for 1D vs 2D targets and that inverse_transform recovers the original scale.
+
+Examples
+--------
+Log-transform with a linear model:
+
+::
+    from sklearn.compose import TransformedTargetRegressor
+    from sklearn.preprocessing import FunctionTransformer
+    from sklearn.linear_model import Ridge
+
+    log = FunctionTransformer(np.log1p, inverse_func=np.expm1, validate=False)
+    model = TransformedTargetRegressor(Ridge(), transformer=log)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+
+Box–Cox (requires positive y); use a wrapper that applies boxcox and inverse_boxcox, and validate inputs:
+
+::
+    from scipy import stats
+    from sklearn.preprocessing import FunctionTransformer
+
+    def boxcox_transform(y):
+        y = np.asarray(y).reshape(-1)
+        # choose lambda via maximum likelihood or pre-fit externally
+        y_bc, lmbda = stats.boxcox(y)
+        # if you need to store lmbda, implement a custom transformer class
+        return y_bc.reshape(-1, 1)
+
+    # For complex transforms that require fitting parameters (e.g., Box–Cox lambda),
+    # implement a TransformerMixin-based estimator with fit/transform/inverse_transform.
+
+Multioutput targets
+-------------------
+- TransformedTargetRegressor accepts multioutput targets (shape (n_samples, n_outputs)).
+- Use a transformer that can handle multi-dimensional y (e.g., a scaler applied column-wise).
+- For independent transforms per output, compose multiple TransformedTargetRegressor wrappers or implement a transformer that applies column-wise transforms.
+
+Pipelines, cross-validation and model selection
+-----------------------------------------------
+- Wrap the regressor with TransformedTargetRegressor and use that wrapper in Pipelines, GridSearchCV, cross_val_score, etc.
+- Scoring functions operate on predictions returned by TransformedTargetRegressor (i.e., on the original target scale).
+- When tuning hyperparameters of the target transformer, include the transformer parameters in the estimator passed to model selection utilities; they will be considered by GridSearchCV if exposed via get_params.
+
+Sample weights and fit semantics
+-------------------------------
+- Sample weights passed to the wrapper’s fit method are forwarded to the underlying regressor’s fit. Transformers that need to learn parameters from y should implement fit to accept y (they typically do), but sample weights are not forwarded to the transformer unless explicitly supported.
+- If the transformer itself should consider sample weights when fitting (rare), implement a transformer with fit(X=None, y=None, sample_weight=None) and call it appropriately in a custom wrapper.
+
+Practical considerations and common pitfalls
+-------------------------------------------
+- Shape mismatches: many sklearn transformers expect 2D arrays. Reshape y to (n_samples, 1) internally or use FunctionTransformer(validate=False).
+- Numerical domain: ensure transforms are defined for all y (e.g., log requires y > -1 for log1p with non-negative y).
+- Inverse transform must be accurate: small numerical errors can lead to negative predictions after inverse transform for transforms that assume positivity.
+- Heteroscedasticity vs bias: transforming y changes the loss surface — improvements under one metric (e.g., RMSE on transformed scale) may not translate to improvements on the original scale. Use meaningful evaluation metrics on the original scale.
+- Avoid leaking information: if transform parameters are learned (e.g., Box–Cox lambda), those parameters must be learned only on the training fold during cross-validation. Using TransformedTargetRegressor or a properly constructed pipeline ensures transformers are fit within each fold.
+
+Summary
+-------
+Transforming the prediction target is a powerful technique for regression problems. Use TransformedTargetRegressor with a suitable transformer to fit on a transformed target and obtain predictions back on the original scale. Be mindful of shapes, domains, sample-weight semantics, and evaluation metrics on the original scale.

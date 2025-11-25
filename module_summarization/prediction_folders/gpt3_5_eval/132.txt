@@ -1,0 +1,96 @@
+# Markov chain Monte Carlo simulation framework
+
+This module provides a framework for equilibrium sampling from a given thermodynamic state of a biomolecule using a Markov chain Monte Carlo scheme.
+
+It currently offers support for the following moves:
+- Langevin dynamics (assumed to be free of integration error; use at your own risk)
+- Hybrid Monte Carlo
+- Generalized hybrid Monte Carlo
+- Monte Carlo barostat moves
+
+These moves can be combined through the `SequenceMove` and `WeightedMove` classes.
+
+By default, the MCMC moves use the fastest OpenMM platform available and a shared global `ContextCache` that minimizes the number of OpenMM calls. The examples below demonstrate how to configure these aspects.
+
+References:
+- Jun S. Liu. Monte Carlo Strategies in Scientific Computing. Springer, 2008.
+
+## Examples
+
+### Creating the Initial State
+```python
+from simtk import unit
+from openmmtools import testsystems, cache
+from openmmtools.states import ThermodynamicState, SamplerState
+
+# Create the initial state for an alanine dipeptide system in vacuum
+test = testsystems.AlanineDipeptideVacuum()
+thermodynamic_state = ThermodynamicState(system=test.system, temperature=298*unit.kelvin)
+sampler_state = SamplerState(positions=test.positions)
+```
+
+### Creating MCMC Moves
+```python
+from openmmtools.mcmc import GHMCMove, LangevinDynamicsMove, MCMCSampler
+
+# Create an MCMC move to perform at every iteration of the simulation
+ghmc_move = GHMCMove(timestep=1.0*unit.femtosecond, n_steps=50)
+langevin_move = LangevinDynamicsMove(n_steps=10)
+
+# Initialize a sampler instance
+sampler = MCMCSampler(thermodynamic_state, sampler_state, move=ghmc_move)
+```
+
+### Combining Moves
+```python
+from openmmtools.mcmc import SequenceMove
+
+# Combine moves to form a sequence of moves
+sequence_move = SequenceMove([ghmc_move, langevin_move])
+sampler = MCMCSampler(thermodynamic_state, sampler_state, move=sequence_move)
+```
+
+### Weighted Moves
+```python
+from openmmtools.mcmc import WeightedMove
+
+# Create a move that selects one of the moves at random with given probability
+weighted_move = WeightedMove([(ghmc_move, 0.5), (langevin_move, 0.5)])
+sampler = MCMCSampler(thermodynamic_state, sampler_state, move=weighted_move)
+```
+
+### Configuring the Default Platform
+```python
+import openmm
+
+# Configure the default platform to use before starting the simulation
+reference_platform = openmm.Platform.getPlatformByName('Reference')
+cache.global_context_cache.platform = reference_platform
+cache.global_context_cache.time_to_live = 10  # number of read/write operations
+```
+
+### Minimizing and Running the Simulation
+```python
+# Minimize and run the simulation for a few iterations
+sampler.minimize()
+sampler.run(n_iterations=2)
+```
+
+### Using Local Caches
+```python
+local_cache1 = cache.ContextCache(capacity=5, time_to_live=50)
+local_cache2 = cache.ContextCache(platform=reference_platform, capacity=1)
+
+# Create moves with local caches
+sequence_move = SequenceMove([HMCMove(), LangevinDynamicsMove()], context_cache=local_cache1)
+ghmc_move = GHMCMove(context_cache=local_cache2)
+```
+
+### Using a Dummy Cache
+```python
+from openmmtools import cache
+
+# Create a move that does not cache Context but creates one every time
+dummy_cache = cache.DummyContextCache(platform=reference_platform)
+ghmc_move = GHMCMove(context_cache=dummy_cache)
+```

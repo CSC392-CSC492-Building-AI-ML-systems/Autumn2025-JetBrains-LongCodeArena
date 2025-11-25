@@ -1,0 +1,121 @@
+Computational performance
+=======================
+
+This document summarizes practical guidance and background for achieving good
+computational performance when using the library. It covers factors that most
+commonly affect runtime and memory, and provides tuning advice for parallelism,
+threading, memory use, and estimator-specific considerations.
+
+Hardware, BLAS and numerical libraries
+-------------------------------------
+- Linear-algebra backends (OpenBLAS, MKL, BLIS, Apple Accelerate) dominate
+  many numerical workloads. Choose a well-optimized BLAS for your platform.
+- The number of threads used by BLAS can be controlled with environment
+  variables such as OMP_NUM_THREADS, OPENBLAS_NUM_THREADS, MKL_NUM_THREADS,
+  and with the threadpoolctl Python API. Limiting BLAS threads often avoids
+  oversubscription when combining BLAS multithreading with process- or
+  thread-based parallelism.
+- Use recent, supported NumPy and SciPy releases for performance and bug fixes.
+  Minimum supported versions are pinned in the project (see the dependency
+  metadata).
+
+Parallelism: processes vs threads
+---------------------------------
+- The library exposes n_jobs parameters for many estimators and utilities:
+  - n_jobs=None or 1: single-threaded execution.
+  - n_jobs>1: run independent tasks in parallel (threads or processes),
+    typically via joblib.Parallel.
+- Use process-based parallelism (loky) when work is CPU-bound Python code that
+  cannot release the GIL; use threading backends when the underlying work is
+  released into native code (BLAS, C extensions) or when inter-process memory
+  copying would be costly.
+- Be mindful of oversubscription: if each worker also spawns BLAS threads,
+  total threads = workers × BLAS_threads. Prefer setting BLAS threads = 1 per
+  worker and tune n_jobs to available CPU cores.
+
+threadpoolctl and controlling native threadpools
+-----------------------------------------------
+- Native threadpools used by libraries (OpenBLAS, MKL, libomp, etc.) can be
+  inspected and limited via the threadpoolctl package. This avoids
+  over-subscription and improves reproducibility in parallel workflows.
+- Typical pattern: set BLAS_NUM_THREADS=1 (environment) or use
+  threadpoolctl.threadpool_limits within a context to temporarily limit native
+  threads during parallel sections.
+
+Joblib, memory and data sharing
+------------------------------
+- joblib.Parallel supports multiple backends (loky, multiprocessing, threading).
+  loky (the default) provides process isolation and avoids GIL contention, but
+  can duplicate memory unless using shared-memory techniques.
+- For large read-only arrays, prefer memory mapping or creating arrays before
+  forking to benefit from copy-on-write semantics (POSIX fork). On some systems
+  (spawn start method), this advantage does not apply.
+- Avoid unnecessary copies of large arrays. Pass views (numpy arrays, sparse
+  matrices) and prefer in-place transforms when safe.
+
+Sparse data
+-----------
+- Sparse matrices (scipy.sparse) are efficient when the data is sufficiently
+  sparse, but many algorithms are less optimized for sparse formats. Dense
+  operations are often faster for moderate sparsity.
+- Use appropriate sparse formats for the operation (CSR/CSC for arithmetic and
+  row/column slicing, COO for construction).
+- Conversions between sparse and dense representations are costly—avoid them
+  unless required.
+
+Estimator-level considerations
+----------------------------
+- Meta-estimators (for example multioutput wrappers) typically clone base
+  estimators for each target. This cloning and the per-target fit/predict loop
+  can introduce overhead. Many multioutput algorithms expose n_jobs to
+  parallelize across outputs; tune it for your hardware.
+- Cloning an estimator is a lightweight operation, but if the base estimator
+  holds large internal state (e.g., precomputed arrays) cloning will not copy
+  that state; fitting will recreate it per clone.
+- Sample weights: passing sample_weight may change algorithmic code paths and
+  performance. Prefer efficient weighting schemes supported natively by the
+  estimator when available.
+- partial_fit (online learning) reduces peak memory by incremental updates and
+  is useful for streaming or very large datasets, but may require multiple
+  passes for the same accuracy as a full-batch fit.
+
+Reproducibility and randomness
+------------------------------
+- Set random_state where available to ensure reproducibility of randomized
+  algorithms. Random number generation rarely dominates runtime but can affect
+  convergence and hence performance indirectly.
+- Parallel execution can alter execution order and numeric reductions; small
+  reproducibility differences may occur across n_jobs settings.
+
+Profiling and diagnosing bottlenecks
+-----------------------------------
+- Use wall-clock timing tools (timeit, perf) and profilers (cProfile, pyinstrument)
+  to find hotspots.
+- For CPU vs native-library contention, measure total process CPU and thread
+  counts. Use threadpoolctl to observe active native threadpools.
+- For memory issues, use memory_profiler, tracemalloc or system-level tools to
+  separate peak memory usage from persistent allocations.
+
+Best practices and tuning checklist
+----------------------------------
+- Pick an appropriate BLAS and limit its threads when using higher-level
+  parallelism.
+- Start with n_jobs=1 and benchmark single-process performance before enabling
+  multi-worker parallelism.
+- When parallelizing with joblib:
+  - Prefer loky for process isolation; use threading backend when the workload
+    is largely released to native code.
+  - Ensure BLAS threads per worker are limited (often to 1).
+- Use sparse arrays only when beneficial; avoid dense<->sparse churn.
+- Prefer vectorized NumPy operations and C-accelerated libraries over Python
+  loops.
+- Use partial_fit for streaming or memory-constrained scenarios.
+- Profile: measure before and after changes. Optimize the real bottleneck, not
+  the presumed one.
+
+Further reading
+---------------
+- Documentation for joblib and its parallel backends.
+- threadpoolctl API documentation for controlling native threadpools.
+- BLAS provider documentation (OpenBLAS, MKL) for environment variables and
+  tuning.

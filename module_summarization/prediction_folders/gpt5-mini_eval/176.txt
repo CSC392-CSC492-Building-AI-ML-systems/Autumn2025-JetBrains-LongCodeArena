@@ -1,0 +1,170 @@
+Calibration of predicted probabilities
+=====================================
+
+This document describes probability calibration techniques and the
+CalibratedClassifierCV meta-estimator for turning uncalibrated decision
+scores or predicted probabilities produced by a classifier into well
+calibrated probability estimates.
+
+Overview
+--------
+
+Many classification models produce scores that are not well calibrated as
+probabilities. Probability calibration aims to transform these scores so
+that they can be interpreted as accurate estimates of class membership
+probabilities. Two widely used calibration methods are implemented:
+
+- Sigmoid (Platt) calibration: a parametric method that fits a logistic
+  (sigmoid) function to map scores to probabilities. It is robust and
+  typically works well even with moderate amounts of calibration data.
+- Isotonic calibration: a non-parametric, monotonic regression method
+  (isotonic regression). It is more flexible but can overfit if the
+  calibration dataset is small (generally not advised with << 1000 samples).
+
+CalibratedClassifierCV
+----------------------
+
+CalibratedClassifierCV is a meta-estimator that wraps a base
+classifier and learns a calibration model for its outputs. It supports
+both calibration based on the classifier's decision_function (preferred
+when available) and based on predict_proba.
+
+Key features
+- Uses cross-validation to obtain unbiased calibration data.
+- Supports two calibration methods: ``'sigmoid'`` and ``'isotonic'``.
+- Can operate in ensemble mode to average calibrated estimators fitted
+  on each CV fold, or use cross-validated predictions for a single
+  calibrator and the base estimator trained on all data for prediction.
+- Accepts a prefit base estimator via ``cv="prefit"`` to perform
+  calibration on supplied data only.
+- Works with binary and multiclass classification (multiclass handled by
+  calibrating per class, effectively in a one-vs-rest manner).
+
+Usage summary
+- estimator: the base classifier to calibrate. If None, a linear SVM
+  (LinearSVC) is used by default.
+- method: one of ``'sigmoid'`` (Platt's method) or ``'isotonic'``.
+- cv: cross-validation strategy. If None, 5-fold CV is used. If
+  ``cv="prefit"``, the provided estimator is assumed to be already fitted
+  and all data will be used for calibration.
+- ensemble: if True (default), produce an ensemble of calibrated
+  classifiers (one per cv fold) and average their predicted
+  probabilities. If False, use cross-validated predictions to fit a
+  single calibrator and at prediction time use the base estimator
+  refit on all data.
+- n_jobs: number of parallel jobs when fitting base estimator clones
+  across CV folds.
+
+Parameters
+----------
+estimator : estimator instance, default=None
+    The classifier to be calibrated. If None, a default
+    :class:`~sklearn.svm.LinearSVC` is used.
+
+method : {'sigmoid', 'isotonic'}, default='sigmoid'
+    Calibration method. ``'sigmoid'`` fits a logistic link (Platt's
+    method). ``'isotonic'`` fits a monotonic non-parametric mapping.
+
+cv : int, CV splitter, iterable, or "prefit", default=None
+    Cross-validation strategy. If None, 5-fold CV is used. If
+    ``"prefit"``, the estimator is expected to be already fitted and all
+    data will be used for calibration.
+
+n_jobs : int, default=None
+    Number of parallel jobs to run when fitting clones of the base
+    estimator across CV folds. ``None`` means 1, ``-1`` means all CPUs.
+
+ensemble : bool, default=True
+    When ``cv`` is not ``"prefit"``, controls how the calibrator is
+    fitted:
+    - ``True``: fit an ensemble of calibrated estimators (one per CV
+      fold) and average their predicted probabilities.
+    - ``False``: obtain unbiased, cross-validated predictions to fit a
+      single calibrator; final predictions use the base estimator trained
+      on all data together with this calibrator.
+
+Attributes
+----------
+classes_ : ndarray of shape (n_classes,)
+    Class labels seen during fit.
+
+calibrated_classifiers_ : list
+    The list of fitted calibrated classifier(s). Length equals the number
+    of CV folds in ensemble mode, or 1 if ``cv="prefit"`` or
+    ``ensemble=False``.
+
+n_features_in_ : int
+    Number of features seen during fit (if the underlying estimator
+    exposes this attribute).
+
+feature_names_in_ : ndarray of shape (n_features_in_,)
+    Names of features seen during fit (if exposed by the underlying
+    estimator).
+
+Behavioral notes
+----------------
+- Decision function vs predict_proba: calibration is learned using
+  the estimator's :term:`decision_function` if available; otherwise
+  :term:`predict_proba` is used.
+- Prefit mode: when ``cv="prefit"``, no cross-validation is performed;
+  the user must ensure that the data used for calibration is disjoint
+  from the data used to fit the prefit estimator if unbiased estimates
+  are required.
+- Isotonic calibration requires more calibration data to avoid
+  overfitting. Avoid isotonic calibration with very small calibration
+  sets (e.g., << 1000 samples).
+- Multiclass classification is handled by fitting one calibrator per
+  class (one-vs-rest style) over the decision scores or probabilities
+  associated with each class.
+
+Examples
+--------
+Simple usage (sigmoid calibration, default CV):
+
+  >>> from sklearn.datasets import make_classification
+  >>> from sklearn.svm import SVC
+  >>> from sklearn.calibration import CalibratedClassifierCV
+  >>> X, y = make_classification(n_samples=1000, random_state=0)
+  >>> base = SVC(kernel='linear', probability=False, random_state=0)
+  >>> calibrated = CalibratedClassifierCV(base, method='sigmoid', cv=5)
+  >>> calibrated.fit(X, y)
+  >>> calibrated.predict_proba(X[:3])
+  array([[0.12, 0.88],
+         [0.77, 0.23],
+         [0.05, 0.95]])
+
+Prefit estimator calibration:
+
+  >>> prefit = SVC(kernel='linear', probability=True).fit(X, y)
+  >>> calibrated = CalibratedClassifierCV(prefit, cv='prefit', method='isotonic')
+  >>> calibrated.fit(X, y)  # here X is used for calibration only
+
+Ensemble vs non-ensemble calibration:
+
+  - ensemble=True (default): multiple calibrated estimators are created
+    (one per CV fold), and predicted probabilities are averaged across
+    them.
+  - ensemble=False: cross-validated predictions are used to fit a single
+    calibrator; final predictions use the base estimator trained on all
+    data.
+
+See also
+--------
+- :class:`sklearn.isotonic.IsotonicRegression` — isotonic (non-parametric)
+  calibration model.
+- Platt scaling (logistic calibration / sigmoid calibration) — parametric
+  logistic model for calibration.
+
+References
+----------
+- Platt, J. (1999). Probabilistic outputs for support vector machines and
+  comparisons to regularized likelihood methods. Advances in Large Margin
+  Classifiers.
+- Zadrozny, B. and Elkan, C. (2001). Obtaining calibrated probability
+  estimates from decision trees and naive Bayesian classifiers. ICML.
+
+Notes for developers
+--------------------
+- The estimator is cloned and fitted on CV folds when ``cv != "prefit"``.
+- Parallelization is applied across CV iterations when ``n_jobs`` is set.
+- Calibration is implemented per class for multiclass tasks.

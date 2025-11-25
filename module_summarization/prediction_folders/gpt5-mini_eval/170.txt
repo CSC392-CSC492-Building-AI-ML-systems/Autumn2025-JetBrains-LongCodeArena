@@ -1,0 +1,81 @@
+Handling large datasets
+======================
+
+Overview
+--------
+This project supports multiple strategies to compute collapsed (moment) maps from large spectral-cube datasets while balancing memory use and runtime. Depending on available RAM, data layout, mask sparsity and the required moment order, one of three strategies is selected:
+
+- cubewise — load and operate on the entire cube in memory;
+- slicewise — process the cube one spectral slice (plane) at a time;
+- raywise — iterate along spatial rays (spectrum per pixel) and compute per-ray results.
+
+The convenience wrapper moment_auto(cube, order, axis) chooses an appropriate strategy via iterator_strategy(cube, axis). Understanding the tradeoffs and implementation details below helps choose or tune strategies for big-data workflows.
+
+Strategy summary
+----------------
+
+Cubewise
+^^^^^^^^
+- Approach: load a fully filled data array (cube._get_filled_data()) and perform vectorized numpy reductions (np.nansum, elementwise arithmetic) along the spectral axis.
+- Pros: fastest when the cube fits in memory; takes full advantage of numpy vectorization.
+- Cons: requires memory proportional to the full cube (plus temporary arrays for intermediate results); not suitable for very large datasets.
+- Notes: NaNs are handled with nan-aware reductions. The code uses allbadtonan wrapper to convert all-bad reductions to NaN consistently.
+
+Slicewise
+^^^^^^^^^
+- Approach: iterate over spectral planes, accumulate moment numerators and denominators slice-by-slice, and track which spatial pixels have valid data.
+- Pros: much lower memory requirement than cubewise — only one spectral slice (plane) is resident at a time plus small accumulators; good when the cube is tall in spectral axis but limited in memory.
+- Cons: multiple passes may be needed for higher-order moments (e.g., compute moment 1 first then moment n), which increases I/O/CPU; less vectorized than cubewise.
+- Notes: Slicewise uses cube._get_filled_data(fill=...) to retrieve slices, multiplies by per-slice pixel-size (cube._pix_size_slice(axis)) and handles validity with np.isfinite to avoid contaminating accumulators.
+
+Raywise
+^^^^^^^
+- Approach: iterate per spatial pixel along the spectral axis (cube._iter_rays(axis)), compute moments for each ray using only the spectral values for that ray.
+- Pros: lowest memory footprint and good for cubes with sparse masks because rays wholly excluded by the mask are skipped; easy to incorporate complex include/exclude logic (cube._mask.include).
+- Cons: higher Python-level iteration overhead (one loop per ray) and thus slower in pure-Python environments; best when many rays are masked out or when a single spectrum fits easily in memory.
+- Notes: The raywise path uses cube.flattened(slc).value and per-ray pix_size and pix_cen to compute weighted sums. It short-circuits moment computation when the mask excludes the whole ray.
+
+Selecting a strategy
+--------------------
+The moment_auto(cube, order, axis) helper consults iterator_strategy(cube, axis) to pick a strategy that balances memory and speed. Factors considered include:
+- total cube size vs. available memory,
+- dimensionality and requested axis (which determines the size of slices and rays),
+- sparsity and complexity of masks,
+- expected cost of repeated passes for higher-order moments.
+
+Implementation details and gotchas
+---------------------------------
+- Pixel geometry: computations use cube._pix_size_slice(axis) (pixel widths) and cube._pix_cen()[axis] (pixel centers) to produce correctly weighted moments in physical units.
+- NaN/masked handling: sparse or invalid data are represented as NaNs (or masked via the cube mask). Slicewise keeps a boolean valid accumulator and sets result pixels with no valid data to NaN. Cubewise uses np.nansum and an allbadtonan wrapper to ensure all-bad results become NaN rather than zero.
+- Higher-order moments: computing orders > 1 generally requires knowledge of moment 1. The slicewise and cubewise implementations compute moment 1 first and then use it to compute higher-moment numerators to avoid biased results.
+- Broadcasting and shapes: when using cubewise for higher moments, the moment-1 map is reshaped and inserted along the spectral axis so broadcasting with the full data array works correctly.
+- Mask inclusion tests: raywise uses cube._mask.include to quickly skip rays without included data; use masks to dramatically reduce computation when the data are sparse.
+- Avoid unnecessary copies: prefer retrieving/viewing slices or rays rather than materializing new full-cube copies. Use fill options prudently — filling with zeros or NaNs has different performance and numerical consequences.
+
+Working with multiple Stokes components
+--------------------------------------
+The StokesSpectralCube class groups multiple Stokes parameter cubes and supports component-specific masks plus a common mask. When operating on multi-Stokes data:
+- Perform moment computations per Stokes component to conserve memory and exploit re-use of per-component masks.
+- If components share geometry and masks, process components in a streaming fashion (e.g., raywise or slicewise) to avoid holding all components simultaneously.
+- Use per-component include logic to skip unused spectra per Stokes plane.
+
+Performance tips and best practices
+----------------------------------
+- If memory permits, use cubewise for best performance; otherwise use slicewise or raywise based on which axis minimizes working-set size.
+- For higher-order moments compute moment 1 first and reuse it rather than trying to compute all orders in a single multi-pass operation.
+- Exploit masking to skip large swaths of data (raywise benefits most).
+- Profile memory usage and CPU hotspots; vectorized numpy reductions are much faster than Python loops but require enough RAM.
+- Consider memory-mapped arrays (or on-disk chunking) at the I/O layer if the cube backend supports it, to avoid allocating large in-memory arrays.
+- Keep intermediate arrays as small as possible (use appropriate dtypes) and reuse accumulator arrays when safe.
+
+Troubleshooting
+---------------
+- Empty or fully masked outputs: ensure masks and include logic are correct; slicewise sets invalid spatial pixels to NaN when no valid data exist.
+- Unexpected zeros: check whether reductions over entirely-masked slices return zeros — the code wraps reductions so all-bad results are converted to NaN.
+- Slow raywise runs: check mask density — if most rays are included, raywise will be slower than slicewise or cubewise; switch strategy accordingly.
+
+See also
+--------
+- moment_auto(cube, order, axis): automatic selection wrapper
+- moment_cubewise, moment_slicewise, moment_raywise: explicit strategy implementations
+- cube._get_filled_data, cube._pix_size_slice, cube._pix_cen, cube._iter_rays, cube.flattened, cube._mask.include: low-level data access and mask helpers

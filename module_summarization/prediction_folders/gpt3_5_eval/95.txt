@@ -1,0 +1,117 @@
+```rst
+Generate documentation for this module
+=======================================
+
+Stateless learning rate schedulers
+----------------------------------
+
+Stateless schedulers solve some of the problems associated with PyTorch's built-in schedulers provided in
+``torch.optim.lr_scheduler``. The primary design goal of the schedulers provided in this module is to allow
+schedulers to interface directly with Composer's ``composer.core.time`` abstraction. This means that schedulers can
+be configured using arbitrary but explicit time units.
+
+:class:`~.ComposerScheduler`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Specification for a stateless scheduler function.
+
+While this specification is provided as a Python class, an ordinary function can implement this interface as long
+as it matches the signature of this interface's ``ComposerScheduler.__call__`` method.
+
+For example, a scheduler that halves the learning rate after 10 epochs could be written as:
+
+.. code:: python
+
+    def ten_epoch_decay_scheduler(state: State) -> float:
+        if state.timestamp.epoch < 10:
+            return 1.0
+        return 0.5
+
+    # ten_epoch_decay_scheduler is a valid ComposerScheduler
+    trainer = Trainer(
+        schedulers=[ten_epoch_decay_scheduler],
+       ...
+    )
+
+In order to allow schedulers to be configured, schedulers may also written as callable classes:
+
+.. code:: python
+
+    class VariableEpochDecayScheduler(ComposerScheduler):
+
+        def __init__(num_epochs: int):
+            self.num_epochs = num_epochs
+
+        def __call__(state: State) -> float:
+            if state.time.epoch < self.num_epochs:
+                return 1.0
+            return 0.5
+
+    ten_epoch_decay_scheduler = VariableEpochDecayScheduler(num_epochs=10)
+    # ten_epoch_decay_scheduler is also a valid ComposerScheduler
+    trainer = Trainer(
+        schedulers=[ten_epoch_decay_scheduler],
+       ...
+    )
+
+The constructions of ``ten_epoch_decay_scheduler`` in each of the examples above are equivalent. Note that neither
+scheduler uses the ``scale_schedule_ratio`` parameter. As long as this parameter is not used when initializing
+``Trainer``, it is not required that any schedulers implement that parameter.
+
+``ComposerScheduler.__call__``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Calculate the current learning rate multiplier :math:`\alpha`.
+
+A scheduler function should be a pure function that returns a multiplier to apply to the optimizer's provided
+learning rate, given the current trainer state, and optionally a "scale schedule ratio" (SSR). A typical
+implementation will read ``state.timestamp``, and possibly other fields like ``state.max_duration``, to determine
+the trainer's latest temporal progress.
+
+All instances of ``ComposerScheduler`` output a `multiplier` for the learning rate, rather than the
+learning rate directly. By convention, we use the symbol :math:`\alpha` to refer to this multiplier. This
+means that the learning rate :math:`\eta` at time :math:`t` can be represented as
+:math:`\eta(t) = \eta_i \times \alpha(t)`, where :math:`\eta_i` represents the learning rate used to
+initialize the optimizer.
+
+It is possible to use multiple schedulers, in which case their effects will stack multiplicatively.
+
+The ``ssr`` param indicates that the schedule should be "stretched" accordingly. In symbolic terms, where
+:math:`\alpha_\sigma(t)` represents the scheduler output at time :math:`t` using scale schedule ratio
+:math:`\sigma`:
+
+.. math::
+
+    \alpha_{\sigma}(t) = \alpha(t / \sigma)
+
+Args:
+    state (State): The current Composer Trainer state.
+    ssr (float): The scale schedule ratio. In general, the learning rate computed by this
+        scheduler at time :math:`t` with an SSR of 1.0 should be the same as that computed by
+        this scheduler at time :math:`t \times s` with an SSR of :math:`s`. Default = ``1.0``.
+
+Returns:
+    alpha (float): A multiplier to apply to the optimizer's provided learning rate.
+
+``_convert_time``
+~~~~~~~~~~~~~~~~~
+
+Converts a time value to a different unit based on the state and scale schedule ratio.
+
+Args:
+    time (Union[str, Time[int], Time[float]]): The time value to convert.
+    state (State): The current Composer Trainer state.
+    ssr (float): The scale schedule ratio. Default = 1.0.
+
+Returns:
+    Time[int]: The converted time value.
+
+``compile_composer_scheduler``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Converts a stateless scheduler into a PyTorch scheduler object.
+
+While the resulting scheduler provides a ``.step()`` interface similar to other PyTorch schedulers, the scheduler is
+also given a bound reference to the current ``composer.core.State``. This means that any internal state updated
+by ``.step()`` can be ignored.
+```

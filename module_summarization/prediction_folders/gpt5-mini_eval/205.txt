@@ -1,0 +1,93 @@
+Stochastic Gradient Descent (SGD)
+================================
+
+Overview
+--------
+Stochastic Gradient Descent (SGD) is an iterative optimization method that updates model parameters using (noisy) estimates of the gradient computed on individual samples or small mini-batches. It scales to large datasets and is commonly used for linear models (linear regression, logistic regression, linear SVMs) and multinomial classification.
+
+This implementation family also includes variance-reduced solvers (SAG, SAGA) which maintain additional state to reduce gradient variance and often achieve faster convergence on strongly convex problems.
+
+Algorithm
+---------
+At each iteration t and for a sampled training example (x_i, y_i), SGD performs the update:
+
+    w_{t+1} = w_t - eta_t * g_t
+
+where g_t is the gradient of the loss for the current example (optionally regularized) and eta_t is the learning rate at iteration t. For models with an intercept term the intercept is updated similarly (typically without regularization).
+
+For L1 (and elastic-net) penalties, a proximal (soft-thresholding) step is applied to the weights after the gradient step:
+
+    w <- soft_threshold(w, lambda * eta_t)
+
+where soft_threshold(x, s) = max(x - s, 0) - max(-x - s, 0).
+
+Variance‑reduced methods
+------------------------
+SAG (Stochastic Average Gradient) and SAGA maintain stored gradients for each training example (or a running average) and update parameters using an average of these stored gradients. This reduces the variance of the stochastic gradient estimator and often yields faster linear convergence on strongly convex problems.
+
+SAGA improves on SAG by using an unbiased correction that yields better theoretical properties in some settings. Both methods require extra memory proportional to the number of training samples times the model output dimension (for multiclass problems, the per-sample stored quantity is a vector of class probabilities/gradients).
+
+Loss functions
+--------------
+This code supports the typical convex losses used with SGD-family solvers:
+
+- Squared loss (ordinary least squares / ridge regression)
+- Logistic (binary) loss (log-loss)
+- Multinomial logistic loss (softmax + log-sum-exp) for multiclass classification
+
+The multinomial loss is computed in a numerically stable way using a log-sum-exp reduction:
+
+    loss = sample_weight * (logsumexp(prediction) - prediction[y])
+
+and the per-class gradient for a single sample is:
+
+    grad_c = sample_weight * (p[c] - 1_{c==y})
+
+where p[c] are probabilities obtained from the (stable) softmax computations.
+
+Regularization and Proximal Operators
+------------------------------------
+Supported regularizers:
+
+- L2 (ridge): adds alpha * ||w||^2 to the objective; implemented as an additive term in the gradient.
+- L1 (lasso): handled via soft-thresholding (proximal operator) after the gradient update.
+- Elastic‑net: combination of L1 and L2; implemented as a gradient step for the L2 part and a soft-thresholding proximal step for the L1 part.
+
+Numerical stability and implementation details
+----------------------------------------------
+- Multinomial loss and probability computations use a log-sum-exp trick to avoid overflow/underflow.
+- For L1/elastic-net soft-thresholding uses a fast inline fmax-based implementation for efficiency.
+- The implementation is specialized for both 32-bit and 64-bit floating point types for performance and memory trade-offs.
+- Sequential dataset access paths are available to enable cache-friendly and low-overhead iteration over samples during training.
+- Convergence can be accelerated with variance-reduced methods (SAG and SAGA) at the cost of storing per-sample gradient information.
+
+Practical considerations
+------------------------
+- Learning rate schedule (constant / diminishing) and its initial value are critical to SGD convergence and final performance; tuning is problem-dependent.
+- For sparse high-dimensional data, coordinate- or sparse-aware implementations are preferable. Dense, vectorized inner loops used here favor dense arrays for best speed.
+- SAG/SAGA typically require more memory but often converge in fewer passes over the data than plain SGD.
+- Regularization (especially L2) and appropriate scaling of features are important to obtain stable training and good generalization.
+
+Example (conceptual)
+--------------------
+A high-level conceptual training loop used by these implementations:
+
+- Initialize parameters (weights, intercept).
+- Optionally initialize per-sample gradient storage (SAG/SAGA).
+- Repeat until convergence or maximum passes:
+  - Iterate over samples (possibly shuffled).
+  - Compute prediction(s) and per-sample gradient using the selected loss.
+  - For SGD: apply gradient update to weights and intercept.
+  - For L1/elastic-net: apply proximal soft-thresholding to weights.
+  - For SAG/SAGA: update stored gradients and use variance-reduced update rule.
+  - Monitor objective or parameter change for stopping.
+
+References
+----------
+- Bottou, L., Curtis, F. E., & Nocedal, J. (2018). Optimization methods for large-scale machine learning. SIAM Review.
+- Defazio, A., Bach, F., & Lacoste-Julien, S. (2014). SAGA: A fast incremental gradient method with support for non-strongly convex composite objectives.
+- Schmidt, M., Roux, N. L., & Bach, F. (2017). Minimizing Finite Sums with the Stochastic Average Gradient.
+
+Notes
+-----
+This documentation describes the algorithmic behavior and implementation decisions typical of a high-performance SGD-family solver, including variance-reduced variants, numerically stable multinomial logistic loss evaluation, and proximal handling for sparsity-inducing penalties.

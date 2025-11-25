@@ -1,0 +1,238 @@
+orm.collections — Support for collections of mapped entities
+===========================================================
+
+Overview
+--------
+
+The orm.collections module provides the instrumentation machinery used by the ORM
+to observe and react to collection membership changes on mapped attributes.
+Instrumentation is applied via decoration so that arbitrary user-defined types
+(and built-ins via trivial subclassing) may be used as collection containers
+without requiring inheritance from an ORM base class.
+
+Instrumentation decoration intercepts calls to mutation methods and relays
+append/remove/iterate events to the CollectionAttributeImpl that manages the
+collection. Two styles of decorators are provided:
+
+- Generic annotating decorators that indicate a method's role (appender,
+  remover, iterator, converter, internally_instrumented).
+- Recipe decorators that describe how arguments or return values map to atomic
+  add/remove events (for example, ``adds()``, ``removes_return()``).
+
+The module also contains helper collection implementations and adapters used
+by the mapper to adapt and instrument collection instances supplied via
+relationship(..., collection_class=...).
+
+Key concepts
+------------
+
+- Instrumentation by decoration
+  - Methods of a collection class can be annotated to mark them as the appender,
+    remover, iterator or converter. These annotating decorators take no
+    arguments and are used without parentheses (e.g. ``@collection.appender``).
+  - Recipe decorators are used with parentheses and map call arguments or
+    return values to membership events (e.g. ``@collection.adds(1)`` or
+    ``@collection.removes_return()``).
+
+- Automatic instrumentation process
+  1. If the collection class is a built-in, a trivial subclass is substituted.
+  2. If the class is already instrumented, it is left as-is.
+  3. Generic annotating decorators are applied to indicate method semantics.
+  4. The collection interface is discovered via duck-typing.
+  5. Targeted decorations are added to remaining methods of the detected
+     interface (list/set/dict-style) to emit atomic events.
+
+- Built-in adaptation
+  - Built-in types such as ``list`` are adapted by using trivial subclasses
+    (e.g. ``InstrumentedList(list)``) to hold instrumentation without modifying
+    the built-in directly.
+
+- Collection factories
+  - relationship(..., collection_class=...) accepts either a type or a
+    callable returning an instance. When a callable is supplied, the mapper
+    invokes it once to obtain a specimen instance; the specimen's type is
+    inspected and instrumented. Callables that return built-in instances are
+    adapted to produce instrumented instances.
+
+- Internal vs. external instrumentation
+  - The standard decorators work under the assumption that collection
+    mutations do not raise unusual exceptions. If you need fine-grained
+    control over event emission (for example to coordinate events with
+    exception handling), implement instrumentation inside your methods and
+    use the collection adapter API to explicitly fire append/remove events.
+
+Primary API
+-----------
+
+collection
+  Decorator namespace used to mark and wrap collection methods.
+
+  Annotating decorators (no parentheses):
+  - collection.appender
+    Tag a method as the collection appender (called with the item being added).
+  - collection.remover
+    Tag a method as the collection remover (called with the item being removed).
+  - collection.iterator
+    Tag a method as the collection iterator (used to produce iteration).
+  - collection.converter
+    Tag a method that converts/normalizes input values for storage.
+  - collection.internally_instrumented
+    Mark a method whose body already performs proper instrumentation
+    so that no additional wrapper is added.
+
+  Recipe decorators (require parentheses):
+  - collection.adds(index_or_arg)
+    Map a positional argument (or other specification) to an appended item.
+  - collection.removes_return()
+    Interpret the method's return value as the removed item and emit a
+    remove event for it.
+  - Additional recipes exist to cover bulk operations and other common
+    collection interface patterns.
+
+  Typical usage:
+    from sqlalchemy.orm.collections import collection
+
+    class MyClass:
+        @collection.adds(1)
+        def store(self, item):
+            self.data.append(item)
+
+        @collection.removes_return()
+        def pop(self):
+            return self.data.pop()
+
+collection_adapter(obj)
+  Retrieve the ORM adapter for an instrumented collection instance (or for a
+  mapped object's collection attribute). The adapter provides programmatic
+  access to fire append/remove notifications and to access the owning instance
+  and its CollectionAttributeImpl. This is the low-level API intended for use
+  when implementing custom, exception-aware instrumentation inside collection
+  methods.
+
+Adapter/protocol attributes
+  Instrumented collection instances expose an adapter and a small set of
+  standardized callables used by the ORM:
+
+  - _sa_adapter
+    The CollectionAdapter instance bound to the instrumented collection.
+  - _sa_appender(...)
+    Callable that triggers the ORM append event for the provided item(s).
+  - _sa_remover(...)
+    Callable that triggers the ORM remove event for the provided item(s).
+  - _sa_iterator()
+    Callable used for iteration semantics.
+  - _sa_converter(collection)
+    Callable to convert/adapt a plain collection instance to the instrumented
+    collection type.
+
+Helpers and collection types
+  - keyfunc_mapping
+    Utilities to build mappings of key functions used by keyed-collection
+    implementations.
+
+  - MappedCollection
+    A small helper collection type that maintains a mapping from a key
+    (computed via a key function) to items. Often used when the collection
+    should behave like a dict keyed by a function of each element.
+
+  - KeyFuncDict
+    A dictionary-like collection whose keys are produced by applying a given
+    function to values; useful when the mapping key is derived from the value
+    itself.
+
+  - attribute_keyed_dict(column_or_attr)
+    Factory producing a key-mapping dictionary keyed by an attribute name of
+    the stored items. Useful when you want a dict-like collection keyed by an
+    attribute present on the contained objects.
+
+  - column_keyed_dict(column)
+    Similar to attribute_keyed_dict but keyed by a column-bound value for
+    use in more SQLAlchemy-specific collection scenarios.
+
+Examples
+--------
+
+Basic decorator usage
+  from sqlalchemy.orm.collections import collection
+
+  class Bag:
+      def __init__(self):
+          self.data = []
+
+      @collection.adds(1)
+      def store(self, item):
+          # this append will be intercepted and emit an ORM append event
+          self.data.append(item)
+
+      @collection.removes_return()
+      def pop(self):
+          # the return value will be interpreted as the removed item
+          return self.data.pop()
+
+Using collection_class= with a relationship
+  - Pass a collection class or factory to relationship(..., collection_class=...).
+    The mapper will create a specimen from the factory (if callable), inspect
+    the specimen's type, adapt it (subclass built-ins if necessary), and apply
+    targeted instrumentation so that mutation of the collection emits ORM
+    events.
+
+Advanced: explicit instrumentation via the adapter
+  - If you need to tightly control when append/remove events are emitted (for
+    example, to coordinate with try/except blocks), call collection_adapter(self)
+    inside your collection methods and invoke the adapter's append/remove
+    methods directly to notify the ORM.
+
+Notes and caveats
+-----------------
+
+- Targeted decoration avoids duplicate events. If your class subclassed a
+  known collection type and merely delegates to an already-instrumented
+  method (for example, a custom push method that calls ``append``), you do
+  not generally need to annotate the delegating method; annotating it would
+  cause duplicate events.
+
+- Some targeted decorations rely on the presence of "read" methods to
+  implement "write" behaviors correctly. For example, decorating
+  ``__setitem__`` may assume the presence of ``__getitem__``. Bulk methods
+  (``extend``, ``update``, ``__setslice__``, ...) may be implemented by the
+  decorator in terms of repeated atomic appends/removes rather than calling
+  the underlying bulk method.
+
+- The instrumentation machinery assumes typical mutation behavior. If your
+  mutation raises unusual exceptions or you need transactional control over
+  event emission, prefer internal instrumentation and explicit calls to the
+  adapter.
+
+API Reference
+-------------
+
+Public names exported by the module
+  - collection — decorator namespace for annotating and wrapping collection
+    methods (appender, remover, iterator, converter, internally_instrumented,
+    and recipe decorators such as adds(), removes_return()).
+  - collection_adapter — return the adapter for an instrumented collection
+    instance; use to explicitly fire append/remove events.
+  - keyfunc_mapping — helpers for key-function based keyed-collections.
+  - attribute_keyed_dict — factory for dict-like collections keyed by an
+    attribute of the contained items.
+  - column_keyed_dict — factory for dict-like collections keyed by a column
+    value.
+  - MappedCollection — helper keyed-collection type.
+  - KeyFuncDict — dict-like collection keyed by a function of values.
+
+See also
+--------
+
+- The ORM mapping and relationship documentation for how collection_class
+  integrates with mappers.
+- The mapper's CollectionAttributeImpl for details on how events are handled
+  once emitted.
+
+Indexes and cross references
+----------------------------
+
+This module is primarily concerned with decorating collection methods and
+adapting collection types so that the ORM can reliably and consistently detect
+and react to item additions and removals. Refer to the relationship()
+and mapper configuration docs for examples of configuring collection-typed
+attributes on mapped classes.

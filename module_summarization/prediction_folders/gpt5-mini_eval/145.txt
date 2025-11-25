@@ -1,0 +1,49 @@
+File Objects
+============
+
+Overview
+--------
+File objects provide the high-level handle to an HDF5 file. Under the hood each File object owns an HDF5 identifier (hid_t) that is wrapped by an ObjectID-derived instance. The identifier is registered in an internal registry so that h5py can track live wrappers and avoid “zombie” identifiers when HDF5 reuses integer ids.
+
+Identifier lifecycle
+--------------------
+- Creation: When an ObjectID (including FileID) is created, its integer identifier is stored on the instance and a weak reference to the Python wrapper is placed in a global registry.
+- Reference counting: On deallocation, if the underlying HDF5 id is still valid and the wrapper is not locked, the id’s reference count is decremented so the HDF5 object can be freed.
+- Nonlocal invalidation: Some HDF5 actions (for example, closing a file with a strong close) may invalidate identifiers that are owned by other wrappers. To avoid stale wrappers erroneously referring to newly-reused integer ids, h5py maintains a registry and provides a nonlocal_close mechanism to walk live wrappers and set their ids to 0 when the corresponding HDF5 id is no longer valid.
+- Locked objects: Certain internal wrappers (property lists, library-provided objects, etc.) are marked locked and are not automatically invalidated by nonlocal events; they are treated as effectively immortal for the lifetime of the process.
+
+Locking and thread-safety
+-------------------------
+- A single recursive lock (the “phil”) serializes all access to the low-level HDF5 API from h5py. All code paths that call into HDF5 acquire this lock so that only one thread at a time performs operations that create or invalidate identifiers.
+- This locking prevents race conditions between threads using h5py, but it does not protect against interactions with other libraries (for example PyTables) that call HDF5 directly. Because HDF5 may immediately reuse integer ids, combining h5py multithreaded use with other libraries that concurrently manipulate HDF5 identifiers is not recommended.
+- The decorator used to enforce serialization is applied to registry and other low-level operations to ensure correct ordering and safe inspection/modification of identifiers.
+
+Registry and nonlocal_close
+---------------------------
+- The registry maps the Python id(obj) to a weak reference of the ObjectID wrapper.
+- nonlocal_close() iterates the registry and, for each live, unlocked wrapper, checks H5Iis_valid(obj.id). If the HDF5 id is no longer valid, the wrapper’s id is set to 0 to prevent it from becoming a zombie (i.e., accidentally referring to a different HDF5 object that reused the same integer id).
+- nonlocal_close() is explicitly invoked in file-close paths so that groups and other objects associated with a closed file do not survive as invalid wrappers.
+
+File object properties
+----------------------
+- fileno
+  - Returns the file number pair returned by HDF5 for a given object (stat.fileno).
+  - Accesses HDF5 metadata under the global lock.
+- valid
+  - Returns whether the Python wrapper currently refers to a valid HDF5 identifier (uses an is_h5py_obj_valid check).
+
+Closing semantics
+-----------------
+- Explicit close: When a File object is explicitly closed, h5py ensures the underlying HDF5 identifier is released (reference count decremented) and nonlocal_close is used to invalidate any dangling wrappers that belonged to the closed file.
+- H5F_CLOSE_STRONG and related HDF5 semantics: Some HDF5 close modes can close dependent objects (groups, dataspaces, etc.) as part of closing a file. These nonlocal invalidations are handled by walking the registry and setting stale wrapper ids to 0 so they do not become zombies.
+- Locked wrappers are not closed automatically. They must be explicitly released by the library code that owns them.
+
+Best practices
+--------------
+- Prefer using the high-level File API and context managers (open/close) so h5py can manage identifiers and call nonlocal_close as needed.
+- Avoid mixing concurrent use of h5py with other libraries that call HDF5 directly (e.g., PyTables/NetCDF4) when both are manipulating the same HDF5 file from multiple threads or processes.
+- If using threads with h5py, rely on h5py’s internal locking to serialize HDF5 calls; do not assume HDF5 integer ids remain unique across time without considering possible reuse when objects are closed.
+
+Notes
+-----
+- The registry and locking mechanisms exist to prevent subtle bugs caused by HDF5 reusing integer identifiers. The implementation intentionally makes identifier management explicit: nonlocal close events must be handled so Python wrappers do not outlive the validity of their underlying HDF5 ids.

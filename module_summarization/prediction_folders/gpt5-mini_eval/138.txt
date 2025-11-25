@@ -1,0 +1,154 @@
+Array Best Practices
+====================
+
+This document collects recommended patterns and pitfalls when working with dask.array,
+with emphasis on dispatch, masked arrays, blockwise/map_blocks usage, and backend
+implementations.
+
+Introduction
+------------
+Dask Array provides NumPy-like APIs while operating on chunked, out-of-core data.
+Operations are implemented by combining block-level NumPy (or backend) calls with
+graph construction primitives such as map_blocks and blockwise. Following a few
+simple patterns helps ensure correctness, maintainability, and good performance.
+
+Dispatch and Backends
+---------------------
+- Use Dispatch objects to provide backend-specific implementations for core
+  operations. Common dispatch targets in Dask include:
+  - concatenate, tensordot, einsum, empty, divide, percentile,
+    numel, nannumel, to_numpy_dispatch, to_cupy_dispatch.
+- Register backend-specific implementations on these Dispatch instances so
+  high-level functions automatically pick the appropriate implementation
+  depending on array types (NumPy, CuPy, etc.).
+- Keep the dispatch layer thin: it should select the right block-level
+  implementation (or wrapper) and let blockwise/map_blocks build the task graph.
+
+Masked Arrays and numpy.ma Integration
+-------------------------------------
+- Wrap NumPy masked-array functions at the block level using map_blocks or
+  blockwise. This preserves per-block semantics and avoids constructing
+  full-memory masked arrays:
+  - map_blocks: use when a function operates on a single block and returns a
+    block of the same shape (e.g., np.ma.masked_invalid, np.ma.getdata).
+  - blockwise: use when combining multiple inputs or when explicit broadcasting
+    semantics are needed (e.g., np.ma.masked_where, masked comparisons).
+- Preserve dtype and metadata explicitly when constructing blockwise tasks:
+  - Pass dtype=a.dtype where appropriate so downstream graph construction has
+    accurate type information.
+- Respect scalar-only expectations: some masked-array helpers expect scalar
+  `value` arguments. Check and raise early if users pass arrays where scalars are
+  expected (see masked_equal / masked_values patterns).
+- Example patterns:
+  - Elementwise single-array mapping:
+    a = asanyarray(a)
+    return a.map_blocks(np.ma.masked_invalid)
+  - Two-input (broadcast-aware) mask construction:
+    ainds = tuple(range(a.ndim))
+    cinds = tuple(range(condition.ndim))
+    return blockwise(np.ma.masked_where, ainds, condition, cinds, a, ainds,
+                     dtype=a.dtype)
+
+Shape, Broadcasting, and Indexing
+--------------------------------
+- Ensure operand shapes are compatible before building blockwise graphs. When a
+  condition or second operand is an array, verify its shape matches the primary
+  input or is otherwise broadcastable.
+- Use explicit index-strings (or index tuples) with blockwise to express how
+  inputs align and broadcast across dimensions. This avoids subtle mismatches in
+  graph construction.
+- Avoid relying on implicit broadcasting behavior when operand chunking
+  patterns differ; prefer explicit blockwise formulations that declare indices.
+
+Using asanyarray and Type Wrapping
+---------------------------------
+- Normalize inputs with asanyarray at function entry points. This converts
+  masked arrays and other array-like inputs into dask-aware array wrappers and
+  helps subsequent graph-building functions behave uniformly.
+- Use derived_from decorator to preserve NumPy function signatures and
+  documentation where functions are thin wrappers around NumPy behavior.
+
+map_blocks vs blockwise vs elemwise
+-----------------------------------
+- map_blocks:
+  - Best for applying a function blockwise without changing block layout,
+    shape, or axes semantics (per-block operations).
+  - Simpler to use for single-input operations that map 1:1 from block to block.
+- blockwise:
+  - Use for multi-array operations, explicit broadcasting, or when constructing
+    outputs with new index patterns.
+  - Ideal for implementing elementwise broadcasting semantics across differing
+    numbers of dimensions.
+- elemwise:
+  - Convenient shorthand in some cases; prefer blockwise when precise index
+    control is needed.
+- When wrapping NumPy masked routines for broadcasting behavior, implement a
+  small helper that computes index tuples and calls blockwise with explicit
+  dtype and indices.
+
+Tokenization and Caching
+------------------------
+- Normalize tokens for mutable or composite array-like objects so that cached
+  tasks and keys reflect all relevant state. For example, register a
+  normalize_token handler for numpy.ma.masked_array that includes its data,
+  mask, and fill_value:
+  - normalize_token(np.ma.masked_array) -> (data_token, mask_token, fill_value_token)
+- Proper tokenization avoids incorrect cache hits and stale results when arrays
+  change shape, mask, or fill value.
+
+Performance and Chunking
+------------------------
+- Chunk sizes matter. Choose chunk shapes that:
+  - Are large enough to amortize task overhead.
+  - Fit working memory for per-block NumPy operations.
+  - Align reasonably across inputs that will be combined to minimize expensive
+    rechunking.
+- Prefer algorithms that minimize inter-block communication. Use reductions and
+  blockwise patterns that avoid unnecessary shuffles or global operations unless
+  they are required.
+- Pass dtype explicitly (e.g., dtype=a.dtype) so downstream schedulers can
+  reason about memory and avoid unnecessary conversions.
+
+Implementation Patterns and Utilities
+------------------------------------
+- Use small helper wrappers to adapt NumPy/NumPy.ma functions to dask array:
+  - Example: wrap a masked comparison to compute index signatures, then call
+    blockwise with explicit dtype and indices.
+- Use functools.wraps to preserve function metadata when creating thin wrappers.
+- Preserve np.ma-like APIs via derived_from so users familiar with NumPy
+  receive consistent docstrings and signatures.
+
+Error Handling and User-Facing Behavior
+--------------------------------------
+- Validate shapes and types early and raise informative errors for unsupported
+  patterns (e.g., passing an array where a scalar was expected).
+- Keep semantics consistent with NumPy where feasible; when behavior must
+  differ (due to chunking or backend limitations), document differences.
+
+Examples
+--------
+- Masked invalid entries in a dask array:
+  a = asanyarray(a)
+  return a.map_blocks(np.ma.masked_invalid)
+- Mask using a condition with explicit alignment:
+  condition = asanyarray(condition)
+  a = asanyarray(a)
+  ainds = tuple(range(a.ndim))
+  cinds = tuple(range(condition.ndim))
+  return blockwise(np.ma.masked_where, ainds, condition, cinds, a, ainds,
+                   dtype=a.dtype)
+
+Summary
+-------
+- Use Dispatch for backend selection and register backend functions cleanly.
+- Prefer asanyarray/derived_from to maintain consistent APIs and metadata.
+- Choose map_blocks for simple per-block operations; choose blockwise for
+  broadcasting and multi-input alignment.
+- Explicitly manage dtype, index patterns, and tokenization to ensure correct,
+  performant graphs.
+- Validate shapes early and document any deviations from NumPy semantics.
+
+Further reading
+---------------
+- See the dask.array codebase for concrete examples of these patterns (masked
+  array wrappers, normalize_token registration, and dispatch registration).

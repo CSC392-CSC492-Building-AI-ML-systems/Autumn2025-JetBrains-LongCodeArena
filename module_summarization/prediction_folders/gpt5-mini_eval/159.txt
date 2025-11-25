@@ -1,0 +1,103 @@
+Memory alignment
+================
+
+Why alignment matters
+---------------------
+Correct memory alignment ensures that CPU memory accesses, vectorized/SIMD loads and stores,
+and C-level code that casts array data to C structs behave correctly and performantly.
+Misaligned access can be slower and on some architectures can cause hardware faults.
+NumPy exposes tools to inspect, request and work around alignment requirements.
+
+Key concepts
+------------
+- ``dtype.itemsize`` — size in bytes of one element.
+- ``dtype.alignment`` — required byte-alignment for elements of that dtype.
+- ``ndarray.ctypes.data`` — integer address of the array data buffer.
+- ``ndarray.flags['ALIGNED']`` — whether the data pointer meets the ABI alignment
+  guarantees required by the array's dtype.
+- Endianness and pointer size are platform-dependent (see build information such as
+  host endian or pointer width). Use ``dtype.byteorder`` and your system info when
+  interoperating with C.
+
+Checking alignment
+------------------
+- Check whether an array is aligned to its dtype's requirement:
+
+  addr = arr.ctypes.data
+  required = arr.dtype.alignment
+  aligned = (addr % required) == 0
+
+- Use the ALIGNED flag:
+
+  arr.flags['ALIGNED']  # True if data pointer satisfies dtype alignment
+
+- For structured dtypes, inspect field offsets and the dtype's overall alignment:
+
+  dt = np.dtype([('a', 'i4'), ('b', 'f8')], align=True)
+  dt.alignment
+  dt.fields  # shows field offsets and sub-dtypes
+
+Ensuring alignment
+------------------
+- Structured dtypes: create the dtype with ``align=True`` to get C-compatible padding
+  and field alignment:
+
+  dt = np.dtype([('a', 'i4'), ('b', 'f8')], align=True)
+  a = np.empty(10, dtype=dt)
+
+  This makes field offsets and the dtype's alignment follow the C compiler ABI.
+
+- For explicit scalar alignment guarantees (e.g. for SIMD requiring 16/32/64-byte alignment),
+  NumPy does not provide a direct ``align`` flag on ``np.empty``. A common portable technique
+  is to allocate a larger raw buffer and take an aligned slice:
+
+  buf = np.empty(nbytes + alignment - 1, dtype=np.uint8)
+  offset = (-buf.ctypes.data) % alignment
+  aligned_view = buf[offset:offset + nbytes].view(desired_dtype)
+
+  The resulting array will have ``.ctypes.data % alignment == 0``.
+
+- Use contiguous arrays when C code expects a single linear buffer:
+
+  a = np.ascontiguousarray(a, dtype=dt)
+
+Interfacing with C and ctypes
+-----------------------------
+- When passing data to C, confirm both layout and alignment. Use:
+
+  ptr = a.ctypes.data  # integer address
+  # or obtain a ctypes pointer for APIs expecting it:
+  cptr = a.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+
+- Be mindful of platform pointer width when constructing C signatures. NumPy build info
+  records machine endianness and pointer size — use that information for ABI compatibility.
+
+- For structured arrays mapped to C structs, always use an ``align=True`` dtype to ensure
+  field offsets and total struct size match the C compiler's layout rules.
+
+Performance and SIMD
+--------------------
+- Vectorized instructions (SSE/AVX/NEON) often have alignment preferences or requirements.
+  Aligning buffers to 16/32/64 bytes can reduce runtime penalties and avoid extra load/store
+  instructions. When using libraries that provide SIMD-accelerated kernels, verify their
+  alignment expectations and align NumPy buffers accordingly.
+
+- NumPy's internal dispatch and CPU feature detection decide which optimized kernels run
+  on a given platform; however, those kernels still rely on properly aligned input buffers
+  for best performance.
+
+Other practical notes
+---------------------
+- ``dtype.alignment`` is the portable way to obtain ABI alignment expectations for a dtype.
+- ``ndarray.flags`` includes other useful properties (``C_CONTIGUOUS``, ``F_CONTIGUOUS``,
+  ``WRITEABLE``, ``OWNDATA``) which matter when sharing memory with C.
+- When creating views or slices, note that alignment can change depending on the starting
+  byte-offset; always re-check ``.ctypes.data`` or ``.flags['ALIGNED']`` if alignment is critical.
+
+Minimal checklist
+-----------------
+- Inspect ``dtype.alignment`` and ``ndarray.flags['ALIGNED']``.
+- Use ``dtype(..., align=True)`` for C-compatible structured types.
+- Make arrays contiguous with ``np.ascontiguousarray`` when required by C code.
+- For SIMD: allocate a padded buffer and slice it to produce an aligned view.
+- When in doubt, check the raw address via ``arr.ctypes.data`` and test alignment modulus.

@@ -1,0 +1,182 @@
+Internal organization of NumPy arrays
+====================================
+
+This document describes the internal structure and organization of NumPy arrays
+(`ndarray`), the memory layout used for storing array data, and the key
+concepts that affect performance and behavior (strides, dtype, flags, views,
+and copies). It is intended as a concise reference for contributors and users
+reading NumPy internals.
+
+Overview
+--------
+A NumPy array is a multidimensional, homogeneous container for elements of a
+single data type (`dtype`). The public Python-level object is the `numpy.ndarray`
+class; its heavy lifting is implemented in C for performance. The array object
+encapsulates:
+
+- A pointer to the raw contiguous memory buffer that holds elements.
+- Metadata describing shape (dimensions), strides (byte-steps between elements),
+  and number of dimensions (`ndim`).
+- A `dtype` object describing element size, byte-order, kind (integer/float/etc.)
+  and, for structured types, the layout of fields.
+- Ownership information (whether the array owns the memory or references some
+  external buffer) and other status flags.
+
+Memory model and layout
+-----------------------
+Memory for array elements is a single contiguous block of bytes (a "data
+buffer"), but logical layout in memory can represent many physical arrangements
+via the `strides` array.
+
+Key attributes:
+
+- `data` (C pointer): pointer to the first byte of the array data (may not be
+  the first element if there is an offset or subarray view).
+- `shape`: a tuple of integers giving the size for each axis.
+- `strides`: a tuple of bytes to step in memory to move to the next element
+  along each axis. For a C-contiguous array of element size `itemsize`,
+  `strides = (itemsize * prod(shape[1:]), itemsize * prod(shape[2:]), ..., itemsize)`.
+- `ndim`: number of axes.
+- `itemsize`: number of bytes per element (given by `dtype.itemsize`).
+
+Contiguous layouts:
+- C-order (row-major): last index varies fastest; contiguous memory for a
+  standard C array.
+- F-order (column-major / Fortran): first index varies fastest.
+- Non-contiguous layouts are represented by `strides` not matching the
+  contiguous formula; e.g., transposes, slices with step, broadcasting buffers.
+
+DType and element representation
+--------------------------------
+A `dtype` describes element representation:
+
+- `itemsize`: bytes per element.
+- `byteorder`: native, little, or big.
+- `kind`: character code indicating numeric vs. other types (e.g., 'i', 'u',
+  'f', 'b', 'V' for raw void/structured).
+- For structured types, a dtype contains a descriptor of fields: names, offsets,
+  and sub-dtypes. Subarray dtypes allow each array element to itself be an
+  fixed-shape sub-array.
+
+The `dtype` is a Python object backed by a C descriptor; many operations rely on
+this descriptor to compute indexing offsets, casting, and alignment.
+
+Flags and memory ownership
+--------------------------
+Arrays expose a set of flags describing memory layout and mutability:
+
+- OWNDATA: array owns the underlying data buffer (freeing it when destroyed).
+- WRITEABLE: whether assignment into the buffer is allowed.
+- ALIGNED: data pointer is suitably aligned for the element dtype.
+- C_CONTIGUOUS / F_CONTIGUOUS: contiguous in C or Fortran order.
+- CONTIGUOUS: alias for either C- or F-contiguous in some contexts.
+
+Ownership of memory is tracked through a `base` attribute: if an array is a
+view into another array or a buffer, `base` references the owner. If `base` is
+`None` the array typically owns its data (OWNDATA). Reference counting and
+garbage collection semantics ensure the base object remains alive as long as
+views refer to it.
+
+Views vs copies
+--------------
+- A view shares the same data buffer as another array but may have a different
+  `shape`, `strides`, or `dtype`. Views are cheap and do not allocate new
+  memory; they are created by slicing (without copying), `.view()` calls, and
+  some reshaping operations if possible.
+- A copy allocates a new buffer and duplicates element data. Copies are created
+  explicitly via `.copy()` or implicitly when the requested layout or dtype
+  conversion cannot be satisfied by a view.
+
+Indexing, offsets and element address computation
+-------------------------------------------------
+To compute the address of an element at indices `i0, i1, ..., i{n-1}`:
+
+address = data + sum(ik * strides[k]) + dtype_offset
+
+where `dtype_offset` accounts for structured dtype field offsets or subarray
+offsets. Negative strides point to elements earlier in memory and commonly arise
+from reversed views.
+
+Broadcasting
+------------
+Broadcasting defines how arrays with different shapes are treated in elementwise
+operations:
+
+- Align shapes from the trailing dimensions.
+- Dimensions are compatible when equal or one of them is 1.
+- Result shape has the maximum of each aligned dimension.
+- Implementation uses virtual broadcasting: no new memory is allocated for
+  broadcasted dimensions; instead, operations use strides of 0 for singleton
+  dimensions (or special iterator logic) to repeat elements virtually.
+
+Iterators and performance
+-------------------------
+NumPy provides efficient iteration mechanisms (C-level iterators) that respect
+strides, broadcasting, dtype alignment, and buffering. Iteration order and
+contiguity matter for performance: contiguous, aligned, C-order data yields the
+fastest tight loops in C.
+
+Structured dtypes and nested layouts
+-----------------------------------
+Structured dtypes allow heterogeneously typed records stored in a single array.
+Each field has a name, dtype and offset within the element. The element size
+(`itemsize`) includes padding for alignment. Structured types may nest other
+structured or subarray dtypes; address computation uses the field offset added
+to the base element address.
+
+Alignment and padding
+---------------------
+Element memory is typically aligned according to the dtype's alignment
+requirements. This may introduce padding between fields in structured dtypes or
+at the end of elements. The `ALIGNED` flag indicates whether data satisfies the
+dtype alignment. Misaligned arrays may require slower access paths or copying
+before operations that assume alignment.
+
+Scalar types and NumPy generics
+------------------------------
+NumPy provides scalar types that are Python objects mapping to C scalar storage
+(e.g., `numpy.int32`, `numpy.float64`). The `numpy.generic` base type is the
+ancestor for NumPy scalar types. Scalars are used when indexing yields a single
+element and are created from the raw buffer using the dtype's casting semantics.
+
+C-level representation and C API
+-------------------------------
+At the C level, arrays are represented by `PyArrayObject` (or equivalent) with
+fields for `data`, `nd`, `dimensions`, `strides`, `descr` (dtype), `flags`, and
+`base`. The C API exposes functions to create, view, cast, and manipulate arrays
+efficiently. Memory ownership is tracked via flags and references to the base
+object.
+
+Interfacing with ctypes and external buffers
+--------------------------------------------
+NumPy arrays can expose their data buffer to external C code in several ways:
+
+- The buffer protocol allows other Python objects to access the array data.
+- The `numpy.core._internal._ctypes` helpers and exported pointers allow
+  obtaining C-compatible pointers (useful for writing extension modules or
+  interfacing with `ctypes`).
+- `_c_intp`-like integer types (platform pointer-sized integers) are used to
+  represent dimension sizes and strides at the C level.
+
+Python typing and annotations
+-----------------------------
+Modern NumPy exposes typing annotations (e.g., `NDArray`, `DTypeLike`) that
+document expected array shapes and dtypes at the Python level. These are thin
+Python-level conveniences and do not change runtime behavior, but they reflect
+the core concepts described above: arrays parameterized by dtype and shape-like
+constraints.
+
+Common pitfalls and considerations
+----------------------------------
+- Beware of inadvertent views: modifying a view modifies the base array.
+- Non-contiguous arrays may perform poorly; consider `.copy(order='C')` if
+  high performance loops assume contiguous data.
+- Misaligned data may require copying for some native C-level operations.
+- Structured dtype field offsets and padding can make certain low-level memory
+  layouts surprising; inspect `dtype.fields` and `dtype.itemsize` when needed.
+
+See also
+--------
+- numpy.ndarray documentation for the public API.
+- dtype documentation for structured and subarray types.
+- Buffer protocol and C-API reference for extension-writing guidance.

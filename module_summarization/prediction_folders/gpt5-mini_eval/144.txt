@@ -1,0 +1,188 @@
+Scheduling policies
+===================
+
+This document describes the policies used by the Dask distributed scheduler to
+choose (1) which ready task to run next (task preference) and (2) which worker
+to place that task on (worker preference). The scheduler applies a set of
+heuristics and respects explicit user annotations (priority, resources,
+worker-restrictions, etc.) to balance locality, throughput, latency and
+fairness.
+
+Overview
+--------
+
+Scheduling happens in two conceptual steps:
+
+- Task selection (which ready task to start next). The scheduler maintains a
+  set of ready tasks (all input dependencies satisfied) and orders them using
+  explicit and implicit priorities plus scheduling heuristics.
+
+- Worker selection (which worker among eligible ones should actually run the
+  chosen task). The scheduler selects an appropriate worker considering data
+  locality, available resources and load balancing.
+
+These steps interact: a task may be preferred because it has few eligible
+workers or because it unlocks more work; a worker may be preferred for a task
+because it already holds needed inputs.
+
+Task selection (task preference)
+-------------------------------
+
+The scheduler determines which ready tasks to run using a combination of:
+
+- Explicit task priority. Users can give tasks an explicit numeric
+  priority (for example, client.submit(..., priority=...) or dask annotations).
+  Tasks with higher priority are preferred (exact interpretation/order is
+  scheduler-dependent).
+
+- Graph-derived priority / heuristics. When users do not set explicit
+  priorities, the scheduler uses heuristics (e.g. topological position, depth
+  in the DAG, number of dependents, estimated work or data size) to order
+  tasks so that work that will unblock more tasks or reduce latency tends to
+  run earlier.
+
+- Task state and readiness. Only tasks whose dependencies are satisfied and
+  which are not blocked by resource restrictions or explicit worker binds are
+  considered for immediate execution.
+
+- Fairness between clients. The scheduler attempts to be fair across
+  different clients submitting work (so that one client cannot monopolize the
+  cluster), while still respecting task priorities.
+
+- Heuristics to reduce data movement. Tasks that are already located (or
+  mostly located) on a small number of workers are often prioritized to avoid
+  transfer cost.
+
+The combination of explicit priorities and these heuristics yields a dynamic
+ordering that adapts to changes in the graph, resource pressure and worker
+availability.
+
+Worker selection (worker preference)
+------------------------------------
+
+Once a task is selected to run, the scheduler picks a worker from the set of
+eligible workers. Eligible workers are those that satisfy constraints such as
+resource requirements and any explicit worker restrictions. Selection uses:
+
+- Data locality. Workers holding required input data (or that minimize total
+  transfer) are preferred. The scheduler favors placing tasks where their
+  inputs already exist to reduce network transfers and latency.
+
+- Resource compatibility. Tasks that request specific resources (for
+  example named resources: "GPU", "GPU-memory") are scheduled only on workers
+  advertising those resources. The scheduler also respects CPU/core counts
+  and other resource limits.
+
+- Load balancing and occupancy. When multiple workers can run a task, the
+  scheduler prefers workers with lower current load (fewer running tasks) to
+  maintain parallel throughput and balance work across the cluster.
+
+- Memory pressure and available memory. Workers with sufficient free memory
+  are preferred. Under memory pressure the scheduler may avoid running large
+  tasks on memory-constrained workers or may trigger spill/eviction/retire
+  actions (via memory-management extensions).
+
+- Host and network topology. The scheduler can prefer workers on the same
+  host as input data or co-located in the same network segment to reduce
+  cross-host transfer cost.
+
+- Explicit worker bindings and restrictions. Tasks may be annotated (or
+  submitted) with a list of allowed workers, host-restrictions, or with
+  allow_other_workers settings; the scheduler adheres to these constraints.
+
+- Tie-breaking heuristics. If multiple workers are equal by the above
+  criteria, the scheduler uses deterministic or simple heuristics (first-fit,
+  least-recently-used, or random among equals) to choose a worker.
+
+Overrides, annotations and user controls
+---------------------------------------
+
+Users can influence scheduling decisions using several mechanisms:
+
+- Priority: client.submit(..., priority=...) or annotate(priority=...) to
+  raise/lower task preference.
+
+- Workers binding: client.submit(..., workers=[...]) or specifying workers in
+  high-level APIs to restrict which workers may run a task. There are options
+  to allow or disallow running on other workers.
+
+- Resources: annotate(resources={'GPU': 1}) or client.submit(...,
+  resources=...) to require workers with specific named resources.
+
+- Restrictions: high-level graph annotations (e.g., dask annotations) can
+  pin tasks to certain workers or hosts.
+
+- Lifetime and retries: task lifetime, retries and cancellation affect when
+  and whether tasks are re-scheduled.
+
+Extensions and scheduler hooks
+------------------------------
+
+Dask’s scheduler is extensible and the following extensions affect scheduling
+policies:
+
+- Work stealing: idle workers can pull tasks from busy workers to improve
+  balance and utilization. Stealing respects data locality and resource
+  constraints.
+
+- Active memory manager (AMM): monitors memory pressure and can trigger
+  worker retirement, eviction, or spill policies to reclaim memory and
+  influence subsequent scheduling decisions.
+
+- Shuffle and other scheduler plugins: specialized plugins (e.g., shuffle,
+  shuffle-shuffling plugins, diagnostics, custom SchedulerPlugin) may
+  implement task placement or rebalancing behaviors for particular workloads.
+
+- SchedulerPlugin API: custom plugins can observe and modify scheduling
+  decisions, collect metrics, and implement custom placement strategies.
+
+Tuning and practical considerations
+-----------------------------------
+
+- Locality vs parallelism trade-off: favoring strict locality reduces transfer
+  cost but can create load imbalance. Allowing some non-local placement can
+  improve throughput.
+
+- Priorities for interactive workloads: raise priority of small,
+  latency-sensitive tasks to get responsive computations; background bulk
+  computations can be lowered.
+
+- Resource annotations: for heterogeneous clusters, annotate tasks with
+  resource needs (GPUs, special devices) to avoid placing incompatible work on
+  the wrong machines.
+
+- Work stealing: enabling work-stealing reduces load imbalance for bursty
+  workloads but may increase transfers; it is often beneficial for general
+  throughput.
+
+- Memory management: tune eviction/spill/retire policies and the AMM to
+  avoid excessive transfers and worker failures due to out-of-memory.
+
+Examples
+--------
+
+- Submit a high-priority task:
+  client.submit(func, *args, priority=10)
+
+- Restrict a task to a particular worker:
+  client.submit(func, *args, workers="tcp://10.0.0.1:8786")
+
+- Require a GPU resource (task will only run on workers that advertise the
+  resource):
+  with dask.annotate(resources={"GPU": 1}):
+      delayed_func = dask.delayed(func)(...)
+
+- Use annotations for latency-sensitive subgraphs:
+  with dask.annotate(priority=100):
+      result = some_dask_collection.compute()
+
+Summary
+-------
+
+Dask’s distributed scheduler combines user control (priority, workers,
+resources), DAG-aware heuristics (depth, dependents), and runtime cluster
+state (data locality, worker load, memory availability) to decide which tasks
+to run and where to run them. Extensions such as work stealing and memory
+management further adapt scheduling behavior at scale. Together these policies
+provide a flexible platform for tuning responsiveness, throughput and data
+movement for a wide variety of workloads.

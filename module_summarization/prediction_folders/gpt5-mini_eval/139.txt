@@ -1,0 +1,112 @@
+Controlling chunking
+===================
+
+This page explains how Dask Array uses and exposes chunking, and how you can control chunk sizes
+to balance performance, memory use and parallelism.
+
+What is a chunk?
+----------------
+A Dask array is a blocked representation of a large ndarray. Each axis of a Dask array is
+partitioned into chunks (blocks). A chunk is a concrete NumPy (or CuPy, etc.) array held in memory
+during computation; the Dask graph composes operations on these chunks to express larger-array
+computations.
+
+Specifying chunking at array creation
+------------------------------------
+Most Dask array constructors let you set chunk sizes when creating an array:
+
+- from_array(..., chunks=...)
+- from_zarr(..., chunks=...)
+- from_delayed(..., shape=..., chunks=...)
+
+The chunks parameter can be:
+- an integer: same chunk length on a single axis,
+- a tuple of integers per axis,
+- a tuple of tuples to specify explicit chunk boundaries on each axis,
+- "auto": let Dask compute reasonable chunk sizes.
+
+Example
+.. code-block:: python
+
+    import dask.array as da
+    x = da.from_array(numpy_array, chunks=(1000, 1000))
+    y = da.ones((10000, 10000), chunks="auto")
+
+Rechunking
+----------
+Use rechunk to change chunk sizes of an existing Dask array:
+
+.. code-block:: python
+
+    x2 = x.rechunk((2000, 500))
+
+Rechunk incurs communication and memory cost: Dask must move and reshape data between workers.
+Rechunking to a layout that reduces the number of tasks can speed subsequent computations;
+rechunking too often or into many small chunks increases overhead.
+
+Chunking and operations
+-----------------------
+- Elementwise operations (elemwise) and ufuncs preserve chunk boundaries when possible: operations
+  are applied block-by-block without moving data if the input chunk layout aligns.
+- blockwise operations (blockwise, tensordot, einsum) express more general contractions with
+  explicit alignment rules. They can combine blocks across axes and may require rechunking or
+  communication if chunk boundaries do not match the contraction semantics.
+- map_blocks applies an arbitrary function to each chunk independently. It preserves chunking if
+  the function maps single block -> single block of the same shape; otherwise you must provide
+  the expected output shape/dtype.
+
+Broadcasting and chunk alignment
+--------------------------------
+Broadcasting follows NumPy semantics. When broadcasting occurs across differing chunk layouts,
+Dask will align and iterate over blocks to produce the correct broadcasted blocks. For complex
+blockwise contracts it's often faster to rechunk first so that chunk boundaries align with the
+intended contraction axes.
+
+Overlap, ghosting and neighborhood operations
+---------------------------------------------
+Some algorithms require neighborhood data beyond block boundaries (stencils, filters). Use:
+- map_overlap to extend each chunk with neighboring data (ghost regions), run the function,
+  then trim.
+- explicit overlap/ghosting APIs to manage halo regions before/after computations.
+
+Performance considerations
+--------------------------
+- Chunk size trade-offs:
+  - Too small: many tasks, scheduler overhead and higher task-management cost.
+  - Too large: increased memory pressure, slower start-up and reduced parallelism.
+- Target chunk sizes that yield moderate per-task memory (commonly tens to hundreds of MB,
+  depending on available RAM).
+- Prefer chunking that aligns with downstream operations (e.g., avoid slicing a long axis into many
+  tiny pieces if you will perform large reductions along that axis).
+- Use rechunk sparingly and plan chunk layout early in a pipeline.
+
+Best practices
+--------------
+- Choose chunks to match computational pattern: partition along axes of independence.
+- Use chunks="auto" as a good starting point for many workloads.
+- Rechunk to align for expensive blockwise operations when necessary.
+- Use map_blocks for block-local transforms; use blockwise/einsum/tensordot for contracted ops.
+- For neighbor-dependent ops, use map_overlap to manage halos.
+- Monitor memory while tuning chunk sizes and adjust for your cluster resources.
+
+Masked arrays and tokens
+------------------------
+Dask supports numpy.ma masked arrays. Mask and data are tracked together; Dask normalizes tokens
+(for keys and caching) using a registration for masked_array so that scheduling and caching remain
+stable across masked-array inputs. Chunking rules otherwise follow standard Dask Array behavior:
+masked arrays are processed blockwise (map_blocks / blockwise) so the same chunking and
+rechunking considerations apply.
+
+Conversion and device transfers
+-------------------------------
+- to_numpy/to_cupy conversions operate at chunk granularity; converting an entire large Dask array
+  to an in-memory array requires controlling chunk sizes and available memory.
+- Consider rechunking to fewer larger chunks before collecting to a single NumPy array if memory
+  allows, or materialize piecewise.
+
+Summary
+-------
+Control chunking by choosing sensible chunks at creation, rechunk when alignment or performance
+benefits outweigh the communication cost, and use the blockwise/map_blocks primitives with an eye
+toward chunk boundaries. Proper chunk sizing is critical to achieve good performance with Dask
+Array.

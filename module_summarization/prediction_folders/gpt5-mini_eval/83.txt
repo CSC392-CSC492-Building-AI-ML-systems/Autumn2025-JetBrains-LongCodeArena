@@ -1,0 +1,108 @@
+cockroach_engine module
+=======================
+
+Overview
+--------
+This module provides CockroachEngine, a small CockroachDB-specific extension of
+:class:`piccolo.engine.postgres.PostgresEngine`. It adapts the Postgres engine
+behaviour where required for CockroachDB and performs a small preparation step
+when preparing a database connection.
+
+Contents
+--------
+- ``CockroachEngine`` — engine class tailored for CockroachDB.
+
+CockroachEngine
+---------------
+
+.. class:: CockroachEngine(config: Dict[str, Any], extensions: Sequence[str] = (), log_queries: bool = False, log_responses: bool = False, extra_nodes: Dict[str, "CockroachEngine"] = None)
+
+An extension of
+:class:`piccolo.engine.postgres.PostgresEngine <piccolo.engine.postgres.PostgresEngine>`,
+providing CockroachDB-specific setup.
+
+Attributes
+~~~~~~~~~~
+- ``engine_type`` (str)
+  - Value: ``"cockroach"``. Identifies the engine type.
+
+- ``min_version_number`` (int)
+  - Value: ``0``. CockroachDB's versioning differs from Postgres, so this is
+    set to 0 (no minimum enforced here).
+
+Constructor Arguments
+~~~~~~~~~~~~~~~~~~~~~
+- ``config`` (dict)
+  - Database configuration mapping (same format expected by the parent
+    PostgresEngine).
+
+- ``extensions`` (Sequence[str], optional)
+  - Additional extensions to load. Defaults to an empty tuple.
+
+- ``log_queries`` (bool, optional)
+  - Whether to log executed SQL queries. Defaults to ``False``.
+
+- ``log_responses`` (bool, optional)
+  - Whether to log database responses. Defaults to ``False``.
+
+- ``extra_nodes`` (Dict[str, CockroachEngine], optional)
+  - Mapping of node names to additional engine instances (for multi-node
+    setups). Defaults to ``None``.
+
+Methods
+~~~~~~~
+- ``async def prep_database(self) -> None``
+  Performs CockroachDB-specific preparation for a new connection. Internally
+  it executes the following cluster setting statement:
+
+  ```
+  SET CLUSTER SETTING sql.defaults.experimental_alter_column_type.enabled = true;
+  ```
+
+  This setting enables experimental ALTER COLUMN TYPE behaviour that may be
+  required for certain schema-altering operations.
+
+  Behavior:
+  - The method runs the SQL in a fresh connection using the engine's internal
+    connection helper.
+  - If the underlying ``asyncpg`` client raises
+    ``asyncpg.exceptions.InsufficientPrivilegeError``, the method will not
+    propagate the exception; instead it emits a coloured warning (via
+    :func:`piccolo.utils.warnings.colored_warning`) indicating that the database
+    user lacks permission to set cluster options and that some functionality
+    may not behave as expected.
+
+Implementation notes
+~~~~~~~~~~~~~~~~~~~~
+- The module uses a lazy loader for ``asyncpg`` (``piccolo.utils.lazy_loader.LazyLoader``),
+  so the asyncpg package is only imported when first needed.
+- The warning level used when privileges are insufficient is
+  :class:`piccolo.utils.warnings.Level.medium`.
+
+Example
+-------
+Basic usage example:
+
+.. code-block:: python
+
+    from piccolo.engine.cockroach_engine import CockroachEngine
+
+    config = {
+        "user": "myuser",
+        "password": "mypassword",
+        "database": "mydb",
+        "host": "localhost",
+        "port": 26257,
+    }
+
+    engine = CockroachEngine(config=config)
+
+    # In an async context:
+    await engine.prep_database()
+
+Notes
+-----
+- Because CockroachDB manages versions differently from Postgres, the module
+  does not enforce a numeric minimum server version.
+- If you rely on cluster-setting changes, ensure the database user has the
+  appropriate privileges to avoid degraded behaviour described in the warning.

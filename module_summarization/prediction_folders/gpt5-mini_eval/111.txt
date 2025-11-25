@@ -1,0 +1,225 @@
+Generate plans for experimental scans
+====================================
+
+Overview
+--------
+This module provides a small collection of high-level "plans" for
+acquiring data from detectors while moving or stepping motors (or other
+settable devices). The plans are implemented as generator-based plans
+(Bluesky-style) that yield Msg-like messages and are intended to be run
+by a RunEngine. The plans rely on helper modules (imported here as
+bpp, bps, plan_patterns, utils) for staging, running, and low-level
+plan stubs.
+
+Key concepts and types
+- detector: a "readable" object (e.g., an Ophyd Detector) exposing a
+  .readable/ .read or name attribute. The code expects detectors to have
+  a .name attribute and to be usable by the provided per-step/per-shot
+  helper functions.
+- motor / settable object: any object with a .name attribute and a
+  .hints.get('fields', ...) structure (optional) used to populate
+  metadata/dimensions.
+- per_shot / per_step: user-provided hooks to customize what happens at
+  each read or step. They are callables that the plan will call inside
+  the inner loop. Default stubs are supplied by plan_stubs (bps).
+- md: metadata dictionary attached to the plan/run. The plans build a
+  default metadata dict (_md) and merge user-provided md on top.
+
+Dependencies (high-level)
+- numpy
+- toolz or cytools.partition
+- plan_patterns (provides cycler patterns such as inner_list_product)
+- preprocessors (bpp): provides decorators such as stage_decorator and
+  run_decorator used to prepare and finalize runs
+- plan_stubs (bps): provides one_shot, repeat, and other helpers used to
+  implement the inner loops
+- utils and Msg (used for messaging and utilities)
+
+Public API
+----------
+The following functions are provided here:
+
+count(detectors, num=1, delay=None, *, per_shot=None, md=None)
+    Take one or more readings from detectors.
+
+    Parameters
+    - detectors : list
+        Iterable of "readable" objects. Each detector is expected to have
+        a .name attribute.
+    - num : int or None, optional
+        Number of readings to take. If None, capture data until canceled.
+        Default: 1.
+    - delay : scalar or iterable, optional
+        Time delay(s) between successive readings (in seconds). If an
+        iterable, it must provide at least num - 1 entries (unless num is
+        None) or a ValueError will occur during iteration.
+    - per_shot : callable, optional
+        Hook that customizes the action executed on each shot. Expected
+        signature:
+            def f(detectors: Iterable[Readable]) -> Generator[Msg]:
+                ...
+        If None, the default bps.one_shot is used.
+    - md : dict, optional
+        Additional metadata. The plan constructs a default metadata
+        dictionary (_md) and updates it with md (if provided).
+
+    Behavior and metadata
+    - The plan constructs an _md dict with keys:
+        - detectors: list of detector names
+        - num_points: num
+        - num_intervals: num - 1 (or None if num is None)
+        - plan_args: representation of detectors and num
+        - plan_name: 'count'
+        - hints: default dimensions set to time/primary
+    - The plan is decorated with bpp.stage_decorator to stage detectors
+      and bpp.run_decorator to open/close a run.
+    - The inner loop is implemented via bps.repeat(partial(per_shot,
+      detectors), num=num, delay=delay), so the exact message stream is
+      defined by the per_shot implementation.
+
+    Returns
+    - A generator (plan) suitable for execution by a RunEngine. The plan
+      yields Msg messages as produced by the inner per_shot/per-step
+      implementation.
+
+    Notes
+    - Use per_shot to implement custom sequencing of messages per read.
+    - The default "hints" dimension attaches a 'time' primary dimension.
+
+list_scan(detectors, *args, per_step=None, md=None)
+    Scan over one or more variables in steps simultaneously (inner
+    product).
+
+    Purpose
+    - Perform an N-dimensional scan where each dimension is specified by
+      a (motor, positions) pair. The plan computes an inner-product-style
+      cycler (synchronous stepping of motors across lists of positions)
+      and delegates execution to a scan_nd implementation.
+
+    Parameters
+    - detectors : list
+        Iterable of "readable" objects (each with a .name).
+    - *args :
+        A repeated sequence of (motor, positions) pairs. For a single
+        dimension, pass:
+            motor, [p1, p2, p3, ...]
+        For multiple dimensions, pass pairs for each motor in turn:
+            motor1, [p1_1, p1_2, ...],
+            motor2, [p2_1, p2_2, ...],
+            ...
+        Each positions argument must be a finite iterable that will be
+        converted to a list.
+    - per_step : callable, optional
+        Hook for customizing the action performed at each step. Expected
+        signature:
+            f(detectors, motor, step) -> plan (a generator)
+    - md : dict, optional
+        Additional metadata. The plan builds a default _md and updates it
+        with the provided md.
+
+    Validation and errors
+    - The function checks that an even number of *args items was passed;
+      if not, it raises ValueError("The list of arguments must contain a
+      list of points for each defined motor").
+    - It also checks that all provided position lists have the same
+      length. If they are not the same length it raises a ValueError
+      describing the lengths found.
+
+    Behavior and metadata
+    - Builds the metadata _md with keys including:
+        - detectors: list of detector names
+        - motors: list of motor names
+        - num_points: length of position lists
+        - num_intervals: length - 1
+        - plan_args: repr of detectors and args
+        - plan_name: 'list_scan'
+        - plan_pattern: 'inner_list_product'
+        - plan_pattern_module: name of plan_patterns module
+        - plan_pattern_args: dict(args=md_args)
+        - hints: default dimensions and any hints merged from md
+    - Extracts x_fields by concatenating each motor.hints.get('fields', [])
+      and uses that to construct default dimensions (primary).
+    - Constructs the full_cycler using:
+        full_cycler = plan_patterns.inner_list_product(args)
+      and then calls:
+        yield from scan_nd(detectors, full_cycler, per_step=per_step,
+                           md=_md)
+      (scan_nd is expected to implement an ND-scanning plan using the
+      provided cycler; it is not defined in this snippet.)
+
+    Returns
+    - A generator (plan) delegating to scan_nd with the computed cycler.
+
+    Notes
+    - This plan implements the "inner product" pattern: motors step in
+      lockstep over provided position lists.
+    - Use per_step to customize the messages generated per step.
+
+rel_list_scan(detectors, *args, per_step=None, md=None)
+    Scan over one or more variables in steps relative to the current
+    position.
+
+    Purpose
+    - Intended to be analogous to list_scan but treating each positions
+      list as offsets relative to the current motor position (i.e., add
+      each step value to the motor's current position).
+
+    Parameters (intended)
+    - detectors : list
+    - *args : repeated (motor, rel_positions) pairs (positions relative to
+      the current position)
+    - per_step : callable, optional
+    - md : dict, optional
+
+    Current status
+    - This function is a placeholder (TODO) in the provided source. The
+      implementation is not present in the code snippet and should be
+      completed to:
+        - read the current positions of specified motors,
+        - add the relative offsets to compute absolute target positions,
+        - validate lengths as in list_scan,
+        - construct metadata similar to list_scan, and
+        - invoke the appropriate cycler/scan_nd or equivalent executor.
+
+Examples
+--------
+Simple count of a single detector 5 times with 1 s delay (pseudocode):
+    plan = count([my_detector], num=5, delay=1.0)
+
+Two-motor synchronous list scan (inner product):
+    plan = list_scan([d1, d2], motor1, [0, 1, 2], motor2, [10, 20, 30])
+
+Implementation notes and helpers
+- The plans use:
+    - bpp.stage_decorator(detectors) to stage/unstage devices.
+    - bpp.run_decorator(md=_md) to open and close a run with _md metadata.
+    - bps.one_shot, bps.repeat and other stubs to build the inner
+      message stream.
+- plan_patterns contains functions building cyclers; for list_scan the
+  inner_list_product pattern is used to synchronously step motors.
+- The plans construct a default metadata structure _md and merge any
+  user-supplied md; they also attempt to construct useful 'hints' and
+  'dimensions' based on motor hints.
+
+Errors and exceptions
+- list_scan:
+    - Raises ValueError if the number of *args is not even.
+    - Raises ValueError if the provided position lists are of different
+      lengths.
+- count:
+    - If delay is an iterable shorter than required, iteration will raise
+      a ValueError (raised by the repeat implementation or by caller).
+
+Notes for maintainers
+- scan_nd is referenced but not defined in the provided snippet; ensure
+  that the module that provides scan_nd is imported or that list_scan
+  is used in a package context where scan_nd is available.
+- rel_list_scan must be implemented to support relative scans.
+- Ensure consistency of per_step / per_shot call signatures across all
+  plan_stubs and user-provided hooks.
+
+License and attribution
+- This documentation summarizes the behavior encoded in the source
+  functions and the inline docstrings. For implementation-level details
+  consult the plan_stubs (bps), preprocessors (bpp), and plan_patterns
+  modules used by these plans.

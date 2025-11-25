@@ -1,0 +1,203 @@
+Duration module — cumulative incidence and survival utilities
+===========================================================
+
+Module overview
+---------------
+Utilities for estimating right-censored survival and cumulative incidence
+functions. This module provides low-level routines to compute the Kaplan–Meier
+survival curve and Greenwood/Tsiatis standard errors for a single group, a
+cause-specific cumulative incidence estimator for competing risks, and basic
+argument checking. The primary public API is the CumIncidenceRight class,
+which wraps estimation and inference for cumulative incidence under right
+censoring.
+
+Functions
+---------
+
+_calc_survfunc_right(time, status, weights=None, entry=None, compress=True,
+                     retall=True)
+    Compute the right-censored survival function and its standard error for a
+    single group (private utility).
+
+    Signature
+      _calc_survfunc_right(time, status, weights=None, entry=None,
+                           compress=True, retall=True)
+
+    Description
+      - Builds unique event times and risk set sizes, counts events (deaths)
+        and (optionally) applies frequency weights.
+      - Returns survival probabilities and standard errors using Greenwood's
+        formula when no weights are supplied. When frequency weights are
+        supplied, standard error computation follows the Tsiatis (1981)
+        formula.
+      - Supports left-truncation (entry times) when entry is provided.
+      - Optionally compresses the time axis to only event times.
+
+    Parameters
+      time : array_like
+        Event or censoring times.
+      status : array_like
+        Event indicator (1 for event/cause, 0 for censoring for the "all-cause"
+        survival used here).
+      weights : array_like or None
+        Optional frequency weights. If provided, standard error computation
+        differs and some variance results may be omitted.
+      entry : array_like or None
+        Optional entry (left-truncation) times. Must satisfy entry < time.
+      compress : bool, default True
+        If True retain only times where an event occurs.
+      retall : bool, default True
+        If True return full set of auxiliary arrays (survival, se, times,
+        mapping to unique times, risk set, event counts). If False returns a
+        reduced set used internally.
+
+    Returns
+      If retall True: (survival, se, utime, rtime, n, d)
+        - survival : ndarray
+            Estimated survival probabilities at utime.
+        - se : ndarray
+            Standard error of survival (Greenwood or Tsiatis depending on
+            weights). Elements where variance cannot be computed are NaN.
+        - utime : ndarray
+            Unique times (after optional compression).
+        - rtime : ndarray
+            Integer indices mapping each original time to utime.
+        - n : ndarray
+            Risk set size just prior to each utime.
+        - d : ndarray
+            Number of events at each utime.
+
+      If retall False: (survival, utime, rtime, n, d)
+
+    Notes
+      - To avoid underflow, probabilities below 1e-16 are clipped during
+        intermediate log-sum computations.
+      - Greenwood's variance uses denom = n*(n-d), clipped to avoid division
+        by zero. When n equals d or n is zero elements are marked NaN.
+
+_calc_incidence_right(time, status, weights=None)
+    Compute cause-specific cumulative incidence functions for right-censored
+    competing risks data (private utility).
+
+    Signature
+      _calc_incidence_right(time, status, weights=None)
+
+    Description
+      - Uses the all-cause survival function (from _calc_survfunc_right) and
+        counts of cause-specific events to build the cumulative incidence
+        function I(t, j) = P(T <= t and J = j) for each cause j.
+      - If frequency weights are provided, variance estimates are not
+        returned (None is used for standard errors).
+      - When no weights are provided, standard errors for each cause are
+        computed using the usual counting-process algebra (variance derived
+        from Aalen–Johansen / cumulative incidence formula).
+
+    Parameters
+      time : array_like
+        Event or censoring times.
+      status : array_like
+        Integer-coded event type, where 0 indicates censoring and values 1..J
+        indicate competing event types. The maximum observed status value
+        defines the number of causes.
+      weights : array_like or None
+        Optional frequency weights.
+
+    Returns
+      (ip, se, utime)
+        - ip : list of ndarrays
+            Cumulative incidence curves for each cause (one array per cause).
+        - se : list of ndarrays or None
+            Standard errors for each cause when weights is None; otherwise
+            None.
+        - utime : ndarray
+            Unique times used for the returned curves.
+
+_checkargs(time, status, entry, freq_weights, exog)
+    Basic input validation for time-to-event routines (private utility).
+
+    Signature
+      _checkargs(time, status, entry, freq_weights, exog)
+
+    Description / checks performed
+      - Ensures time and status have the same length.
+      - If entry is provided, it must have the same length as time and every
+        entry time must be strictly less than the corresponding event time.
+      - If freq_weights is provided, it must match the length of time/status.
+      - If exog is provided (covariates), the number of rows must match the
+        length of time.
+    Raises
+      ValueError with an explanatory message when a check fails.
+
+Classes
+-------
+
+CumIncidenceRight
+    Estimation and inference for a cumulative incidence function under right
+    censoring.
+
+    Purpose
+      - Estimate the cumulative incidence function I(t, j) = P(T <= t and J = j)
+        for each cause j in a competing-risks setting.
+      - Provide standard errors and support for optional frequency weights,
+        left truncation, and adjustment using auxiliary covariates.
+
+    Synopsis
+      CumIncidenceRight(time, status, title=None, freq_weights=None, exog=None,
+                        bw_factor=None, dimred=False)
+
+    Parameters
+      time : array_like
+        Times (event or censoring times).
+      status : array_like
+        Integer-coded event indicator: 0 for censoring, 1..J for competing
+        event types.
+      title : str, optional
+        Optional title string used for plotting and summary output.
+      freq_weights : array_like, optional
+        Optional frequency weights. When provided, point estimates are
+        computed but standard errors may be suppressed (see notes in the
+        incidence routine).
+      exog : array_like, optional
+        Optional covariate matrix used to account for violations of the
+        independent censoring assumption. If present, kernel-based or other
+        adjustment procedures may be applied; a bandwidth multiplier (see
+        bw_factor) can be provided.
+      bw_factor : float, optional
+        Bandwidth multiplier for kernel-based estimation when exog is used.
+      dimred : bool, optional
+        If True, dimensionality reduction may be used for exog-based
+        adjustments (implementation-specific).
+
+    Behavior and notes
+      - Only right censoring is supported by the estimator routines shown.
+      - Frequency weights result in point estimates without a standard error
+        (variance formulas implemented assume independent censoring and
+        unweighted data).
+      - Left truncation (entry times) is supported by the underlying
+        survival routine when data are prepared appropriately.
+      - The implementation references Greenwood’s formula for the Kaplan–
+        Meier variance and an alternative Tsiatis (1981) variance for the
+        weighted case.
+
+Examples
+--------
+Basic use (conceptual)
+  - Create an instance with arrays time and status, then call the estimator's
+    methods or attributes to obtain cumulative incidence curves and standard
+    errors. (The class API may provide plotting and summary helpers.)
+
+References
+----------
+  - Greenwood, M. (1926). The natural duration of cancer. Reports on Public
+    Health and Medical Subjects.
+  - Tsiatis, A. A. (1981). A large sample study of Cox's regression model.
+    Annals of Statistics.
+  - Aalen, O. O., & Johansen, S. (1978). An empirical transition matrix for
+    non-homogeneous Markov chains based on censored observations.
+
+Developer notes
+---------------
+- Functions prefixed with an underscore are intended as internal utilities.
+- The routines operate in counting-process style using numpy bincount and
+  cumulative sums for efficiency. Care is taken to avoid division by zero and
+  numerical underflow in log-sum operations.

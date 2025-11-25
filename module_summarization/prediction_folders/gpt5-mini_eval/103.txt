@@ -1,0 +1,188 @@
+codegen — High-level code generation utilities
+=============================================
+
+Module purpose
+--------------
+This module provides a framework for generating source-code routines (C, C++,
+Fortran77/90, Octave/Matlab and others) from Diofant expressions.  Instead of
+simple per-expression printers, the code generation framework models entire
+routines (functions/subroutines) and is capable of producing compilable
+artifacts such as code and headers, handling input/output semantics, sharing
+common subexpressions between expressions, and evaluating constants ahead of
+time where appropriate.
+
+Why codegen vs printing
+-----------------------
+The module is intentionally distinct from the low-level printing routines
+(e.g. ccode) for several reasons:
+
+- Languages often require more than a single string: e.g. C needs separate
+  header and implementation files; Fortran and Python have different calling
+  conventions and type semantics.
+- The code generator models programming-technical concerns (input/output
+  argument kinds, contiguous vs non-contiguous arrays, external-library
+  headers) that are outside the scope of expression printers.
+- It supports multi-expression routines that may share intermediate results
+  (potentially via common-subexpression elimination).
+- It can perform additional symbolic preprocessing (evaluate constants,
+  choose datatypes) to improve efficiency of the emitted code.
+
+Basic design and assumptions
+----------------------------
+- A generic Routine data structure (class Routine) describes the evaluation
+  routine for a set of expressions. It attempts to cover the combined feature
+  set of the supported target languages.
+- Concrete CodeGen implementations translate one or more Routine instances
+  into compilable code for a particular language. Implementations must
+  raise informative errors when language features required by a Routine are
+  not supported by the target language.
+- Friendly top-level helper functions provide a simpler API for common
+  workflows; they sit above the more rigorous Routine/CodeGen API.
+
+Milestones (selected)
+---------------------
+Completed and partially completed milestones (indicative of supported and
+planned functionality):
+
++ scalar input arguments and C code generation
++ simple friendly functions as a thin API
++ integer/real argument and result support
++ input/output and input-output argument semantics
++ sort and categorize arguments
++ contiguous array arguments (NumPy)
++ automatic generation of .pyf (f2py) files (via autowrap)
++ pre-evaluation of constants in double precision
++ Fortran 90 and Octave/Matlab backends
+
+Planned/enhancements
+- complex number handling and default complex datatypes
+- common subexpression elimination (CSE)
+- user-defined comments and extra include lines for special functions
+- broader compiler/library testing and bindings (C++, Python, Fortran77, ...)
+- richer matrix/array support (contiguous/non-contiguous Diofant matrices)
+
+Public exports
+--------------
+The module exposes the following public names (short descriptions):
+
+- Routine
+  - Generic description of a routine (name, arguments, results, local and
+    global variables). See below for details.
+- DataType, default_datatypes, get_default_datatype
+  - Datatype abstractions and helpers used by code generators to map Diofant
+    types to target-language types.
+- Argument, InputArgument, OutputArgument, Result
+  - Represent different kinds of routine arguments and result descriptors.
+- CodeGen, CCodeGen, FCodeGen, OctaveCodeGen
+  - Abstract base class and concrete code generator backends for different
+    target languages.
+- codegen, make_routine
+  - Friendly helper functions providing a simplified, higher-level API for
+    common workflows (create a Routine and emit code).
+
+Class: Routine
+--------------
+Purpose
+  Routine models a complete evaluation routine that computes one or more
+  expression Results from given input Arguments. A CodeGen implementation
+  consumes Routine instances and emits concrete source code in the target
+  language.
+
+Construction
+  Routine(name, arguments, results, local_vars, global_vars)
+
+Parameters
+  - name (str)
+    The routine name (function/subroutine name in the target language).
+  - arguments (list of Argument objects)
+    Things that appear in the routine argument list. Typical kinds are
+    InputArgument, OutputArgument and InOutArgument. Their concrete meaning
+    (pass-by-value, pass-by-reference, array semantics) depends on the target
+    language and the chosen CodeGen.
+  - results (list of Result)
+    The routine results (return values or explicit output arguments).
+  - local_vars (list of Result or symbol names)
+    Local variables that will be declared/initialized inside the routine.
+    Entries may be Result instances (describing expressions) or raw names for
+    local temporaries.
+  - global_vars (list of Symbol)
+    Symbols that are considered global and will not be passed into the
+    routine.
+
+Validation and semantics
+  On initialization Routine performs validation checks to ensure that all
+  free symbols used by result and local expressions are covered by:
+    - an InputArgument or InOutArgument (i.e. an input),
+    - a local variable, or
+    - declared global variables
+
+  If expressions refer to symbols not present in any of these sets, the
+  constructor raises ValueError with an informative message listing the
+  uncovered symbols.
+
+Behavioral notes
+  - OutputArgument instances do not count as inputs; any symbols they use are
+    treated as needed symbols and must be covered by inputs or locals/globals.
+  - InOutArgument instances are treated both as inputs and as carrying an
+    expression (their free symbols are checked) depending on how they are
+    used in the language model.
+  - The Routine is deliberately conservative: it accepts additional (unused)
+    InputArguments or local_vars beyond what expressions strictly require,
+    but it enforces that every symbol that is needed is accessible at runtime.
+
+Properties
+  - variables
+    Returns a set of the names of all variables that may be used in the
+    routine. This includes local variables, the names of all arguments, and
+    the result variables (the targets for results). Useful for dependency
+    analysis, name clash detection, or symbol allocation.
+  - result_variables
+    Returns a list of variable names used to hold the routine's results.
+    Depending on how results were specified, these might be user-specified
+    names or internally generated dummy names for unnamed return values.
+    (This property helps CodeGen backends decide whether results should be
+    returned directly or written into output arguments.)
+
+Errors
+  - ValueError is raised by the constructor if:
+    * an unknown argument/result type is encountered, or
+    * symbols appearing in result/local expressions are not covered by the
+      inputs, locals or globals.
+
+Design implications for CodeGen
+-------------------------------
+- A CodeGen backend must map the abstract Routine model to concrete calling
+  and type semantics of its target language. This includes:
+  - mapping Result objects to return values or output arguments,
+  - mapping DataType instances to native types,
+  - declaring and initializing local temporaries,
+  - emitting headers, includes and any auxiliary files required by the
+    language (e.g. .pyf files for f2py).
+- Backends should raise clear errors when a Routine expresses features the
+  target language does not support (for example, multiple return values in C
+  unless rewritten as output pointers).
+
+Typical workflow
+----------------
+- Construct Argument and Result descriptors for all inputs, outputs and
+  locals of the desired routine.
+- Create a Routine instance that encapsulates the work to be performed.
+- Select/instantiate a CodeGen backend (CCodeGen, FCodeGen, OctaveCodeGen, ...).
+- Ask the backend to generate source code (and headers) for the Routine.
+- Optionally use the friendly helpers (codegen, make_routine) for simpler
+  tasks where low-level control is not required.
+
+See also
+--------
+- diofant.utilities.codegen.{CodeGen, CCodeGen, FCodeGen, OctaveCodeGen}
+  for language-specific code-generation backends.
+- diofant.printing.{ccode, fcode, octave_code} for lower-level printers used
+  by code-generation backends for expression-to-string translation.
+
+Notes
+-----
+This module is a work in progress. Some advanced features (CSE, complex-type
+defaults, extensive matrix support, user comments and extra includes,
+additional language backends) are planned but not yet implemented across all
+backends. Error messages are intended to be informative so callers can adapt
+their Routine descriptions to the capabilities of the chosen CodeGen.

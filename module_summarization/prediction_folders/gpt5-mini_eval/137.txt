@@ -1,0 +1,209 @@
+ImPACT — Image Pixel-wise fit for Atmospheric Cherenkov Telescopes
+==================================================================
+
+Overview
+--------
+ImPACT (Image Pixel-wise fit for Atmospheric Cherenkov Telescopes) is a
+template-based maximum-likelihood shower reconstruction method for
+gamma-ray imaging atmospheric Cherenkov telescopes (IACTs). The method
+compares measured camera images to a library of precomputed Monte-Carlo
+image templates and performs a multi-parameter likelihood fit for the
+shower axis (direction and impact point), primary energy and shower-maximum
+height (Xmax). The implementation follows Parsons & Hinton (2014).
+
+Key features
+------------
+- Pixel-wise maximum-likelihood fit using interpolated Monte-Carlo image
+  templates for each telescope type.
+- Fits shower geometry (direction, impact point), energy (TeV) and Xmax
+  (height/depth of shower maximum).
+- Optional modeling of pixel time gradients when time-template files are
+  available.
+- Flexible choice of minimiser (e.g. Minuit or scipy optimisers) and
+  priors for energy and Xmax.
+- Uses atmosphere profile functions to convert between height and
+  atmospheric depth, enabling physically-motivated Xmax priors.
+
+Design and units
+----------------
+To maximize numerical performance, the reconstructor uses fixed internal
+units (no Astropy unit wrapping during calculation):
+- angles: radians
+- distances: metres
+- energy: TeV
+
+The class exposes precomputed template interpolators per telescope type,
+and keeps per-event arrays describing pixel coordinates, signals and
+times for efficient likelihood evaluation.
+
+Reference
+---------
+Parsons, R. D. & Hinton, J. A., Astroparticle Physics 56 (2014), 26–34.
+
+ImPACTReconstructor
+-------------------
+Class: ImPACTReconstructor
+
+Description
+    Implementation of the ImPACT template-fitting algorithm. Internally
+    holds template interpolators for all telescope types present in the
+    data, event pixel-level inputs, and prediction caches for template
+    evaluations. The reconstructor supplies utilities to initialise
+    templates and compute simple event-derived quantities used during the
+    fit (e.g. image peak positions).
+
+Constructor arguments
+    root_dir (str)
+        Path to the directory containing template files (default: ".").
+    minimiser (str)
+        Name of minimiser to use (e.g. "minuit", or scipy-based methods).
+    prior (str)
+        Prior specification for the fit. Supported priors implemented by
+        the helper functions (see below). Empty string means no extra prior.
+    template_scale (float)
+        Global scale factor applied to template predictions to correct
+        small mismatches between templates and real data (default 1.0).
+    xmax_offset (float)
+        Global offset to apply to template Xmax (height/depth) if
+        necessary to match data (default 0).
+    use_time_gradient (bool)
+        If True and time-template files exist, include template time
+        gradients in the likelihood (default False).
+
+Attributes of interest
+    file_names (dict)
+        Mapping of telescope type -> list of template filenames. Example
+        defaults:
+            "CHEC":      ["GCT_05deg_ada.template.gz", "GCT_05deg_time.template.gz"]
+            "LSTCam":    ["LST_05deg.template.gz",    "LST_05deg_time.template.gz"]
+            "NectarCam": ["MST_05deg.template.gz",    "MST_05deg_time.template.gz"]
+            "FlashCam":  ["MST_xm_full.fits"]
+    ped_table (dict)
+        Hard-coded pedestal widths (RMS) per camera type (p.e. units):
+            "LSTCam": 2.8, "NectarCam": 2.3, "FlashCam": 2.3, "CHEC": 0.5, "DUMMY": 0
+    spe (float)
+        Single-photoelectron width used in pixel likelihoods (default 0.5).
+    prediction, time_prediction (dict)
+        Caches of TemplateNetworkInterpolator and TimeGradientInterpolator
+        instances keyed by telescope type.
+    thickness_profile, altitude_profile (callables)
+        Atmosphere profile functions (from ctapipe.instrument) for
+        converting between geometric height and atmospheric depth.
+    pixel_x, pixel_y (arrays)
+        Per-event pixel angular positions (radians).
+    image (array)
+        Per-event pixel signal amplitudes (p.e.).
+    time (array)
+        Per-event pixel times (ns) if used.
+    tel_types, tel_id (arrays)
+        Per-event telescope type identifiers and telescope ids.
+    tel_pos_x, tel_pos_y (arrays)
+        Array (telescope) positions in ground coordinates (metres).
+    hillas_parameters (iterable)
+        Per-telescope Hillas parameter containers (used to compute image
+        peak positions in get_hillas_mean()).
+    ped (array)
+        Per-pixel pedestal RMS values (p.e.) used in likelihood evaluation.
+
+Primary methods
+    initialise_templates(tel_type)
+        Ensure template interpolators exist for each telescope type present
+        in the event. If not already loaded, this loads TemplateNetworkInterpolator
+        (and TimeGradientInterpolator when use_time_gradient is True) using
+        the files in file_names. Returns True on completion.
+        Input: tel_type — iterable/dict of telescope type identifiers.
+
+    get_hillas_mean()
+        Compute a simple peak position (weighted mean of hottest pixels
+        or using stored Hillas parameters) for each telescope image. This
+        is used to seed computations such as Xmax estimation and initial
+        geometry guesses.
+
+Workflow (conceptual)
+---------------------
+1. initialise_templates: load template interpolators for all telescope types.
+2. Prepare per-event inputs:
+   - pixel positions (x,y), pixel signals and pedestal RMS,
+   - telescope positions and types,
+   - Hillas parameters (for initial guesses).
+3. Generate an initial parameter guess (direction, impact point,
+   energy, Xmax). Utility functions below help form Xmax/energy priors.
+4. For a given trial shower parameter set, evaluate template predictions
+   for each telescope and compute the per-pixel negative log-likelihood
+   (e.g. using CTAPIPE's neg_log_likelihood or a mean-Poisson+Gaussian
+   approximation).
+5. Minimise the total negative log-likelihood (plus optional priors)
+   using the chosen minimiser to obtain best-fit shower parameters.
+6. Convert fitted altitude/Xmax to atmospheric depth (and vice versa)
+   using the atmosphere profile functions if needed.
+7. Return results in standard containers (e.g. ReconstructedGeometryContainer,
+   ReconstructedEnergyContainer) for downstream use.
+
+Likelihood and priors
+---------------------
+- Pixel likelihood:
+  The pixel model accounts for expected template signal (p.e.),
+  pedestal RMS and single-p.e. resolution (spe). Implementations may
+  use a negative log-likelihood built from the full Poisson + Gaussian
+  pixel model or an approximation (mean Poisson + Gaussian).
+
+- energy_prior(energy, index=-1)
+  A simple power-law prior on energy. Returns -2 * log(energy**index).
+  Default index = -1 corresponds to E^{-1} weighting in the log-likelihood.
+
+- guess_shower_depth(energy)
+  Simple empirical estimate of the expected depth of shower maximum (Xmax
+  in g/cm^2) as a function of energy (TeV):
+      Xmax_expected = 300 + 93 * log10(E / 1 TeV)
+  (Used to form Xmax priors or initial guesses.)
+
+- xmax_prior(energy, xmax, width=100)
+  Gaussian prior on Xmax around the energy-dependent expectation from
+  guess_shower_depth(). The width parameter is in the same depth units
+  as guess_shower_depth (default 100).
+
+Time-gradient support
+--------------------
+If template time-gradient files are available for a camera type and
+use_time_gradient=True, time templates are loaded and a time-gradient
+term can be added to the likelihood. This helps exploit timing
+information for improved geometry and core position constraints.
+
+Configuration knobs and practical notes
+---------------------------------------
+- template_scale: a multiplicative correction factor to template
+  amplitudes to account for residual calibration/optical differences.
+- xmax_offset: a global shift applied to template Xmax to correct for
+  systematic offsets between MC templates and data.
+- ped_table: given typical cameras may not expose per-pixel pedestal RMS
+  directly in some data flows, a small dictionary of typical pedestal
+  widths is provided as a fallback. These values should be configured
+  from calibration data when available.
+- Minimiser: Minuit (via iminuit.Minuit) is commonly used for robustness
+  and reliable error estimation; scipy optimisers (e.g. least_squares,
+  minimize) can also be used depending on user preference.
+
+Example (conceptual)
+--------------------
+- Create ImPACTReconstructor with desired options and path to templates.
+- Call initialise_templates(event_tel_types).
+- Fill per-event arrays (pixel_x, pixel_y, image, time, tel positions,
+  hillas_parameters, ped).
+- Prepare initial guess and call the chosen minimiser to minimise the
+  total negative log-likelihood constructed from templates and priors.
+- Collect fitted parameters into ReconstructedGeometryContainer and
+  ReconstructedEnergyContainer for storage/analysis.
+
+References
+----------
+Parsons, R. D. & Hinton, J. A., "A Monte Carlo template based analysis
+for atmospheric Cherenkov telescopes", Astroparticle Physics 56 (2014), 26–34.
+
+See also
+--------
+- ctapipe.image.neg_log_likelihood
+- ctapipe.image.mean_poisson_likelihood_gaussian
+- ctapipe.utils.template_network_interpolator.TemplateNetworkInterpolator
+- ctapipe.utils.template_network_interpolator.TimeGradientInterpolator
+- ctapipe.instrument.get_atmosphere_profile_functions
+

@@ -1,0 +1,135 @@
+Pydantic models from Tortoise models
+===================================
+
+Overview
+--------
+Tortoise can generate Pydantic models from Tortoise ORM models to simplify validation and serialization. The primary helper is ``pydantic_model_creator`` which builds a pydantic-compatible model class (subclass of ``tortoise.contrib.pydantic.base.PydanticModel``) from a Tortoise ``Model``. Models can be tuned via an inner ``PydanticMeta`` class on the Tortoise model or by passing parameters to the generator call.
+
+PydanticMeta
+-----------
+Place a ``PydanticMeta`` inner class on your Tortoise model to provide defaults used by the generator:
+
+.. code-block:: python3
+
+    class MyModel(Model):
+        ...
+        class PydanticMeta:
+            include = ("field1", "field2")
+            exclude = ("secret",)
+            computed = ("computed_value",)
+            backward_relations = True      # include reverse relations
+            max_recursion = 3              # recursion depth for related models
+            allow_cycles = False           # allow cycles in generated graph
+            exclude_raw_fields = True      # exclude raw relation _id fields
+            sort_alphabetically = False    # sort fields alphabetically
+
+Description of options
+- include (tuple[str,...]): If given, only the listed fields are included.
+- exclude (tuple[str,...]): Fields to exclude from the generated model.
+- computed (tuple[str,...]): Names of computed properties/methods to include.
+- backward_relations (bool): Include reverse relations (default True). Use with care — reverse relations may produce large nested output.
+- max_recursion (int): Maximum recursion depth when following relations (default 3).
+- allow_cycles (bool): Allow cycles in relation graph (default False). Enabling can produce very large models.
+- exclude_raw_fields (bool): Omit raw relation ID fields (those ending with ``_id``).
+- sort_alphabetically (bool): If True, fields are sorted alphabetically; otherwise field declaration order is used.
+
+pydantic_model_creator
+----------------------
+Main signature (shortened):
+
+.. code-block:: python3
+
+    pydantic_model_creator(
+        cls: Type[Model],
+        *,
+        name: Optional[str] = None,
+        exclude: Tuple[str,...] = (),
+        include: Tuple[str,...] = (),
+        computed: Tuple[str,...] = (),
+        allow_cycles: Optional[bool] = None,
+        sort_alphabetically: Optional[bool] = None,
+        _stack: tuple = (),
+        exclude_readonly: bool = False,
+    ) -> Type[PydanticModel]
+
+Key points:
+- ``cls``: the Tortoise model class to convert.
+- ``name``: override generated model name. If omitted, a name based on the model's qualified name is used; when non-default options are provided a short hash postfix is appended to ensure uniqueness.
+- ``include``, ``exclude``, ``computed``: additional per-call overrides; these supplement or override the model's ``PydanticMeta`` defaults.
+- ``allow_cycles``: if set, enables generating models that include cyclic/backtracking relations (use with care).
+- ``sort_alphabetically``: per-call control for field ordering.
+- ``exclude_readonly``: build a model that excludes readonly fields (useful for input models).
+
+Recursion, cycles and protection
+-------------------------------
+When generating nested models (following ForeignKey/OneToOne/ManyToMany/reverse relations), a recursion limit is enforced based on the model's ``PydanticMeta.max_recursion``. By default, cycles are disallowed: if a class would reappear in the ancestors and ``allow_cycles`` is False, the nested branch is truncated to avoid infinite recursion. You can control these behaviours via ``PydanticMeta`` or per-call parameters.
+
+Computed fields
+---------------
+Computed attributes (e.g. properties or methods returning derived values) can be included by name via the ``computed`` tuple in ``PydanticMeta`` or by passing ``computed=(...)`` to ``pydantic_model_creator``. These will be added as fields on the generated Pydantic model.
+
+Exclude raw relation ID fields
+------------------------------
+If your models expose raw foreign-key ID fields (commonly with a ``_id`` suffix), set ``exclude_raw_fields=True`` in ``PydanticMeta`` (default) to avoid including those raw fields alongside relation objects. You can override this per-call by passing the equivalent parameter where supported.
+
+Examples
+--------
+
+Basic generation
+.. code-block:: python3
+
+    from tortoise.contrib.pydantic import pydantic_model_creator
+
+    User_Pydantic = pydantic_model_creator(User)  # generate a Pydantic model for User
+
+Include/exclude fields and computed values
+.. code-block:: python3
+
+    UserIn = pydantic_model_creator(
+        User,
+        exclude=("id", "is_active"),
+        computed=("full_name",)
+    )
+
+Custom name and alphabetical sorting
+.. code-block:: python3
+
+    UserSorted = pydantic_model_creator(
+        User,
+        name="UserInputModel",
+        sort_alphabetically=True
+    )
+
+Allow cycles (use carefully)
+.. code-block:: python3
+
+    # Generates models that may include cycles; useful for self-referential structures.
+    GraphNodeModel = pydantic_model_creator(
+        GraphNode,
+        allow_cycles=True,
+        max_recursion=5
+    )
+
+Using PydanticMeta defaults
+.. code-block:: python3
+
+    class Post(Model):
+        ...
+        class PydanticMeta:
+            exclude = ("internal_notes",)
+            backward_relations = False
+
+    Post_Pydantic = pydantic_model_creator(Post)  # uses PydanticMeta defaults
+
+Notes and tips
+--------------
+- Per-call arguments to ``pydantic_model_creator`` override the defaults specified in a model's ``PydanticMeta``.
+- Generated model names are deterministic for default arguments; when non-default options are used a short hash postfix is appended to keep names unique.
+- Be cautious with ``backward_relations`` and ``allow_cycles``: these can easily produce very large or deeply nested models.
+- Use ``exclude_readonly=True`` when you need an input/creation model that omits readonly fields.
+- Computed fields must be referenced by name; how they are implemented on your model (property/method) is up to your model code.
+
+See also
+--------
+- pydantic documentation: https://pydantic-docs.helpmanual.io/ — model usage and validation
+- tortoise.contrib.pydantic.base — base classes ``PydanticModel`` and ``PydanticListModel`` used for generated models

@@ -1,0 +1,182 @@
+Markov chain Monte Carlo (MCMC) framework
+=======================================
+
+Overview
+--------
+This module provides a lightweight framework for equilibrium sampling of a
+thermodynamic state using Markov chain Monte Carlo (MCMC) moves implemented
+with OpenMM. The framework is extensible and supports composing multiple
+moves into sequences or stochastic mixtures. Built-in move types include
+Langevin dynamics (assumed free of integration error), hybrid Monte Carlo
+(HMC), generalized hybrid Monte Carlo (GHMC), and Monte Carlo barostat moves.
+Moves can be combined with helper classes such as SequenceMove and
+WeightedMove.
+
+The framework is designed to reuse OpenMM Contexts via ContextCache objects
+to minimize overhead. By default it uses a global ContextCache that selects
+the fastest available OpenMM platform, but local caches or a DummyContextCache
+(can be used to always create fresh Contexts) are also supported.
+
+References
+----------
+Jun S. Liu. Monte Carlo Strategies in Scientific Computing. Springer, 2008.
+
+Module-level constants
+----------------------
+- _RANDOM_SEED_MAX
+  - Maximum integer value used when generating random seeds (np.iinfo(np.int32).max).
+
+Key abstractions
+----------------
+
+MCMCMove
+~~~~~~~~
+Abstract base class that defines the contract for an MCMC move. To add a new
+move implementors must subclass MCMCMove and provide an apply method.
+
+Methods
+- apply(thermodynamic_state, sampler_state)
+  - Apply the MCMC move. The implementation may update the provided
+    thermodynamic_state and/or sampler_state objects (openmmtools.states).
+  - Parameters
+    - thermodynamic_state : openmmtools.states.ThermodynamicState
+        The thermodynamic state before applying the move; may be modified.
+    - sampler_state : openmmtools.states.SamplerState
+        The sampler (microscopic) state before applying the move; may be modified.
+
+MCMCSampler
+~~~~~~~~~~
+Basic driver for running MCMC sampling. The MCMCSampler maintains the current
+thermodynamic and sampler states and applies a specified set of moves every
+iteration.
+
+Constructor parameters
+- thermodynamic_state : openmmtools.states.ThermodynamicState
+  - Initial thermodynamic state (system + thermodynamic parameters).
+- sampler_state : openmmtools.states.SamplerState
+  - Initial sampler (microscopic) state (positions, velocities, box vectors).
+- move_set : container of MCMCMove objects
+  - Moves to attempt during the MCMC run. Accepted forms:
+    - list/tuple: all moves are executed each iteration in the given sequence
+      (e.g., [move1, move2, move3]).
+    - dict: keys are moves and values are (unnormalized) weights; a single
+      move is selected each iteration with probability proportional to its
+      weight.
+
+Attributes
+- thermodynamic_state : openmmtools.states.ThermodynamicState
+  - Current thermodynamic state.
+- sampler_state : openmmtools.states.SamplerState
+  - Current sampler state.
+- move_set
+  - The configured move set (sequence or weighted collection).
+
+Typical usage
+-------------
+Create a thermodynamic and sampler state for a test system:
+
+:: 
+    from simtk import unit
+    from openmmtools import testsystems
+    from openmmtools.states import ThermodynamicState, SamplerState
+
+    test = testsystems.AlanineDipeptideVacuum()
+    thermodynamic_state = ThermodynamicState(system=test.system,
+                                             temperature=298*unit.kelvin)
+    sampler_state = SamplerState(positions=test.positions)
+
+Create moves and a sampler:
+
+::
+    ghmc_move = GHMCMove(timestep=1.0*unit.femtosecond, n_steps=50)
+    langevin_move = LangevinDynamicsMove(n_steps=10)
+    sampler = MCMCSampler(thermodynamic_state, sampler_state, move_set=ghmc_move)
+
+Combine moves into a sequence:
+
+::
+    sequence_move = SequenceMove([ghmc_move, langevin_move])
+    sampler = MCMCSampler(thermodynamic_state, sampler_state, move_set=sequence_move)
+
+Create a weighted mixture of moves (random choice each iteration):
+
+::
+    weighted_move = WeightedMove([(ghmc_move, 0.5), (langevin_move, 0.5)])
+    sampler = MCMCSampler(thermodynamic_state, sampler_state, move_set=weighted_move)
+
+Context cache and platform configuration
+----------------------------------------
+By default the global ContextCache is used and selects the fastest available
+OpenMM platform. You can configure the platform and cache behavior before
+running a simulation:
+
+::
+    import openmm
+    from openmmtools import cache
+
+    reference_platform = openmm.Platform.getPlatformByName('Reference')
+    cache.global_context_cache.platform = reference_platform
+    cache.global_context_cache.time_to_live = 10  # number of read/write ops
+
+Use local ContextCache instances when different moves should use different
+caching policies or platforms:
+
+::
+    local_cache1 = cache.ContextCache(capacity=5, time_to_live=50)
+    local_cache2 = cache.ContextCache(platform=reference_platform, capacity=1)
+    sequence_move = SequenceMove([HMCMove(), LangevinDynamicsMove()],
+                                 context_cache=local_cache1)
+    ghmc_move = GHMCMove(context_cache=local_cache2)
+
+To disable caching entirely and create a new Context for every use, provide
+a DummyContextCache:
+
+::
+    dummy_cache = cache.DummyContextCache(platform=reference_platform)
+    ghmc_move = GHMCMove(context_cache=dummy_cache)
+
+Common operations
+-----------------
+- Minimization
+  - The sampler exposes a minimize() operation to minimize the current sampler
+    state before production sampling.
+- Running
+  - Run MCMC iterations with sampler.run(n_iterations=...).
+
+Examples
+--------
+Minimize and run a couple of iterations:
+
+::
+    sampler.minimize()
+    sampler.run(n_iterations=2)
+
+Combining moves and caches (complete example):
+
+::
+    from openmmtools import cache, testsystems
+    from openmmtools.states import ThermodynamicState, SamplerState
+
+    test = testsystems.AlanineDipeptideVacuum()
+    thermo = ThermodynamicState(system=test.system, temperature=298*unit.kelvin)
+    state = SamplerState(positions=test.positions)
+
+    ghmc = GHMCMove(timestep=1.0*unit.femtosecond, n_steps=50)
+    langevin = LangevinDynamicsMove(n_steps=10)
+    sequence = SequenceMove([ghmc, langevin],
+                            context_cache=cache.ContextCache(capacity=5))
+    sampler = MCMCSampler(thermo, state, move_set=sequence)
+
+Notes and implementation details
+-------------------------------
+- The MCMCMove abstraction allows storing move-internal statistics (attempts,
+  acceptances, etc.).
+- Random seeds used by moves should respect the module-level seed range
+  defined by _RANDOM_SEED_MAX.
+- The provided Langevin implementation assumes negligible integration error;
+  users should be aware of any approximations when combining MD-based moves
+  with Metropolis accept/reject steps.
+
+License
+-------
+All code in the originating repository is released under the MIT License.

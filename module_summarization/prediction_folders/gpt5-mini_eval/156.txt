@@ -1,0 +1,192 @@
+How Mitogen Works
+=================
+
+Overview
+--------
+Mitogen is a lightweight RPC and multiplexing framework for Python that enables
+efficient execution of code across process and machine boundaries. A minimal
+bootstrap implementation is shipped to newly created remote contexts so that
+they can participate in message routing and module loading with minimal
+dependencies. Mitogen focuses on fast, low-overhead IO, robust routing, and
+transparent remote execution.
+
+Key Concepts
+------------
+- Broker: The central IO loop responsible for reading from and writing to
+  transport endpoints (sockets, pipes) and for dispatching incoming messages
+  to the appropriate handlers.
+
+- Router: Maintains routing information that maps context identifiers to
+  endpoints. When messages arrive, the router determines the destination and
+  forwards them. Routers also handle adding and removing routes and can
+  notify handlers when routes are torn down.
+
+- Context / Channel: A Context is an execution environment (local or remote).
+  Channels represent logical endpoints for sending and receiving messages to
+  and from a Context. Channels implement request/reply semantics, error
+  handling, and back-pressure.
+
+- Side: Low-level abstraction for a transport endpoint used by the Broker to
+  read and write raw bytes. Side objects expose read/write primitives and are
+  sized for optimized bulk IO.
+
+- Services and Callbacks: Remote services and functions can be invoked via
+  RPC-style messages. The framework supports forwarded function calls, module
+  loading requests, and service dispatch.
+
+Bootstrap and Minified Core
+---------------------------
+A compact, self-contained portion of Mitogen is sent to each slave context.
+This bootstrap contains the minimal set of functionality required for:
+- routing messages,
+- loading and forwarding modules,
+- invoking functions remotely,
+- handling errors and shutdown.
+
+The code is designed to be small and self-sufficient (see "minify_safe")
+to reduce transmission size and to avoid importing non-essential modules that
+would bloat the bootstrap payload.
+
+Message Types
+-------------
+Mitogen uses small integer constants to encode message intent. Examples
+include:
+
+- GET_MODULE (100)
+  Request a module's source or metadata from another context.
+
+- LOAD_MODULE (107)
+  Instruct a context to load a module (used during remote imports).
+
+- FORWARD_MODULE (108)
+  Forward module contents or a module request on behalf of another context.
+
+- CALL_FUNCTION (101)
+  Request execution of a function in a remote context.
+
+- CALL_SERVICE (110) / STUB_CALL_SERVICE (111)
+  Invoke a named service implemented in another context, possibly via a stub.
+
+- ADD_ROUTE (103) / DEL_ROUTE (104)
+  Manage routing table entries.
+
+- ALLOCATE_ID (105)
+  Allocate unique identifiers for channels or requests.
+
+- FORWARD_LOG (102)
+  Forward log records across contexts.
+
+- DETACHING (109) / SHUTDOWN (106)
+  Signals used when tearing down contexts or routers.
+
+Special sentinel:
+- IS_DEAD (999)
+  A special reply_to/route sentinel used to indicate a receiver is no longer
+  available or a message cannot be routed. Receipt of IS_DEAD typically causes
+  channel-level errors (e.g. ChannelError) and prompts cleanup. It is also
+  used as a sentinel when a router is being torn down to notify handlers.
+
+Serialization, Codecs and Compatibility
+--------------------------------------
+- Pickling: Mitogen serializes Python objects for RPC and transport using
+  pickle. Optimized picklers (cPickle where available) are preferred for
+  performance.
+
+- Text and Bytes: The codebase handles both bytes and text carefully across
+  Python versions. A latin-1 codec (LATIN1_CODEC) is used in some places to
+  avoid taking the import lock via str.encode, reducing the risk of deadlock
+  in multi-threaded import scenarios.
+
+- Python Version Support: Compatibility branches handle differences between
+  Python 2 and 3 (e.g., BytesType, UnicodeType, buffer/memoryview usage,
+  long/int aliasing). The bootstrap code remains conservative to work across
+  multiple interpreter versions.
+
+Transport and IO
+----------------
+- Default Buffer Size: The default read/write buffer size used by Side
+  objects is chosen to be 128 KiB. This balances throughput and memory usage:
+  - Small buffers cause many IO loop iterations and reduce throughput.
+  - Large buffers increase kernel- and userspace memory retention and may
+    trigger additional allocation system calls when zeroing large buffers.
+  - The real-world performance also depends on kernel pipe/TTY buffer sizes
+    and any intermediary processes (e.g., OpenSSH) that introduce their own
+    buffers.
+
+- Socket and Pipe Semantics: The chosen buffer size must account for
+  differences in Unix variants and kernel behavior. For example, TTYs are
+  typically unsuitable for high-throughput IO due to small fixed buffers,
+  while modern Linux pipe defaults (e.g., 64 KiB) can be more accommodating.
+
+Routing and Delivery Semantics
+------------------------------
+- Messages are routed by the Router to the appropriate Context/Channel based
+  on routing table entries. If no route exists or a destination becomes
+  unreachable, the framework will return the IS_DEAD sentinel to signal
+  failure.
+
+- Forwarding: Mitogen supports forwarding of messages and module requests,
+  enabling proxies and multi-hop routing topologies. Forwarding preserves
+  request metadata so replies can be routed back to the original sender.
+
+- Error and Shutdown Handling: Explicit shutdown messages and detaching
+  notifications allow orderly teardown. Handlers are invoked to perform
+  cleanup when routes are removed or a router is being shut down.
+
+Logging and Diagnostics
+-----------------------
+- Mitogen forwards log records between contexts (FORWARD_LOG) so remote logs
+  can be integrated into a central logging stream.
+
+- Profiling: Optional profiling (e.g., cProfile) can be enabled in contexts.
+  Warnings and import-time behaviour are carefully controlled to avoid noisy
+  or racy imports during bootstrap.
+
+Robustness and Edge Cases
+-------------------------
+- Import Lock and Deadlocks: The bootstrap uses techniques (explicit codec
+  objects, careful ordering of imports) to avoid holding the import lock while
+  servicing incoming messages, which could otherwise lead to deadlocks.
+
+- Platform Quirks: Runtime detection (e.g., checking /proc/sys/kernel/osrelease
+  for WSL) allows Mitogen to avoid or adapt to known platform-specific
+  differences.
+
+- Graceful Degradation: When optimized modules (e.g., cProfile, cPickle) are
+  unavailable, Mitogen falls back to pure-Python equivalents, preserving
+  functionality at a small cost to performance.
+
+Common Workflow
+---------------
+1. A controller creates a new Context (process, container, or remote host).
+2. The minimal bootstrap is transmitted and executed in the new Context.
+3. The new Context registers routes with the originating Router.
+4. The controller issues RPCs (CALL_FUNCTION, CALL_SERVICE) or requests
+   modules (GET_MODULE) as needed.
+5. The Broker in each process multiplexes IO and dispatches messages to the
+   Router and Channel handlers.
+6. On shutdown, DETACHING and SHUTDOWN messages are exchanged and routes are
+   removed; handlers receive the IS_DEAD sentinel for cleanup.
+
+Security and Isolation
+----------------------
+- Mitogen delegates execution semantics to the remote Python interpreter; the
+  bootstrap provides tools for module loading and invocation but does not
+  attempt to sandbox arbitrary untrusted code. Standard OS-level isolation
+  (separate users, containers, VMs) should be used when executing untrusted
+  workloads.
+
+Extensibility
+-------------
+Mitogen’s minimal bootstrap and message-driven architecture make it easy to
+extend with additional message types, transport backends, and routing
+strategies. New services can be registered and invoked remotely via the
+CALL_SERVICE/CALL_FUNCTION primitives and integrated into the router/broker
+infrastructure.
+
+Further Reading
+---------------
+For implementation details and usage examples, consult source modules
+responsible for routers, brokers, contexts, channels, and the transport
+backends. The bootstrap module contains the core data types and message
+constants that implement the runtime behavior described above.

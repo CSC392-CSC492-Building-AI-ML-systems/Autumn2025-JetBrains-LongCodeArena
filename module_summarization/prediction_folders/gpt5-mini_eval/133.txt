@@ -1,0 +1,121 @@
+Storage driver
+==============
+
+Overview
+--------
+The storage driver subsystem provides a uniform way to persist Python objects (commonly NumPy arrays, lists, scalars, or domain-specific objects) into on-disk storage such as NetCDF files. A storage driver implements low-level operations (create, read, write, append, manage metadata) while the higher-level StorageInterface presents a dynamic, pythonic view of stored objects as nested attributes and methods.
+
+The included implementation ships with an I/O driver API (example: NetCDFIODriver) and a dynamic accessor class, StorageInterfaceDirVar (SIDV), which models both directories and variables in the on-disk store. Users normally interact with storage through a StorageInterface instance backed by a concrete I/O driver; SIDV objects are created and navigated implicitly as attributes of that interface and should not be instantiated directly.
+
+Key concepts
+------------
+- Storage driver
+  - Low-level component responsible for actual disk operations.
+  - Expected driver methods (examples used by the higher-level code):
+    - get_storage_variable(path) -> returns an on-disk variable object or raises KeyError if absent.
+    - create_storage_variable(path, py_type) -> creates and returns a new on-disk variable suitable for the supplied Python type.
+  - On-disk variable objects themselves must implement at least:
+    - write(data, at_index=None)
+    - append(data)
+
+- StorageInterface
+  - High-level object that exposes a hierarchical, attribute-based API to stored data and folders.
+  - Uses a storage driver to perform the actual IO.
+  - Accessing attributes creates SIDV instances which represent directories or variables.
+
+- StorageInterfaceDirVar (SIDV)
+  - Dynamic, directory/variable accessor used by StorageInterface to represent nodes in the storage hierarchy.
+  - Can behave as a directory (container of other SIDV children) or as a variable (target for read/write/append).
+  - The class is not intended for direct construction by users; it is returned by attribute access on a StorageInterface instance.
+  - Keeps a metadata buffer that is written to disk when the underlying storage variable is created/protected.
+
+SIDV usage and behaviour
+-----------------------
+General behavior
+- A SIDV instance starts with its type (directory or variable) undetermined.
+- Attempting to use variable operations (write, append, read) will bind the SIDV to a variable target and cause creation or lookup of the corresponding on-disk variable via the storage driver.
+- If the on-disk variable does not exist, the storage driver is instructed to create one; at that point the SIDV marks itself as a variable (not a directory) and will flush buffered metadata to disk.
+- Directory-like behavior is achieved by treating attributes of an SIDV as nested SIDV instances (folders and nested variables).
+
+Important internal flags and buffers
+- bound_target (internal): indicates whether the SIDV has been checked/assigned to a specific on-disk target; write/read/append operations will bind if necessary.
+- _metadata_buffer: metadata accumulated on the SIDV prior to the creation of the on-disk variable; flushed when the variable is first created or protected.
+- _variable: reference to the on-disk variable object returned by the storage driver.
+- _directory: None initially; subsequently set to False for variables (directories are represented by having SIDV children).
+
+API (SIDV methods)
+------------------
+
+write(data, at_index=None)
+- Purpose: Write data to the on-disk variable. If the variable does not yet exist it will be created using the storage driver. Writing can optionally replace the value at a specific index for appendable variables.
+- Parameters:
+  - data: Python object to write (arrays, lists, scalars, etc.). The storage system is responsible for converting to on-disk representation.
+  - at_index (int or None): when provided, write replaces the entry at the given index of an appendable variable.
+- Behavior:
+  - If the SIDV is not yet bound, it will bind to a target (existing or newly created variable).
+  - If the on-disk variable is created during this call, buffered metadata will be dumped to disk before the first write.
+  - Raises an error if the SIDV is acting as a directory.
+- Examples:
+  - Store a NumPy array:
+    >>> my_driver = NetCDFIODriver('my_store.nc')
+    >>> my_store = StorageInterface(my_driver)
+    >>> import numpy as np
+    >>> my_store.my_arr.write(np.eye(3))
+  - Overwrite an entry in an appendable variable:
+    >>> my_store.the_list.write([1,1,1], at_index=0)
+
+append(data)
+- Purpose: Append data to a variable whose size changes over time. The driver will extend the first dimension of the on-disk variable.
+- Parameters:
+  - data: Python object to append.
+- Behavior:
+  - If the SIDV is not yet bound or the variable is absent on disk, a storage variable is created (with a dynamic first dimension inferred from the appended data) and buffered metadata is flushed.
+  - Calls the on-disk variable's append method to perform the append.
+  - Raises an error if the SIDV is acting as a directory.
+- Examples:
+  - Append repeatedly to create a 1D sequence:
+    >>> my_driver = NetCDFIODriver('my_store.nc')
+    >>> my_store = StorageInterface(my_driver)
+    >>> my_store.IAmADir.AnInt.append(756)
+    >>> my_store.IAmADir.AnInt.append(757)
+
+read()
+- Purpose: Read data back from the on-disk variable, converting it into an appropriate Python type (and optionally applying unit/quantity logic if supported by the storage layer).
+- Returns: The Python representation of the stored data.
+- Behavior:
+  - If the SIDV is not bound, read will bind and check for the on-disk variable.
+  - If the variable is absent on disk, a KeyError (or a propagated exception) will result.
+  - Raises an error if the SIDV is acting as a directory.
+- Examples:
+  - Reading a stored array:
+    >>> arr = my_store.my_arr.read()
+
+Drivers and extensibility
+-------------------------
+- The storage driver interface is minimal and focused: drivers must provide the operations used by the high-level layer (get/create storage variables, and on-disk variable implementations that support write/append/read semantics).
+- The included NetCDFIODriver is an example concrete driver that stores variables in NetCDF files; other backends (HDF5, simple binary, databases) can be implemented by providing the same driver API.
+- The StorageInterface and SIDV rely on the driver to handle type conversion, shape inference for appendable variables, metadata persistence, and any unit/quantity handling.
+
+Notes and restrictions
+---------------------
+- SIDV instances are intended to be created and managed by StorageInterface; do not instantiate SIDV directly in user code.
+- Variable and directory names must not collide with protected/internal attribute names or methods; the API exposes a restricted set of names for safe variable operations.
+- Error handling for missing variables depends on the driver: get_storage_variable should raise KeyError when an item is not present.
+
+Quick example
+-------------
+Basic pattern when using the packaged NetCDFIO driver:
+
+>>> my_driver = NetCDFIODriver('my_store.nc')
+>>> my_store = StorageInterface(my_driver)
+>>> # create and write a 2D array
+>>> my_store.some_group.my_array.write(numpy.zeros((10, 2)))
+>>> # append to a 1D sequence
+>>> my_store.events.timestamps.append(1234567890)
+>>> # read back
+>>> data = my_store.some_group.my_array.read()
+
+See Also
+--------
+- NetCDFIODriver (example concrete storage driver)
+- StorageInterface (high-level API that exposes SIDV objects)
