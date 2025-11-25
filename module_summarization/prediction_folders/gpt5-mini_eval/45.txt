@@ -1,0 +1,151 @@
+log module
+==========
+
+Overview
+--------
+This module provides helpers and an application-integrated logging setup. It:
+- Defines a custom NOTICE log level (LOG_NOTICE).
+- Exposes a module-level logger (L).
+- Maps textual level names to logging levels.
+- Implements a Logging class that configures root logging, console/file handlers, optional timed rotation and an asynchronous syslog handler.
+
+Constants
+---------
+LOG_NOTICE
+    Integer constant (25). A NOTICE log level that is visible in non-verbose mode.
+    Registered with the Python logging subsystem via logging.addLevelName(LOG_NOTICE, "NOTICE").
+
+_NAME_TO_LEVEL
+    dict mapping common textual names to logging level constants. Keys include:
+    "NOTSET", "DEBUG", "INFO", "NOTICE", "WARNING"/"WARN", "ERROR", "FATAL"/"CRITICAL".
+    "NOTICE" and several variants map to LOG_NOTICE.
+
+Module-level logger
+-------------------
+L
+    logging.Logger instance obtained by logging.getLogger(__name__). Use for module-level logging.
+
+Dependencies and referenced helpers
+----------------------------------
+The module expects the following imports to be available in the runtime environment:
+- Config (from .config) — used to read configuration keys under "logging" sections.
+- Timer (from .timer) — used to schedule periodic rotation checks.
+- running_in_container (from .utils) — referenced (imported) though not used in the visible code.
+- Several formatter classes are referenced but not defined in this snippet:
+  StructuredDataFormatter, MacOSXSyslogFormatter, SyslogRFC5424Formatter, SyslogRFC5424microFormatter, SyslogRFC3164Formatter.
+  These are used to format log records for file and syslog handlers.
+
+Logging class
+-------------
+class Logging(app)
+    High-level manager that configures the Python root logger based on the application and configuration.
+
+    Purpose
+    - Create and attach console, rotating file and syslog handlers to the root logger.
+    - Ensure formats, levels and scheduling for time-based rotation are configured.
+    - Use asyncio to schedule periodic tasks (rotation checks) via a Timer instance.
+
+    Constructor
+    - app (required): application object. The constructor uses app.Loop for asyncio integration and schedules Timer via the application (Timer is created later inside an async closure). The constructor also schedules a background task with asyncio.ensure_future when needed.
+
+    Attributes
+    - RootLogger: the root logging.Logger (logging.getLogger()) used to attach handlers.
+    - ConsoleHandler: console (stdout/stderr) handler instance when configured; None otherwise.
+    - FileHandler: RotatingFileHandler instance when file logging is enabled; None otherwise.
+    - SyslogHandler: AsyncIOHandler instance when syslog is enabled; None otherwise.
+    - LogRotatingTime: Timer instance used for periodic rotation checks (set when rotate_every is configured).
+
+    Behavior and configuration points
+    - Console handler:
+      - Added only if the root logger has no handlers yet and either:
+        - stdout is a TTY (os.isatty(sys.stdout.fileno())), or
+        - environment variable ASABFORCECONSOLE is set to a non-'0' value.
+      - The implementation/configuration of the console handler is performed by a helper method _configure_console_logging().
+
+    - File handler:
+      - Enabled when Config["logging:file"]["path"] is non-empty.
+      - Ensures the file directory exists (os.makedirs).
+      - Uses logging.handlers.RotatingFileHandler with:
+        - maxBytes: Config.getint("logging:file", "backup_max_bytes")
+        - backupCount: Config.getint("logging:file", "backup_count")
+      - File handler level is set to logging.DEBUG.
+      - Formatter: StructuredDataFormatter configured with:
+        - fmt: Config["logging:file"]["format"]
+        - datefmt: Config["logging:file"]["datefmt"]
+        - sd_id: Config["logging"]["sd_id"]
+      - Rotation scheduling:
+        - If Config.get("logging:file", "rotate_every") is non-empty it must match the pattern ^([0-9]+)([dMHs])$.
+        - Supported unit suffixes:
+          - d : days (converted to seconds)
+          - H : hours
+          - M : minutes
+          - s : seconds
+        - If valid and interval > 0, the code schedules a Timer (Timer(app, self._on_tick_rotate_check, autorestart=True)) to call a rotation-check method periodically. The Timer is started in an asyncio task scheduled with asyncio.ensure_future.
+
+    - Syslog handler:
+      - Enabled when Config["logging:syslog"].getboolean("enabled") is True.
+      - Address parsing:
+        - If the address string begins with '/', treat as a UNIX domain datagram socket path.
+        - Otherwise urllib.parse.urlparse(address) is used. Supported schemes:
+          - tcp  : creates AsyncIOHandler with socket.AF_INET, socket.SOCK_STREAM
+          - udp  : creates AsyncIOHandler with socket.AF_INET, socket.SOCK_DGRAM
+          - unix-connect : creates AsyncIOHandler with socket.AF_UNIX, socket.SOCK_STREAM
+          - unix-sendto  : creates AsyncIOHandler with socket.AF_UNIX, socket.SOCK_DGRAM
+        - If a scheme is unknown, a warning is logged and syslog handler is not created.
+      - Syslog handler level is set to logging.DEBUG.
+      - Formatter selection (based on Config["logging:syslog"]["format"]):
+        - 'm'      : MacOSXSyslogFormatter(sd_id=Config["logging"]["sd_id"])
+        - '5'      : SyslogRFC5424Formatter(sd_id=Config["logging"]["sd_id"])
+        - '5micro' : SyslogRFC5424microFormatter(sd_id=Config["logging"]["sd_id"])
+        - anything else: SyslogRFC3164Formatter(sd_id=Config["logging"]["sd_id"])
+
+Error handling and validation
+-----------------------------
+- Invalid rotate_every values (non-matching pattern or non-positive interval) cause RootLogger.error to be called with a message indicating an invalid configuration value.
+- Invalid syslog address schemes produce a RootLogger.warning and syslog is not configured.
+
+Asynchronous integration
+------------------------
+- An asyncio task is scheduled (asyncio.ensure_future) to construct and start a Timer for periodic rotation checks. This design avoids requiring the PubSub or other app subsystems to be available at import/constructor time.
+
+Configuration keys
+------------------
+The module uses the following Config keys (dot/section notation in code translated to YAML-like/INI-like):
+
+- logging:file
+  - path (str)           : path to the log file; empty disables file logging.
+  - backup_count (int)   : number of rotated files to keep.
+  - backup_max_bytes (int): maximum bytes before rotation (for RotatingFileHandler).
+  - format (str)         : format string passed to StructuredDataFormatter.
+  - datefmt (str)        : date format passed to StructuredDataFormatter.
+  - rotate_every (str)   : interval string like "1d", "3H", "30M", "10s" for time-based rotation scheduling.
+
+- logging
+  - sd_id (str)          : structured data id passed to formatters.
+
+- logging:syslog
+  - enabled (bool)       : enable syslog handler.
+  - address (str)        : syslog address string. Examples:
+                          - "/dev/log" (unix datagram)
+                          - "tcp://host:port"
+                          - "udp://host:port"
+                          - "unix-connect:///path"
+                          - "unix-sendto:///path"
+  - format (str)         : chooses syslog formatter: 'm', '5', '5micro', or default (RFC3164).
+
+Environment variables
+---------------------
+- ASABFORCECONSOLE
+    If set to a value other than '0', forces console logging even if stdout is not a TTY.
+
+Examples
+--------
+Typical usage (in application startup code):
+- Instantiate the Logging helper with your application object:
+  logging_helper = Logging(app)
+
+Notes and caveats
+-----------------
+- The module registers a custom logging level name "NOTICE" globally.
+- Several referenced classes (StructuredDataFormatter, AsyncIOHandler, Syslog formatters) are expected to be provided elsewhere in the package.
+- The provided source is partial; some helper methods (for example _configure_console_logging and _on_tick_rotate_check) and the end of syslog handler installation are not present in the visible snippet. The documented behavior corresponds to the visible logic and referenced configuration keys.

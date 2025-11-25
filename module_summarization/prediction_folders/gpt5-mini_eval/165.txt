@@ -1,0 +1,109 @@
+PyTables File Format
+====================
+
+Overview
+--------
+PyTables stores hierarchical data in an HDF5-backed file organized in nodes (groups, arrays, tables, indexes, attributes). This document focuses on the on-disk representation and conventions used by PyTables, with emphasis on the index data structures that support fast queries on table columns.
+
+Nodes and Naming Conventions
+----------------------------
+- Each dataset or container in a PyTables file is a node in the HDF5 hierarchy. Nodes have names and live under parent groups.
+- Index nodes that belong to a table column use a reserved naming convention: the index node name contains a prefix "_i_". An index pathname such as
+  /.../_i_<tablename>/<columnpath>
+  encodes both the table and the indexed column. The table pathname and column pathname can be obtained by splitting on "/" and locating the component that begins with "_i_". The table path is the components up to (and including) the component with the "_i_" prefix (with the "_i_" prefix stripped to get the real table name). The column path is the remainder after that component.
+
+File Versioning and Index Version (obversion)
+---------------------------------------------
+- Index objects in the on-disk format declare a version identifier. The current index object version identifier used in later PyTables Pro series is "2.1". This version tag identifies the layout and semantics of index datasets.
+
+Index Object Overview
+---------------------
+- An Index node is an on-disk Group-like structure that stores indexing information for a single Table column. It is associated with exactly one column.
+- Index nodes expose metadata and properties describing their layout and behaviour: kind, filters, dirty status, chunking/block layout, byteorder, optimization level and related parameters.
+- User-visible metadata stored on index nodes includes attributes such as TITLE and a DIRTY flag indicating whether the index is in sync with the column data.
+
+Index Kind and Integer-size Mapping
+----------------------------------
+Index kinds indicate how row positions are represented in the index. The kind determines the number of bytes used for position indices (the indsize):
+- ultralight: 1-byte indices
+- light: 2-byte indices
+- medium: 4-byte indices
+- full: 8-byte indices
+
+The mapping from indsize to kind is:
+- 1 -> "ultralight"
+- 2 -> "light"
+- 4 -> "medium"
+- 8 -> "full"
+
+This choice trades off index size and the amount of positional detail: full keeps full 64-bit row positions, whereas smaller kinds record coarser information (for example which chunk contains a row).
+
+Index Layout: chunks, slices, blocks, superblocks
+-------------------------------------------------
+Index datasets are organized using a multi-level compound layout composed of chunks, slices, blocks, and superblocks. The following relations hold (integer division):
+- nblockssuperblock = superblocksize // blocksize
+- nslicesblock = blocksize // slicesize
+- nchunkslice = slicesize // chunksize
+
+These quantities control the granularity of index data and how row positions are grouped and compressed on disk. The Index exposes properties for the sizes (chunksize, slicesize, blocksize, superblocksize) allowing traversal and interpretation of the index layout.
+
+Filters, Compression and I/O Properties
+---------------------------------------
+- Index datasets may be created with Filters (compression, shuffle, checksums) applied. PyTables provides a Filters object describing the requested I/O filters.
+- The default filters used for indexes in PyTables are tuned for speed and decent compression. A typical default configuration uses zlib compression with a low compression level, shuffle enabled and fletcher32 disabled.
+- The index node stores its active filters in its metadata; these filters determine compression and chunked I/O behaviour for the index arrays on disk.
+
+Metadata and Attributes
+-----------------------
+- The DIRTY attribute on an Index node (typically stored under node attributes) indicates whether the index is up-to-date with the associated column. If DIRTY is missing, the index is considered clean.
+- Setting or clearing DIRTY should be reflected in the file attributes; changes may also be used to notify caches and other mechanisms that indexes need updating or are now valid.
+- TITLE and other standard node attributes may be present to provide descriptive metadata.
+
+Index Arrays and Helper Structures
+---------------------------------
+- Index implementations use specialized array objects persisted on disk (for example, IndexArray, CacheArray, LastRowArray) to store different pieces of index state (values, caches, auxiliary tables).
+- Indexes can be implemented in extension modules (C/Cython) for performance; optimized search routines exist for common numeric types.
+
+Optimized Search Types
+----------------------
+- PyTables includes optimized search implementations for several numeric dtypes. The common optimized names include:
+  int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64
+- For types outside this set, generic (Python-level) search routines are used.
+
+Sorting and Optimization Defaults
+---------------------------------
+- The default sorting algorithm used internally for index maintenance purposes is mergesort.
+- Index creation and maintenance honor an optimization level parameter (optlevel) that influences layout and auxiliary data used to accelerate queries.
+- Default policy and convenience names:
+  - default_auto_index: default behaviour for automatically updating or reindexing table indexes (True by default).
+  - default_index_filters: the default Filters instance used for indexes.
+
+Numeric Limits and Byteorder
+----------------------------
+- The codebase defines common numeric limits used in index logic, e.g. an upper limit for uint32 values (2**32).
+- Index datasets store a byteorder describing their on-disk representation. The Atom describing the indexed values (scalar Atom) also conveys storage type and on-disk endianness.
+
+Temporary Files and Runtime Parameters
+--------------------------------------
+- Index creation may use temporary files; a tmp_dir parameter can indicate where to place temporary artifacts.
+- Parameters that guide index array growth include expectedrows, which allows pre-allocation hints for growable dimensions.
+
+Extension Modules and Performance Warnings
+------------------------------------------
+- Parts of the index implementation are provided by extension modules for performance. These extensions accelerate search, bisect, and reduction operations and integrate with the Python code via well-defined interfaces.
+- Performance-related warnings may be emitted when using non-optimized paths or when falling back to slower algorithms.
+
+Compatibility and Backwards Considerations
+------------------------------------------
+- The index object version (obversion) identifies the format and should be considered for compatibility when reading older PyTables files or when tools need to interpret index contents.
+- Index naming and internal layout are stable conventions; however, implementation details (such as internal block sizes and extension behaviour) may evolve between PyTables releases. Index nodes store sufficient metadata to allow newer readers to interpret on-disk data robustly.
+
+Appendix: Useful Conventions and Constants
+------------------------------------------
+- Reserved index name prefix: "_i_<tablename>" in the node path.
+- Default index object version: "2.1".
+- Default sort algorithm: mergersort.
+- Optimized search dtypes: see the list under "Optimized Search Types".
+- Max 32-bit unsigned constant: 2**32.
+
+This document describes the logical and on-disk conventions used by PyTables for index storage and related parameters. It is intended to help implementers and advanced users interpret, inspect, or interoperate with PyTables index data.

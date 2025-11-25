@@ -1,0 +1,138 @@
+Isotonic Regression
+===================
+
+Overview
+--------
+Isotonic regression fits a non-decreasing (or non-increasing) piecewise-constant function to data.
+It is a shape-constrained regression technique that enforces monotonicity of the fitted
+prediction with respect to the input variable. This is useful when the response is known
+to be monotonic in the predictor or when a monotonic, robust fit is desired.
+
+The implementation exposed here provides
+- a low-level utility function isotonic_regression(y, ... ) to compute the isotonic fit of an
+  array of values (optionally weighted and clipped), and
+- an estimator class IsotonicRegression with a scikit-learn API (fit / predict / transform)
+  that fits a monotonic function y = f(X) and interpolates/predicts at new X values.
+
+Notes
+-----
+- The core solver implements the pool-adjacent-violators / active-set algorithm for
+  isotonic regression (see Best & Chakravarti, referenced below).
+- Weights can be supplied per sample to compute a weighted isotonic fit.
+- Lower and upper bounds on the predicted values may be specified.
+- The class supports automatic detection of increasing vs decreasing relationship via a
+  Spearman rank correlation test (check_increasing). When the 95% Fisher-transformed
+  confidence interval of the Spearman correlation spans zero, a warning is issued because
+  the direction inference may be unreliable.
+
+Functions
+---------
+
+check_increasing(x, y)
+    Determine whether y is monotonically correlated with x using a Spearman correlation
+    estimate. Returns True when the estimated Spearman rho >= 0 (increasing), otherwise
+    False (decreasing). A 95% confidence interval is computed via Fisher transform and a
+    warning is raised if the interval spans zero.
+
+    Parameters
+    - x : array-like, shape (n_samples,)
+    - y : array-like, shape (n_samples,)
+
+    Returns
+    - increasing_bool : bool
+
+isotonic_regression(y, *, sample_weight=None, y_min=None, y_max=None, increasing=True)
+    Solve the isotonic regression problem for a single 1D array y.
+
+    Parameters
+    - y : array-like, shape (n_samples,)
+      Observed values to fit.
+    - sample_weight : array-like, shape (n_samples,), optional
+      Non-negative weights for each sample. If None, equal weights are used.
+    - y_min : float, optional
+      Lower bound on the minimum predicted value. If None, no lower bound is applied.
+    - y_max : float, optional
+      Upper bound on the maximum predicted value. If None, no upper bound is applied.
+    - increasing : bool, default=True
+      If True fit an increasing sequence; if False fit a decreasing sequence.
+
+    Returns
+    - y_ : ndarray, shape (n_samples,)
+      The isotonic fit values (in the same order as the input).
+
+IsotonicRegression class
+------------------------
+
+IsotonicRegression(y_min=None, y_max=None, increasing=True, out_of_bounds='nan')
+    Estimator that fits a monotonic function y = f(X) using isotonic regression. It
+    learns a monotonic mapping from a single input feature X to a target y. The fitted
+    mapping is represented by sorted unique X thresholds and corresponding fitted
+    y thresholds; predictions for intermediate X are obtained by linear interpolation.
+
+    Parameters
+    - y_min : float, optional
+      Lower bound on the lowest predicted value. If None, no lower bound is enforced.
+    - y_max : float, optional
+      Upper bound on the highest predicted value. If None, no upper bound is enforced.
+    - increasing : bool or {'auto'}, default=True
+      If True, the fitted function is constrained to be non-decreasing. If False, it is
+      constrained to be non-increasing. If 'auto', the estimator uses the Spearman rank
+      correlation (check_increasing) on the training data to choose increasing vs
+      decreasing automatically.
+    - out_of_bounds : {'nan', 'clip', 'raise'}, default='nan'
+      Behavior when predicting for X outside the range seen in training:
+      - 'nan' : return NaN for out-of-domain inputs;
+      - 'clip' : return the nearest endpoint value (leftmost/rightmost fitted y);
+      - 'raise' : raise a ValueError.
+
+    Attributes (after fit)
+    - X_min_ : float
+      Minimum value of the training input X (left bound).
+    - X_max_ : float
+      Maximum value of the training input X (right bound).
+    - X_thresholds_ : ndarray, shape (n_thresholds,)
+      Unique ascending training X values used as thresholds for interpolation.
+    - y_thresholds_ : ndarray, shape (n_thresholds,)
+      Fitted y values corresponding to X_thresholds_ (monotonic).
+
+    Behavior
+    - fit(X, y, sample_weight=None)
+      The training X is sorted and unique X thresholds are computed. For each unique X,
+      weighted averages of y are used and a pooled isotonic solution is computed on
+      these aggregated values. The result is stored in X_thresholds_ and y_thresholds_.
+    - predict(X_new)
+      Predictions for new X are obtained by linear interpolation on the fitted threshold
+      grid. Out-of-range handling follows the out_of_bounds parameter.
+    - transform(X)
+      Equivalent to predict(X) (provided for TransformerMixin compatibility).
+
+Examples
+--------
+Basic isotonic fit of a 1D array using the functional API:
+
+    from sklearn.isotonic import isotonic_regression
+    y = [3.0, 1.0, 2.0, 4.0]
+    y_iso = isotonic_regression(y, sample_weight=[1, 1, 1, 1], increasing=True)
+
+Using the IsotonicRegression estimator:
+
+    from sklearn.isotonic import IsotonicRegression
+    X = [0.0, 1.0, 2.0, 3.0]
+    y = [0.5, 0.2, 0.3, 0.8]
+    iso = IsotonicRegression(increasing='auto', out_of_bounds='clip')
+    iso.fit(X, y)
+    y_pred = iso.predict([0.5, 1.5, 2.5])
+
+    # The fitted mapping is available as
+    thresholds = iso.X_thresholds_
+    fitted_values = iso.y_thresholds_
+
+References
+----------
+- M. J. Best and N. Chakravarti, "Active set algorithms for isotonic regression; A unifying framework".
+- Fisher transformation, Wikipedia: https://en.wikipedia.org/wiki/Fisher_transformation
+
+See Also
+--------
+- check_increasing : Utility for determining monotonic direction using Spearman correlation.
+- isotonic_regression : Low-level solver for 1D isotonic fitting.

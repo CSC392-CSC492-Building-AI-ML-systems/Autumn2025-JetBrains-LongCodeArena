@@ -1,0 +1,138 @@
+Azure Storage Library Provider
+==============================
+
+Overview
+--------
+This module implements a library provider that reads files from a Microsoft Azure Blob Storage container
+and exposes container contents as library items suitable for use by an application library subsystem.
+
+The provider is asynchronous (uses aiohttp) and builds an in-memory model of the container contents from
+the Azure "list blobs" XML response. Optionally it can cache blob content locally and use ETag-based validation
+to avoid re-downloading unchanged blobs.
+
+Configuration
+-------------
+Connection URL
+:  The provider is configured by supplying a URL-like path in the form:
+
+  azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER
+
+If the container does not have public read/list access, you must create an Access Policy with Read and List
+permissions and append a Shared Access Signature (SAS) query string to the URL, for example:
+
+  azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER?sv=2020-10-02&si=XXXX&sr=c&sig=XXXXXXXXXXXXXX
+
+Cache configuration
+:  Controlled by the configuration key `library.azure_cache`:
+
+  - "false" — disable local caching (no cache directory used).
+  - "true"  — enable caching using a temporary directory named asab.library.azure.<HASH>,
+              where HASH is a SHA-256 of the configured path.
+  - any other non-empty string — treated as a path to a directory to use for cache files.
+
+If caching is active, downloaded blobs are stored as binary files named by a SHA-256 hash of the blob path,
+and ETag values are stored alongside in files with a ".etag" suffix.
+
+Public Class
+------------
+AzureStorageLibraryProvider
+:  Asynchronous library provider that lists and reads blobs from an Azure Storage container.
+
+Constructor
+  __init__(library, path, layer)
+  - library: library instance / owner (passed to base class).
+  - path: configuration path string beginning with "azure+" followed by a normal URL to the container.
+  - layer: provider layer identifier passed to LibraryProviderABC.
+
+  Behavior:
+  - Verifies path starts with "azure+" and parses the remainder as a URL.
+  - Configures cache directory according to `library.azure_cache`.
+  - Creates cache directory if required.
+  - Schedules its startup task which loads the container model and marks the provider ready.
+
+Asynchronous methods
+  _start()
+  - Internal coroutine scheduled on construction.
+  - Calls _load_model() and, if successful, signals readiness via the base class.
+
+  _load_model()
+  - Internal coroutine that requests a container listing from Azure by performing a GET request
+    with query parameters restype=container&comp=list.
+  - On success (HTTP 200) parses the returned XML and constructs an in-memory tree model composed of
+    AzureDirectory and AzureItem nodes (see "Model structure" below).
+  - On failure logs a warning and leaves the provider unready.
+  - Sets self.Model to the constructed model on success.
+
+  list(path: str) -> list
+  - Asynchronously return a list of LibraryItem objects for the contents of the given path.
+  - Path requirements:
+    - Must begin with "/".
+    - Must not contain double slashes ("//").
+    - Must not end with a slash unless the path is "/".
+  - If path == "/" lists top-level items.
+  - Traverses the in-memory model; raises KeyError if the path does not exist or is not a directory.
+  - Raises RuntimeError if the provider model is not yet loaded (not ready).
+  - Returns: list of LibraryItem instances (name, type, layer, providers).
+
+  read(path: str) -> typing.IO
+  - Asynchronously reads a blob at the given path and returns a file-like object (IO).
+  - Path validation rules are the same as for list().
+  - If caching is enabled:
+    - Looks for an existing cached file and its .etag file and sends If-None-Match in the request.
+    - On HTTP 200, saves the blob body into the cache and stores the returned ETag into a .etag file,
+      then returns a file-like object opened for reading the cached file.
+    - On HTTP 304 (Not Modified), returns the existing cached file.
+  - If caching is disabled, the method performs a direct GET and should return a stream or a file-like
+    object containing the blob content.
+  - The method logs failures and raises an error if the provider is not ready or the blob cannot be read.
+
+Model structure
+---------------
+The in-memory model built by _load_model() is a tree with two node kinds:
+
+- AzureDirectory
+  - name: absolute-like path prefix (e.g. "/folder")
+  - type: "dir"
+  - sub: dict mapping component name -> AzureDirectory | AzureItem
+
+- AzureItem
+  - name: absolute-like path to the blob (e.g. "/folder/file.txt")
+  - type: "file"
+
+The root node represents "/" and contains sub-entries for top-level blobs and pseudo-directories.
+The provider creates directory nodes for any intermediate path segments discovered when parsing blob names.
+
+Errors and logging
+------------------
+- The provider uses the module logger to record warnings and info messages.
+- If listing or reading fails due to HTTP errors or if the provider is not yet ready, appropriate warnings
+  are logged and exceptions are raised (RuntimeError for not-ready; KeyError for missing paths).
+- Cache directory creation errors for an existing directory are handled quietly; other OS errors will propagate.
+
+Examples
+--------
+Example configuration URLs:
+- Public container:
+  azure+https://myaccount.blob.core.windows.net/mycontainer
+
+- Container with SAS:
+  azure+https://myaccount.blob.core.windows.net/mycontainer?sv=2020-10-02&si=policy&sr=c&sig=....
+
+Cache option examples:
+- Disable cache:
+  library.azure_cache = false
+
+- Use system temp-based cache:
+  library.azure_cache = true
+
+- Use explicit cache directory:
+  library.azure_cache = /var/cache/myapp/azure-library
+
+Notes and limitations
+---------------------
+- The provider currently builds the container model only on startup (called from _start). Periodic
+  refresh of the model is TODO/required for long-running processes where container contents change.
+- The module expects Azure XML listing format; any incompatible response will cause parsing failure.
+- The code is asynchronous and relies on aiohttp; callers should use await when invoking list() and read().
+- Some implementation details (auxiliary classes and base-class methods) are defined elsewhere in the application;
+  this documentation covers behaviors and interfaces exposed by this provider.

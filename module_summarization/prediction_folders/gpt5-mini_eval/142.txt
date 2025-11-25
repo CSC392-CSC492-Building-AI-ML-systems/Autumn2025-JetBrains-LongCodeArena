@@ -1,0 +1,205 @@
+dask.delayed interface
+======================
+
+Overview
+--------
+The dask.delayed interface provides a lightweight way to build task graphs from
+normal Python functions and values. Use delayed to wrap functions and values
+into Delayed objects which represent lazy computations. These Delayed objects
+can be combined to form larger task graphs, inspected, optimized, and computed
+with Dask schedulers.
+
+.. note::
+   The implementation exposes helpers that normalize Python objects and merge
+   enclosed Dask subgraphs. These helpers are used internally when constructing
+   tasks from mixed python/delayed inputs.
+
+Key objects and functions
+-------------------------
+
+.. class:: Delayed
+
+   A Delayed object represents a single lazy value in a Dask task graph. A
+   Delayed has at least the following visible attributes and behaviors:
+
+   - .dask: the graph (mapping of keys to tasks) that produces this value.
+   - .key (or ._key): the key in the graph corresponding to this value.
+   - It participates in building larger graphs when combined with other
+     Delayed objects or when used in normal Python containers (lists, dicts,
+     tuples, sets, slices, dataclasses, namedtuples).
+   - It can be finalized into a single computation via helper functions so that
+     it can be computed by Dask schedulers.
+
+   Typical user interactions:
+   - Creating Delayed via the delayed() decorator/wrapper.
+   - Inspecting .dask and the key.
+   - Combining Delayed objects to form larger computations.
+   - Calling .compute() or using dask.compute / client.compute (see Dask docs
+     for scheduler invocation).
+
+.. function:: delayed(obj, name=None, pure=True)
+
+   Wrap a function or literal into a Delayed object. When invoked on a
+   function, delayed produces a callable that builds tasks instead of running
+   the function immediately. When applied to a value, delayed wraps the value
+   as a constant in the task graph.
+
+   Parameters
+   - obj: function or value to be wrapped.
+   - name: optional explicit name/key to use for the resulting Delayed.
+   - pure: whether the function is pure (useful for caching/tokenization).
+
+   Examples
+   - delayed(func)(*args, **kwargs) constructs a delayed call.
+   - delayed(value) produces a Delayed constant.
+
+Helpers for constructing tasks and merging graphs
+------------------------------------------------
+
+unpack_collections(expr)
+   Normalize a Python object and merge all enclosed sub-graphs into a form
+   suitable for use as a task. This function is used internally when building
+   tasks from Python structures that may contain Delayed objects and other Dask
+   collections.
+
+   Behavior:
+   - If expr is a Delayed, returns (expr._key, (expr,)).
+   - If expr is any Dask collection, it is finalized (see finalize) and the
+     resulting finalization key is returned together with a tuple containing
+     the finalized collection.
+   - Iterators are converted to tuples.
+   - For list/tuple/set, recursively unpacks each element and returns a list of
+     normalized arguments plus a tuple of unique depended-upon collections.
+     The output is typed so that non-list sequence types are represented as
+     (type, args).
+   - For dict, returns (dict, args) where args is a list of [key, value] pairs
+     with keys and values normalized, and collects enclosed collections.
+   - For slice, dataclass instances, and namedtuple instances it recursively
+     unpacks components and returns a task able to reconstruct the original
+     object.
+   - If no enclosed Dask collections are found, returns the original literal
+     object and an empty collections tuple.
+
+   Returns:
+   - task: normalized task structure (e.g. key, or a tuple describing how to
+     reconstruct the object).
+   - collections: tuple of Delayed (or finalized) collections appearing inside
+     expr. These collections can be merged to build a combined dask graph.
+
+   Examples
+   >>> a = delayed(1, 'a')
+   >>> b = delayed(2, 'b')
+   >>> task, collections = unpack_collections([a, b, 3])
+   >>> task
+   ['a', 'b', 3]
+   >>> collections
+   (Delayed('a'), Delayed('b'))
+
+   >>> task, collections = unpack_collections({a: 1, b: 2})
+   >>> task
+   (<class 'dict'>, [['a', 1], ['b', 2]])
+   >>> collections
+   (Delayed('a'), Delayed('b'))
+
+to_task_dask(expr) (deprecated)
+   Legacy helper that normalizes a Python object and returns both a task and a
+   merged dask graph for that object. This function is deprecated in favor of
+   unpack_collections.
+
+   Behavior:
+   - If expr is a Delayed, returns (expr.key, expr.dask).
+   - If expr is a Dask collection, produces a finalization key and merges the
+     collection's graph (applying __dask_optimize__ if present).
+   - For Python containers it recursively converts enclosed Delayed objects to
+     keys and merges the enclosed graphs.
+
+   Note: a deprecation warning is emitted when calling this helper. Prefer
+   unpack_collections which returns the normalized task and the list of
+   dependent collections; the caller can then merge graphs explicitly.
+
+finalize(collection)
+   Convert a Dask collection into a single Delayed that represents the
+   postcompute/finalize operation of that collection.
+
+   - Constructs a unique finalization name based on the tokenized collection.
+   - Obtains the collection's __dask_keys__ and __dask_postcompute__ metadata.
+   - Builds a HighLevelGraph layer that runs the collection's finalize
+     function on the set of keys and returns a Delayed representing the final
+     result.
+
+Other utilities
+----------------
+DEFAULT_GET
+   The default scheduler to use for Delayed .compute operations when no
+   scheduler is explicitly provided. This is resolved from named_schedulers
+   (defaults to the thread scheduler or synchronous scheduler depending on
+   configuration).
+
+unzip(ls, nout)
+   Helper to unzip a list of tuples into nout outputs, returning empty tuples
+   when appropriate.
+
+Notes and special cases
+-----------------------
+- Dataclasses: Instances of dataclasses are unpacked by extracting fields and
+  recursively unpacking field values. If no contained collections exist the
+  original instance is returned. If contained collections exist, the task
+  returned will reconstruct the dataclass (via apply/type calls). Custom
+  __init__ implementations or fields with init=False are not supported and
+  will raise informative errors.
+- Namedtuple instances are treated like tuples and reconstructed with their
+  original type.
+- Dictionaries are normalized to (dict, args) where args is a list of
+  [key, value] normalized pairs so that keys that are Delayed are handled
+  correctly.
+- Iterators are materialized to tuples before unpacking.
+- The helpers guarantee that the normalized task preserves the outer Python
+  type where possible (list vs tuple vs set).
+
+Examples
+--------
+Basic delayed usage:
+
+.. code-block:: python
+
+   from dask import delayed
+
+   @delayed
+   def inc(x):
+       return x + 1
+
+   @delayed
+   def add(x, y):
+       return x + y
+
+   a = inc(1)
+   b = inc(2)
+   c = add(a, b)        # c is Delayed; graph contains tasks for inc and add
+   result = c.compute() # run with default scheduler
+
+Constructing tasks from containers:
+
+.. code-block:: python
+
+   a = delayed(1, 'a')
+   b = delayed(2, 'b')
+
+   task, collections = unpack_collections([a, b, 3])
+   # task -> ['a', 'b', 3]
+   # collections -> (Delayed('a'), Delayed('b'))
+
+API summary
+-----------
+- delayed: wrap functions/values to create Delayed objects.
+- Delayed: represents lazy computations; inspect .dask and keys; compute with
+  standard Dask execution APIs.
+- unpack_collections: normalize Python objects containing Delayed or other
+  Dask collections and return a task plus dependent collections.
+- finalize: convert a Dask collection into a single Delayed using its
+  postcompute/finalize function.
+- to_task_dask: deprecated; use unpack_collections.
+
+See also
+--------
+See the main Dask documentation for details on computing/persisting Delayed
+objects and scheduler configuration.

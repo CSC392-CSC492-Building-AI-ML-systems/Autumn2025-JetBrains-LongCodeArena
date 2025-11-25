@@ -1,0 +1,148 @@
+Image Extraction
+================
+
+Charge extraction algorithms to reduce the image to one value per pixel.
+
+Overview
+--------
+This module implements a collection of charge-extraction algorithms and helpers used to convert per-pixel waveforms into per-pixel charges and pulse times. Implementations include a base ImageExtractor component and a variety of concrete extraction strategies (fixed windows, sliding windows, peak-centred windows, neighbor-aware algorithms, baseline-subtracted variants, and two-pass schemes). Several low-level, numba-accelerated utilities perform the core waveform calculations.
+
+Available objects
+-----------------
+- ImageExtractor
+  - Base component defining the interface and common utilities for image extraction implementations.
+
+- FlashCamExtractor
+  - Extractor implementation tuned for FlashCam-style waveforms and electronics (implements a specific choice of windowing/peak-finding appropriate to FlashCam).
+
+- FullWaveformSum
+  - Integrates the full waveform (sum of all samples) to produce the charge per pixel. Useful when full-pulse integration is desired or when pulse positions vary little.
+
+- FixedWindowSum
+  - Integrates a fixed window (constant start/width or center/width) for all pixels. Parameters typically include window width and window offset/shift.
+
+- GlobalPeakWindowSum
+  - Finds a single global peak position (per event or camera) and integrates a window around that global peak for all pixels.
+
+- LocalPeakWindowSum
+  - Finds a local peak position for each pixel and integrates a window around that pixel-local peak.
+
+- SlidingWindowMaxSum
+  - For each pixel, computes the sum of the contiguous window (of given width) with maximum total and uses that as the extracted charge. This is a common peak-finding algorithm when the pulse position is unknown and pulses are narrow.
+
+- NeighborPeakWindowSum
+  - Like LocalPeakWindowSum but considers neighbor information (e.g., highest neighbor pulse/sample) to improve peak selection or timing, useful in low S/N pixels.
+
+- BaselineSubtractedNeighborPeakWindowSum
+  - A neighbor-aware window extractor that subtracts an estimated baseline prior to integration (improves robustness to baseline offsets).
+
+- TwoPassWindowSum
+  - Performs a first pass to find likely peak positions or compute per-pixel timing, then refines integration windows in a second pass for improved charge/timing estimates.
+
+Utility functions
+-----------------
+
+extract_around_peak(waveforms, peak_index, width, shift, sampling_rate_ghz, sum_, peak_time)
+    Numba-guvectorized routine to integrate a window around a given peak index and to compute a pulse time.
+
+    Behavior
+    - Sum the waveform samples inside a window defined by:
+        start = peak_index - shift
+        end   = start + width
+      The window is clipped to the waveform bounds.
+    - Compute a pulse time inside that window as the weighted average of sample indices,
+      using only non-negative sample values as weights.
+    - Convert the computed pulse time into units of ns by dividing by sampling_rate_ghz.
+
+    Parameters
+    - waveforms : 1D ndarray (n_samples)
+        The waveform samples for a single pixel/channel.
+    - peak_index : int
+        Index of the peak sample used to place the window.
+    - width : int
+        Number of samples to integrate.
+    - shift : int
+        Shift of the integration window relative to peak_index (peak_index - shift is start).
+    - sampling_rate_ghz : float
+        Sampling rate in GHz. If using astropy units, apply to_value('GHz') first.
+    - sum_ : 1-element ndarray (output)
+        Output scalar (place-holder required by numba guvectorize) receiving the integrated charge.
+    - peak_time : 1-element ndarray (output)
+        Output scalar receiving the pulse time in ns.
+
+    Returns
+    - charge : float
+        Integrated charge in sample units (returned via sum_).
+    - peak_time : float
+        Pulse time in ns (returned via peak_time).
+
+extract_sliding_window(waveforms, width, sampling_rate_ghz, sum_, peak_time)
+    Numba-guvectorized routine to find the contiguous width-sample window with the maximum sum
+    and to compute a pulse time inside that window.
+
+    Behavior
+    - Compute cumulative sum of the waveform and evaluate all contiguous-window sums of length width.
+    - Select the start index of the window with maximal sum and return that sum as the charge.
+    - Compute a pulse time as the weighted average of sample indices inside the selected window,
+      using only non-negative sample values as weights.
+    - Convert the computed pulse time into ns by dividing by sampling_rate_ghz.
+
+    Parameters
+    - waveforms : 1D ndarray (n_samples)
+        The waveform samples for a single pixel/channel.
+    - width : int
+        Window length in samples to consider for sliding-window sums.
+    - sampling_rate_ghz : float
+        Sampling rate in GHz. If using astropy units, apply to_value('GHz') first.
+    - sum_ : 1-element ndarray (output)
+        Output scalar receiving the integrated charge (maximum window sum).
+    - peak_time : 1-element ndarray (output)
+        Output scalar receiving the pulse time in ns.
+
+    Returns
+    - charge : float
+        Integrated charge in sample units (returned via sum_).
+    - peak_time : float
+        Pulse time in ns (returned via peak_time).
+
+neighbor_average_maximum(...)
+    (Utility used by neighbor-aware extractors)
+    Compute a neighbor-weighted maximum or average to improve peak localization by
+    combining information from adjacent pixels. Typically used to stabilize peak selection
+    where individual pixel S/N is low. See the concrete NeighborPeakWindowSum and
+    BaselineSubtractedNeighborPeakWindowSum for usage.
+
+subtract_baseline(...)
+    Remove a baseline (pedestal) estimate from waveforms prior to integration.
+    The baseline can be computed per-pixel or using neighbor/rolling-window statistics.
+    Used by baseline-subtracted extractor variants to improve robustness.
+
+integration_correction(...)
+    Apply corrections to raw integrated sums to account for finite window truncation,
+    sampling effects, or known pulse shapes. Useful to estimate the true integrated
+    pulse charge when only part of the pulse is captured by the integration window.
+
+Implementation notes
+--------------------
+- The low-level extraction functions extract_around_peak and extract_sliding_window are implemented as numba-guvectorized functions for high performance; they operate on 1-D waveforms and are vectorized across pixels by numpy/numba.
+- Time units: pulse times computed by the utilities are returned in nanoseconds (ns) after dividing the time-bin index or weighted-average index by the provided sampling_rate_ghz (GHz).
+- Inputs and outputs commonly use numpy arrays shaped (n_pixels, n_samples) for waveforms and return per-pixel 1-D arrays of charges and times.
+- Extractor components typically integrate with pipeline containers (e.g., DL1CameraContainer) and CameraDescription to use camera geometry and per-camera sampling parameters; consult the concrete component docstrings or the pipeline calling code for exact API usage.
+
+Examples
+--------
+- Sliding-window extraction (conceptual):
+  - For each pixel: call extract_sliding_window(pixel_waveform, width, sampling_rate_ghz)
+  - Collect returned sum (charge) and peak_time (ns) per pixel.
+
+- Peak-window extraction around a candidate peak:
+  - For each pixel: call extract_around_peak(pixel_waveform, peak_index, width, shift, sampling_rate_ghz)
+  - Use returned sum and peak_time for subsequent calibration and image parameterization.
+
+See also
+--------
+- Cleaning, morphology, timing and Hillas parameter modules in the same package for downstream processing of extracted images (tailcuts_clean, brightest_island, timing_parameters, hillas_parameters).
+
+License and authorship
+---------------------
+Refer to the package source headers for license and authorship information.

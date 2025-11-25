@@ -1,0 +1,209 @@
+Contracts
+=========
+
+Interaction with smart contracts over a Web3 connector.
+
+This module provides the Contract base class used by contract proxy classes
+constructed from Solidity ABI definitions. Contract proxy classes are
+normally created with the web3.contract factory (e.g. via a
+construct_contract_factory helper). The resulting class is a subclass of
+Contract and provides methods for deploying contracts, encoding ABI calls,
+and registering event callbacks.
+
+Overview
+--------
+
+- Depends on web3 for chain access and transaction submission.
+- Uses eth_abi for ABI encoding/decoding.
+- Handles contract-level metadata (ABI, bytecode, runtime bytecode, source).
+- Provides convenience helpers for encoding constructor and function calls,
+  and for subscribing to events.
+
+Contract class
+--------------
+
+Class: Contract
+
+A base class for generated contract proxy classes. Instances represent a
+particular deployed contract address and provide access to the contract ABI,
+code, and event/function helpers.
+
+Class attributes (set during class construction)
+- web3: reference to a Web3 instance (required)
+- _abi: contract ABI (overridable at instance creation)
+- _code: contract bytecode (overridable)
+- _code_runtime: runtime bytecode (overridable)
+- _source: contract source (overridable)
+
+Instance attributes
+- address: deployed contract address as an "0x"-prefixed hex string
+
+Initialization
+--------------
+
+Signature:
+    Contract(abi=None, address=None, code=None, code_runtime=None, source=None)
+
+Behaviour:
+- Requires the class attribute web3 to be set before instantiation; raises
+  AttributeError otherwise.
+- Per-instance overrides of abi, code, code_runtime, and source are accepted.
+- Stores the contract address on the instance.
+
+Properties
+----------
+
+abi
+    Returns the contract ABI. If no ABI exists on the instance or class
+    raises AttributeError.
+
+code
+    Returns the contract bytecode. If absent raises AttributeError.
+
+code_runtime
+    Returns the runtime bytecode. If absent raises AttributeError.
+
+source
+    Returns the contract source. If absent raises AttributeError.
+
+Class methods
+-------------
+
+deploy(transaction=None, args=None, kwargs=None)
+    Deploys the contract to the blockchain using web3.eth.sendTransaction.
+
+    Parameters
+    - transaction: dict of transaction parameters (e.g. {'from': ..., 'value': ...})
+    - args: positional arguments for the constructor
+    - kwargs: keyword arguments for the constructor
+
+    Behaviour and validation
+    - Requires class-level bytecode (code) to be present, otherwise raises
+      ValueError.
+    - Disallows specifying 'data' or 'to' in the deployment transaction.
+    - Encodes constructor arguments into the transaction's data field by
+      calling the internal helper _encode_constructor_data.
+    - Submits the transaction via web3.eth.sendTransaction and returns the
+      transaction hash (hex string).
+
+    Raises
+    - ValueError on invalid transaction parameters or missing code.
+
+encodeABI(fn_name, args=None, kwargs=None, data=None)
+    Encodes a call's ABI for the named contract function.
+
+    Parameters
+    - fn_name: function name in the ABI to encode
+    - args: positional call arguments
+    - kwargs: keyword call arguments
+    - data: optional raw data prefix (defaults to the function selector)
+
+    Behaviour
+    - Resolves the function ABI and selector using an internal
+      _get_function_info helper. Merges args/kwargs and validates encodability.
+    - Produces an ABI-encoded hex/text representation of the call payload.
+    - Decorated to coerce the return to text (string) where appropriate.
+
+    Raises
+    - EncodingError (from eth_abi) when arguments cannot be encoded
+    - ValueError/AttributeError for missing ABI or invalid function selection
+
+Instance methods
+----------------
+
+on(event_name, filter_params=None, *callbacks)
+    Register callbacks for contract events.
+
+    Parameters
+    - event_name: name of the event (or topic ABI) to match
+    - filter_params: dict of filter options passed to web3.eth.filter. Accepts
+      an inner 'filter' dict containing indexed argument filters.
+    - callbacks: one or more callables to be invoked for matching log entries
+
+    Behaviour
+    - Finds the matching event ABI using indexed argument names.
+    - Constructs event filter parameters via construct_event_filter_params,
+      and prepares a PastLogFilter via web3.eth.filter.
+    - Attaches a formatter that will decode log entries using eth_abi and the
+      event ABI and then invoke the supplied callbacks.
+    - Uses get_event_data to decode event data.
+
+    Notes
+    - Raises relevant decoding exceptions (DecodingError) if logs cannot be
+      decoded.
+    - Uses web3 filter primitives for subscription and retrieval.
+
+Internal helpers (referenced)
+-----------------------------
+
+The following internal helpers are referenced by the public API. Their
+behaviour is documented here to clarify interactions:
+
+- _encode_constructor_data(args, kwargs)
+    Encode constructor ABI and bytecode into the transaction data field.
+
+- _get_function_info(fn_name, args, kwargs)
+    Resolve a function ABI, compute its 4-byte selector, and normalize arguments.
+
+- _encode_abi(fn_abi, fn_arguments, data)
+    ABI-encode function arguments and prepend selector or custom data.
+
+These helpers are expected to perform ABI type resolution, argument merging
+and validation (using helpers such as merge_args_and_kwargs and
+check_if_arguments_can_be_encoded), and to raise eth_abi exceptions on error.
+
+Errors and exceptions
+---------------------
+
+Common exceptions propagated by the Contract API:
+- AttributeError: missing web3 attribute, or missing ABI/code/source.
+- ValueError: invalid transaction parameters or missing code for deployment.
+- eth_abi.exceptions.EncodingError, DecodingError: ABI encode/decode failures.
+- web3.exceptions.BadFunctionCallOutput: raised when a call to the node
+  returns an unexpected output (e.g. nonexistent contract at address).
+
+Examples
+--------
+
+Deploy a contract:
+.. code-block:: python
+
+    txn_hash = MyContract.deploy(
+        transaction={
+            'from': web3.eth.accounts[1],
+            'value': 12345,
+        },
+        args=('DGD', 18),
+    )
+
+Encode a function call:
+.. code-block:: python
+
+    data = MyContract.encodeABI('transfer', args=('0x123...', 100))
+
+Listen for events:
+.. code-block:: python
+
+    def on_transfer(event):
+        print('Transfer', event)
+
+    contract = MyContract(address='0xabcd...')
+    contract.on('Transfer', filter_params={'fromBlock': 0}, on_transfer)
+
+Notes
+-----
+
+- Contract classes must be constructed/initialized with a Web3 instance
+  assigned to the class attribute web3 (this is typically handled by the
+  web3.contract factory).
+- The Contract base class focuses on encoding/decoding, validation and
+  wiring of web3 filters; actual low-level I/O is performed by web3's
+  eth API (e.g. eth.sendTransaction, eth.filter, eth.getLogs).
+
+See also
+--------
+
+- eth_abi for ABI encoding/decoding semantics
+- web3.eth for transaction submission and filter management
+- web3.utils.abi for helper utilities used when resolving and encoding
+  function/event ABIs

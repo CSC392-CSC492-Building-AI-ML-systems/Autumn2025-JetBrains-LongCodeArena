@@ -1,0 +1,195 @@
+Postgres Engine
+===============
+
+Overview
+--------
+This module provides lightweight asynchronous helpers for working with PostgreSQL
+connections and transactions using asyncpg. It exposes:
+
+- AsyncBatch — iterate query results in batches inside a transaction.
+- Atomic — build and run a programmatic transaction composed of queries.
+- Savepoint — create, rollback to, and release savepoints.
+- PostgresTransaction — an async context manager for transactions (supports
+  optional nested behaviour).
+- PostgresEngine — engine integration for PostgreSQL (subclass of Engine).
+
+AsyncBatch
+----------
+
+An asynchronous batch helper for processing large query resultsets in
+chunks inside a transaction.
+
+Key attributes
+- connection: asyncpg Connection used for the batch.
+- query: Query object whose results are being fetched.
+- batch_size: number of rows to fetch per batch.
+- _cursor: internal asyncpg cursor (set on enter).
+
+API
+- cursor -> Cursor
+  - Property getter that returns the internal cursor (raises ValueError if not set).
+- async next() -> List[Dict]
+  - Fetches the next batch via cursor.fetch(batch_size) and processes rows
+    with Query._process_results.
+- __aiter__(), __anext__():
+  - Support async iteration: yields lists of processed rows until empty.
+- async __aenter__(), async __aexit__(exc_type, exc, tb)
+  - Context manager behavior:
+    - Starts a transaction on the connection.
+    - Compiles the query into a SQL template and args and opens an asyncpg
+      cursor.
+    - On exit: commits on success, rolls back on exception, and closes the
+      connection.
+
+Example
+::
+    async with AsyncBatch(connection=conn, query=q, batch_size=100) as batch:
+        async for rows in batch:
+            process(rows)
+
+Atomic
+------
+
+A convenience container to build up and run a collection of queries inside a
+single transaction. Useful for programmatic construction of transactional
+workflows.
+
+Usage
+- Construct via engine.atomic().
+- Add queries via add(*queries).
+- Execute all queries in a single transaction with run() (async) or run_sync().
+
+API
+- add(*query: Query)
+  - Append one or more queries to the transaction.
+- async run()
+  - Runs all queued queries inside an async transaction (uses engine.transaction()).
+  - Accepts Query and DDL objects (and_CREATE / GetOrCreate).
+  - Clears the query list after execution; on error it clears and re-raises.
+- run_sync()
+  - Synchronous wrapper that runs run() via run_sync utility.
+- __await__()
+  - Allows awaiting the Atomic instance directly (delegates to run()).
+
+Example
+::
+    transaction = engine.atomic()
+    transaction.add(Foo.create_table(), Bar.insert(...))
+    await transaction.run()
+
+Savepoint
+---------
+
+Represents a named savepoint within a PostgresTransaction.
+
+API
+- rollback_to()
+  - Execute "ROLLBACK TO SAVEPOINT {name}" using the transaction's connection.
+- release()
+  - Execute "RELEASE SAVEPOINT {name}" using the transaction's connection.
+
+PostgresTransaction
+-------------------
+
+Async context manager used to run queries in a transaction. Designed for use
+with PostgresEngine.transaction().
+
+Construction
+- PostgresTransaction(engine: PostgresEngine, allow_nested: bool = True)
+  - If allow_nested is True and a transaction is already active, the new
+    transaction will treat the existing transaction as a parent (no new
+    database-level transaction is started). If False, a TransactionError is
+    raised when nesting is attempted.
+
+Behavior & API
+- async __aenter__() -> PostgresTransaction
+  - If nested (parent exists) returns the parent transaction.
+  - Otherwise:
+    - Acquires a connection (from engine.pool or engine.get_new_connection()).
+    - Starts a new transaction on that connection.
+    - Sets the engine.current_transaction contextvar to this transaction.
+    - Returns self.
+- async get_connection()
+  - Acquire a connection from the engine pool if present, otherwise create a
+    new connection.
+- async begin()
+  - Starts the asyncpg transaction object.
+- async commit()
+  - Commits the transaction and marks it committed.
+- async rollback()
+  - Rolls back the transaction and marks it rolled back.
+- async rollback_to(savepoint_name: str)
+  - Roll back to an existing savepoint by name.
+- get_savepoint_id() -> int
+  - Internal incremental ID generator for savepoint names.
+- async savepoint(name: Optional[str] = None) -> Savepoint
+  - Creates a savepoint (uses provided name or automatically generated
+    "savepoint_<id>") and returns a Savepoint instance.
+- async __aexit__(exc_type, exc, tb) -> bool
+  - If nested (parent exists) simply returns whether there was no exception.
+  - Otherwise:
+    - If an exception occurred and the transaction was not already rolled
+      back, roll back.
+    - If no exception and neither committed nor rolled back, commit.
+    - Release or close the underlying connection (release to pool or close).
+    - Reset engine.current_transaction context variable.
+
+Nested Transactions
+- If allow_nested is True, entering a nested transaction returns the parent
+  transaction object: nested context managers become no-ops at the DB level.
+- If allow_nested is False, attempting to open a nested transaction raises
+  TransactionError.
+
+Example
+::
+    async with engine.transaction():
+        await Model.create(...)
+        # Use savepoints:
+        sp = await transaction.savepoint()
+        await do_something()
+        await sp.rollback_to()
+
+Notes
+- The transaction uses the engine's pool (if configured) to acquire/release
+  connections; otherwise it opens and closes connections per-transaction.
+- The contextvar engine.current_transaction is used to track the active
+  transaction for nesting behavior.
+
+PostgresEngine
+--------------
+
+Subclass of Engine that provides PostgreSQL connectivity and integration with
+the transaction helpers in this module.
+
+Responsibilities
+- Provide an async interface to acquire connections or a connection pool.
+- Expose current_transaction contextvar that PostgresTransaction uses to
+  determine nesting state.
+- Provide factory methods to create transaction context managers (e.g.
+  engine.transaction()) and atomic containers (engine.atomic()).
+
+Exceptions
+----------
+- TransactionError
+  - Raised when nested transactions are disallowed and a nested transaction is
+    attempted.
+
+Examples
+--------
+Basic transaction:
+::
+    async with engine.transaction():
+        await Band.create()
+
+Atomic usage:
+::
+    transaction = engine.atomic()
+    transaction.add(Band.create_table())
+    await transaction.run()
+
+Iterating large results in batches:
+::
+    async with engine.transaction() as tx:
+        async with AsyncBatch(connection=conn, query=q, batch_size=200) as batch:
+            async for rows in batch:
+                process(rows)

@@ -1,0 +1,141 @@
+SANS to SESANS conversion
+========================
+
+Synopsis
+--------
+This document describes the mathematical relationship between small-angle neutron scattering
+(SANS) intensity I(Q) and the real-space SESANS correlation function G(z) and the measured
+spin-echo polarization P(z). It summarizes the forward and inverse transforms, units and
+normalization conventions, numerical considerations for implementation, and practical tips
+for producing reliable SESANS predictions from SANS data (and vice versa).
+
+Definitions and conventions
+---------------------------
+- Q (or q): magnitude of the scattering vector (units: 1/length).
+- I(Q): differential scattering cross section (macroscopic) as measured in SANS,
+  typically given in units of length^{-1} (e.g. cm^{-1}) per steradian, or normalized
+  per unit volume. The notation in this document assumes I(Q) is the macroscopic
+  differential cross section appropriate for direct transformation to G(z).
+- z: spin-echo length (distance in real space, units: length).
+- G(z): SESANS real-space projected correlation function (same dimension as I(Q) if
+  thickness is treated separately). G(0) is the projection at zero spin-echo length.
+- t: sample thickness (path length through the sample).
+- P(z): measured SESANS spin-echo polarization (dimensionless, 0..1).
+
+Forward transform: I(Q) -> G(z)
+--------------------------------
+The SESANS correlation function G(z) is the zeroth-order Hankel transform of the
+product Q·I(Q). The commonly used form is:
+
+G(z) = (1 / (2π)) ∫_0^∞ Q · I(Q) · J0(Q z) dQ
+
+where J0(x) is the Bessel function of the first kind of order zero. This transform
+projects the isotropic two-dimensional scattering information (in the plane
+perpendicular to the beam) into the one-dimensional SESANS real-space correlation.
+
+Inverse transform: G(z) -> I(Q)
+-------------------------------
+The inverse (Hankel) transform recovers I(Q) from G(z):
+
+I(Q) = 2π ∫_0^∞ z · G(z) · J0(Q z) dz
+
+These two relations form a standard forward/inverse Hankel transform pair (with the
+1/(2π) and 2π factors as shown).
+
+Relation to SESANS polarization P(z)
+------------------------------------
+SESANS measures the spin-echo polarization P(z), which is related to the difference
+between the zero-distance projection and the projection at z. For a sample of
+thickness t the commonly used expression for the polarization is
+
+P(z) = exp[ - t · (G(0) - G(z)) ].
+
+Thus the attenuation of polarization at spin-echo length z is determined by the
+projected correlation loss relative to z = 0. (Ensure that the definition of G used
+in implementation matches the units and normalization of t so that the exponent is
+dimensionless.)
+
+Units and normalization notes
+-----------------------------
+- Consistency: use consistent units for Q, z and thickness t. If I(Q) is given in
+  cm^{-1}, t must be in cm for the exponent in P(z) to be dimensionless.
+- Definition dependency: literature and packages sometimes include additional
+  normalization factors (e.g., dividing by total contrast-squared, volume, or sample
+  number density). Always check whether I(Q) is per unit volume or a macroscopic
+  cross section and adjust the transforms accordingly.
+- Background subtraction: subtract incoherent background and instrument constants
+  from I(Q) before transforming. A constant incoherent background contributes only
+  to G(0) and modifies P(z) accordingly.
+
+Numerical implementation guidance
+---------------------------------
+- Integral range and truncation:
+  - The transforms are integrals over Q ∈ [0,∞). In practice, SANS data are measured
+    over a finite Q-range [Qmin, Qmax]. Proper extrapolation outside the measured
+    Q-range is essential:
+      - Low-Q (Q -> 0) behavior: extrapolate using Guinier law or known form factors
+        if applicable.
+      - High-Q (Q -> ∞) behavior: use Porod law (I(Q) ∝ Q^{-4}) or the expected
+        asymptotic decay of the model to minimize truncation artefacts.
+- Quadrature and sampling:
+  - The integrand oscillates (Bessel function). Use integration schemes appropriate
+    for Hankel transforms (adaptive quadrature, Filon-type methods, clenshaw-curtis,
+    or specialized Hankel transform algorithms).
+  - Logarithmic Q sampling can be efficient but care must be taken for small-Q
+    behavior. FFTLog or similar algorithms can accelerate Hankel transforms for
+    logarithmically sampled data.
+- Aliasing and oscillations:
+  - Sharp cutoffs at Qmax introduce ringing (Gibbs phenomena) in G(z). Smoothing,
+    windowing, or model-based extrapolation reduce artefacts.
+- Discrete evaluation:
+  - Evaluate integrals up to a Qmax sufficiently large that the contribution beyond
+    Qmax to G(z) is negligible for the z-range of interest, or compensate by
+    explicit extrapolation of I(Q).
+- Validation:
+  - Check inverse transform consistency: transform I(Q) -> G(z) -> I'(Q) and compare
+    I'(Q) with original I(Q) to validate numerical choices.
+  - Test on analytical models where closed-form G(z)/I(Q) pairs are known.
+
+Practical considerations
+------------------------
+- Instrument resolution: SESANS and SANS instruments have finite resolution which
+  smears measured I(Q) and P(z). If possible, include instrumental resolution
+  functions in forward modeling (convolution) before comparison to measured data.
+- Polydispersity and form factors: transform the ensemble-averaged intensity
+  I(Q) (including polydispersity and structure factors) — do not transform single-
+  particle form factors unless that matches experiment.
+- Backgrounds and direct beam: ensure correct subtraction of background and direct
+  beam normalization (absolute scaling) so that G(0) and the exponent for P(z) are
+  physically meaningful.
+- Units check: if P(z) computed from G(z) exceeds 1 or becomes negative, re-check
+  normalization and background handling.
+
+Example (conceptual)
+--------------------
+Given measured I(Q) on Q-grid:
+1. Subtract incoherent background and ensure absolute normalization (I(Q) in cm^{-1}).
+2. Extrapolate I(Q) to Q = 0 and to high Q with physically motivated laws.
+3. Compute G(z) for each desired z via
+   G(z) ≈ (1 / (2π)) ∫_{Qmin}^{Qmax} Q · I(Q) · J0(Q z) dQ
+   using an appropriate quadrature.
+4. Obtain SESANS polarization:
+   P(z) = exp[ - t · (G(0) - G(z)) ].
+
+If starting from a model in real space that gives G_model(z), compute I(Q) by the
+inverse transform and then compare to measured SANS data or further process to
+predict P(z) for SESANS experiments.
+
+Common pitfalls
+---------------
+- Forgetting factor 2π in forward/inverse transforms leading to wrong amplitude.
+- Using raw I(Q) with unremoved incoherent background.
+- Insufficient Q-range / poor extrapolation causing large errors in G(z) at large z.
+- Units mismatch between I(Q) and t when computing P(z).
+
+References and further reading
+------------------------------
+For detailed derivations, practical examples, and transforms implemented in
+software, consult SESANS and SANS methodology literature and the documentation of
+SESANS/SANS analysis packages. The transform pair presented above (Hankel transform
+of order zero) is the standard theoretical bridge between isotropic SANS data and
+SESANS real-space projection.

@@ -1,0 +1,138 @@
+Publishing versions
+===================
+
+This document describes the typical workflow and best practices for publishing Versions into ftrack using the API. It covers concepts, preparing a session, creating Versions, attaching components (single files or image sequences), producing file fingerprints, uploading to storage, and publishing notifications.
+
+Concepts
+--------
+- Version
+  - A Version represents a published iteration of an asset. It groups one or more Components (files or sequences) and metadata (description, author, date, task/asset association).
+- Component
+  - A Component is a file (for example an EXR, MOV or ZIP) or an image-sequence grouped into a single logical unit attached to a Version.
+- Sequence detection
+  - Image sequences should be detected and treated as a single Component. The clique library is commonly used to detect numeric-frame sequences and represent them as a single collection.
+- Fingerprinting / Integrity
+  - Files should be hashed (for example SHA-1) so you can detect duplicates, verify uploads and support cache/centralized storage strategies.
+- Storage & Origin
+  - Files may be uploaded to centralized storage or a server accessor and the Version metadata should record the storage origin to allow retrieval and proxying.
+
+Preparing a session
+-------------------
+Create a Session with server URL, API key and API user. The Session object manages authentication, caching and the event hub.
+
+Example:
+::
+    import ftrack_api
+    session = ftrack_api.Session(
+        server_url='https://ftrack.example.com',
+        api_key='YOUR_API_KEY',
+        api_user='username'
+    )
+
+When performing HTTP uploads directly, the SessionAuthentication helper attaches the ftrack credentials to requests:
+::
+    from ftrack_api.session import SessionAuthentication
+    import requests
+    auth = SessionAuthentication(session._api_key, session._api_user)
+    http = requests.Session()
+    http.auth = auth
+
+Creating a Version
+------------------
+Typical steps to create a Version:
+- Collect metadata: name, description, author, date, task/link associations, custom attributes.
+- Create a Version entity in the API and set its fields.
+- Add one or more Components to the Version, each representing a file or sequence.
+
+High-level pseudo-flow:
+::
+    # Create the Version entity (pseudo)
+    version = session.create('Version', {
+        'name': 'Shot_010_v001',
+        'description': 'Initial publish of lighting pass',
+        'user': { 'id': session._api_user },  # or proper user entity
+        'date': datetime.datetime.utcnow().isoformat()
+    })
+    session.commit()
+
+Adding Components and sequences
+------------------------------
+- Single file
+  - Create a Component record, attach file metadata (filename, filesize, mime-type, hash).
+- Image sequences
+  - Use clique to detect sequences and present them as a single Component. Example detection pattern:
+::
+    import clique
+    collections = clique.assemble(['/path/to/shot_010.####.exr', '/path/to/shot_010.0001.exr', ...])
+    for collection in collections:
+        # collection.format('{head}{padding}{tail}')
+        # collection.indexes -> list of frames
+        # Represent collection as a single Component
+
+- Record component metadata such as:
+  - file name or sequence pattern
+  - frame range
+  - file size (or aggregated size)
+  - checksum/fingerprint
+  - origin/locator for storage
+
+Generating file fingerprints
+----------------------------
+Use a cryptographic hash (for example SHA-1) to generate a fingerprint for each file. Include the hash value and algorithm in the Component metadata.
+
+Example:
+::
+    import hashlib
+    def sha1_of_file(path):
+        h = hashlib.sha1()
+        with open(path, 'rb') as fh:
+            for chunk in iter(lambda: fh.read(8192), b''):
+                h.update(chunk)
+        return h.hexdigest()
+
+Uploading files to storage
+--------------------------
+There are two common approaches:
+- Let ftrack/accessor handle uploads:
+  - Use configured accessors (server or centralized storage) and the API's storage helpers; these will manage transfer, origin registration and permissions.
+- Use direct HTTP uploads:
+  - Use requests with SessionAuthentication to upload files to ftrack endpoints or storage URL(s) provided by the server.
+
+When uploading:
+- Ensure you pass authentication headers.
+- Record upload results (returned URLs, origin tokens, storage IDs) on the Component or Version metadata.
+- Commit the session after updating entities.
+
+Centralized storage and origin information
+------------------------------------------
+When using centralized storage scenarios, record the storage origin and any tokens/IDs required to retrieve the file later. The ftrack API supports centralized storage scenarios; store enough metadata so clients can resolve or proxy files without needing local file system paths.
+
+Publishing and events
+---------------------
+Publishing a Version commonly includes notifying other systems and users. The Session includes an EventHub capable of publishing events when Versions or Components are created or updated. If your workflow relies on non-local events, ensure the EventHub is connected (it may be connected in a background thread if auto_connect_event_hub was enabled when creating the Session).
+
+Best practices
+--------------
+- Detect and publish image sequences as a single Component using clique.
+- Always compute and store file fingerprints (SHA-1 or similar).
+- Avoid storing absolute local paths on components; store origin/locator information that is resolvable by clients.
+- Use a memory/ layered cache to speed up repeated queries; the Session will add a memory cache by default.
+- Commit changes only after all component metadata and storage records are complete.
+- Use the event hub to notify downstream consumers of newly published Versions.
+- Keep Version descriptions, tags and custom attributes consistent to improve discoverability.
+
+Example end-to-end (overview)
+----------------------------
+1. Create a Session.
+2. Detect files and sequences (clique) and compute file metadata (size, hash).
+3. Create a Version entity and set metadata (name, description, user).
+4. For each file or sequence create a Component entity linked to the Version and include origin/storage information and the fingerprint.
+5. Upload files to storage (via accessor or HTTP) and record returned storage locators.
+6. Commit the session and publish any events to notify other systems.
+
+References
+----------
+- clique — sequence detection and representation.
+- hashlib — fingerprint generation.
+- ftrack_api.session.Session and SessionAuthentication — session management and HTTP auth helpers.
+- EventHub — publish notifications to the event system.

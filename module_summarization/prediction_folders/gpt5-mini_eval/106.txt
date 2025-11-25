@@ -1,0 +1,173 @@
+Hyperexpand — Expansion of Hypergeometric and Meijer G functions
+================================================================
+
+Overview
+--------
+The hyperexpand module expands generalized hypergeometric functions and
+Meijer G functions into named special functions using a collection of
+lookup tables and transformation rules.  The implementation encodes many
+known identities and parameter-shift operations to express hypergeometric
+objects in simpler closed forms (Bessel, elementary, logarithmic,
+Fresnel, elliptic, etc.) whenever possible.
+
+Motivation and references
+-------------------------
+The approach implemented here follows lookup-table and transform-based
+methods for representing special functions, notably drawing on:
+
+- K. B. Roach, "Meijer G Function Representations", Proc. ISSAC 1997.
+- Y. L. Luke, "The Special Functions and Their Approximations", Vol. 1
+  (classical formulae used to seed the knowledge base).
+
+Key capabilities
+----------------
+- Expand generalized hypergeometric functions (Hyper) and Meijer G
+  functions (meijerg) into named special functions and combinations
+  thereof.
+- Use a hand-built database of formulae and matrix representations to
+  instantiate matching transforms.
+- Apply parameter shift operators and order-reduction rules to reach
+  equivalent, simpler parameter quadruples when possible.
+- Produce Sphinx-friendly documentation snippets (LaTeX math) by
+  iterating over the stored formulae.
+
+Algorithmic ideas (summary)
+---------------------------
+- Lookup tables: a large set of formulae (and in some cases matrix-valued
+  representations) is stored and used to match hypergeometric parameter
+  patterns to closed forms.
+- Shift operators: four primary shift operators act on parameters and
+  the differential operator z*d/dz (denoted D):
+  .. math::
+     A_J = b_J - D,\quad B_J = 1 - a_J + D,\quad
+     C_J = -b_J + D,\quad D_J = a_J - 1 - D
+  A_J and C_J increment a denominator parameter b_J, while B_J and D_J
+  decrement a numerator parameter a_J.  Inverse shifts are applied
+  when there is no parameter cancellation.
+- Order reduction: when a difference between upper and lower indices is
+  a non-negative integer (or when suitable integer relations among three
+  parameters exist), gamma-quotient factors reduce to polynomials and
+  the effective order of the G-function (or hypergeometric function) is
+  lowered.
+- Reachability and index quadruples: the code reasons about whether one
+  parameter quadruple is reachable from another via shifts; reachable
+  configurations allow instantiation of known formulae.  For complex
+  reachability decisions, pattern-matching routines and manually-crafted
+  instantiation logic are used.
+
+Module layout and important objects
+-----------------------------------
+Note: only the principal objects and patterns present in the implementation
+are listed here.
+
+- FormulaCollection
+  - A collection object that stores many formula instances (the module
+    uses it to enumerate available transformations).  It is used to
+    generate the module documentation: each stored formula is rendered
+    as a math equation (LaTeX) for display in Sphinx.
+
+- Formula (used internally)
+  - Encodes a matchable hypergeometric/Meijer G pattern, its free
+    symbol (typically z), and the closed-form result (or a matrix of
+    transforms for vector-valued decompositions).
+
+- Hyper_Function (used internally)
+  - Lightweight representation of a hypergeometric-like function's
+    parameter lists (ap, bq) used as keys in the formula database.
+
+- add_formulae(formulae)
+  - Populates the internal knowledge base.  The routine demonstrates
+    many seeded identities (for example: 0F0, 1F0, 2F1 cases) and matrix
+    decompositions for multi-branch expansions.
+
+- _mod1(x)
+  - Utility that helps bucket and sort parameters by fractional parts
+    (uses Mod(x, 1) behavior for numeric arguments and preserves symbolic
+    offsets for parameters).
+
+- Exposed function imports (from the code base)
+  - hyper, meijerg: constructors/representations for hypergeometric and
+    Meijer G functions (used in matching and expansion).
+  - simplify, powdenest, expand, expand_func: symbolic simplification
+    and normalization utilities used during matching/instantiation.
+  - Many special functions are relied upon when producing closed forms:
+    besseli, besselj, erf, expint, elliptic_e, elliptic_k, fresnelc,
+    fresnels, sin, cos, cosh, sinh, Ci, Si, Ei, Shi, Chi, etc.
+
+Generating documentation examples
+-------------------------------
+The module includes an example approach to generate math snippets for
+Sphinx documentation by iterating over stored formulae and emitting LaTeX
+equations. The pattern used is:
+
+.. code-block:: python
+
+  from sympy import Eq
+  from sympy.printing import latex
+  from hyperexpand import FormulaCollection
+  from sympy.functions.special.hyper import hyper
+
+  c = FormulaCollection()
+  doc = ''
+  for f in c.formulae:
+      obj = Eq(hyper(f.func.ap, f.func.bq, f.z),
+               f.closed_form.rewrite('nonrepsmall'))
+      doc += f'.. math::\\n  {latex(obj)}\\n'
+  # doc is then suitable to become the module __doc__ for Sphinx display
+
+This produces a sequence of .. math:: directives rendering each known
+instantiation of hyper/meijer-G expansions.
+
+Usage notes
+-----------
+- The module is primarily a rule-based expansion backend.  Typical use
+  in a higher-level workflow involves:
+  1) constructing a hyper/meijer-G expression,
+  2) invoking the expansion routine (via exposed expansion utilities in
+     the surrounding package that consult this module's database),
+  3) simplifying the returned closed form.
+- Not all hypergeometric parameter combinations have a stored closed
+  form; the module attempts shifts and reductions to reach a known case
+  when possible.
+- Some expansions are matrix-valued (vector decompositions) and require
+  post-processing to assemble scalar results.
+
+Limitations and implementation remarks
+--------------------------------------
+- Reachability decisions (whether one parameter configuration can be
+  transformed into another by shifts) can be subtle.  The module uses
+  handcrafted matching strategies to control the search and avoid
+  non-terminating or excessive transformations.
+- Many identities are encoded by hand; completeness is limited by the
+  extent of the formula database.  New identities can be added to the
+  database by extending add_formulae and the FormulaCollection.
+- Numeric vs symbolic parameter handling: certain bucketing and sorting
+  operations treat integer and symbolic parameters differently; helper
+  utilities like _mod1 exist to aid this distinction.
+
+Examples of typical expansions
+------------------------------
+- 0F0 -> exp(z)
+- 1F0(a;;z) -> power expansions (e.g., (1 - z)^{-a} forms)
+- Various 2F1 parameter patterns expand to powers, logarithms, or
+  combinations represented as small matrices of transforms.
+
+API summary (quick)
+-------------------
+- FormulaCollection(): iterable collection of stored formulae.
+- add_formulae(formulae): populate a mutable sequence with known formulae
+  (used internally during initialization of the knowledge base).
+- _mod1(x): internal utility for parameter bucketing.
+- The module relies on and registers formulae that use HyperRep_* helper
+  representations (HyperRep_power1, HyperRep_log1, etc.) for producing
+  closed-form components.
+
+See also
+--------
+- Functions: hyper, meijerg (sympy.functions.special.hyper)
+- Utilities: simplify, powdenest, expand, expand_func
+
+References
+----------
+- K. B. Roach, "Meijer G Function Representations", ISSAC 1997.
+- Y. L. Luke, "The Special Functions and Their Approximations", Vol. 1.

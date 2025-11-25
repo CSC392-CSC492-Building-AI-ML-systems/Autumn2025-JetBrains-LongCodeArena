@@ -1,0 +1,98 @@
+Parallel Random Number Generation
+================================
+
+Overview
+--------
+Parallel random number generation (RNG) provides reproducible, high-performance streams of pseudorandom numbers for multithreaded or distributed applications. The numpy.random subsystem exposes multiple high-quality BitGenerators and a semantically simple Generator API to create independent RNG streams suitable for parallel workloads.
+
+Available BitGenerators
+-----------------------
+- MT19937 — Mersenne Twister (classic, large period). Good statistical quality; jump/skip-ahead support implemented in native code for partitioning streams.
+- PCG64 — Permuted Congruential Generator (modern family with good speed and quality). Supports stream splitting/advancing.
+- Philox — Counter-based generator well suited to parallel/distributed use because outputs are a deterministic function of counter and key.
+- SFC64 — Small, fast generator with good statistical properties for many workloads.
+- Legacy mtrand — maintained for compatibility (use for legacy code only).
+
+These BitGenerators are implemented in C sources and exposed via Cython-backed extension modules to provide efficient vectorized draws and distribution implementations.
+
+Parallelization strategies
+--------------------------
+
+1) Independent streams via SeedSequence.spawn (recommended)
+   - Use numpy.random.SeedSequence to create reproducible child seeds.
+   - Spawned child SeedSequence objects can be used to construct independent BitGenerators for different threads/processes.
+   - This approach yields simple, reproducible, non-overlapping streams.
+
+   Example:
+   ::
+     import numpy as np
+     ss = np.random.SeedSequence(12345)
+     children = ss.spawn(8)                            # create 8 child SeedSequence objects
+     gens = [np.random.Generator(np.random.PCG64(s))   # one Generator per worker
+             for s in children]
+
+2) Counter-based / key-based generation
+   - Counter-based generators (e.g., Philox) map (counter, key) to output blocks and are naturally parallel: assign distinct counter ranges or keys to workers.
+   - Use when deterministic mapping of indices to random outputs is desirable (e.g., GPU or embarrassingly parallel tasks).
+
+3) Jump/advance (skip-ahead)
+   - Some BitGenerators provide efficient jump/advance (skip-ahead) operations implemented in C (e.g., MT19937 jump routines).
+   - Use skip-ahead to partition a single stream into non-overlapping subsequences by advancing a base generator by large strides for each worker.
+   - This is useful when you want deterministic, evenly spaced subsequences from a single seed.
+
+4) Forking and copying
+   - Avoid sharing a single BitGenerator instance across threads without synchronization; that is not safe for reproducible parallel use.
+   - If you must copy a BitGenerator (e.g., via pickling or state duplication), ensure copies are used in a way that prevents overlaps.
+
+Threading and multiprocessing
+-----------------------------
+- Threads: create one Generator (with its own BitGenerator) per thread. Do not share a single Generator concurrently unless guarded by locks.
+- Processes: spawn separate Generators for each process; use SeedSequence.spawn to derive independent seeds for reproducibility.
+- Serialization: Generator and BitGenerator state can be serialized (e.g., via .bit_generator.state or pickling) to checkpoint and restore streams.
+
+Reproducibility and seeding
+--------------------------
+- For reproducible parallel experiments, use a single master SeedSequence and spawn child sequences deterministically.
+- Avoid using OS entropy separately inside workers if deterministic behavior is required.
+- Document the seeding strategy (master seed, spawn size, assignment) so results are reproducible across runs and platforms.
+
+Performance considerations
+--------------------------
+- Use vectorized draws from Generator for best throughput; underlying C implementations and linking to npyrandom/npymath libraries accelerate distribution sampling.
+- Choose a BitGenerator that balances speed and quality for your workload (PCG64 and SFC64 are commonly good default choices; Philox excels for massively parallel counter-based generation).
+- Minimize synchronization and per-draw Python overhead in parallel contexts by allocating RNG work in blocks.
+
+Implementation notes
+--------------------
+- Core RNG primitives and distribution sampling are implemented in C (npyrandom static library) and exposed to Python via Cython extension modules for performance.
+- Jump/advance algorithms for some generators are provided as native C sources to enable efficient skip-ahead operations.
+- The build and packaging expose BitGenerators (MT19937, PCG64, Philox, SFC64) and distribution code to Python consumers while installing supporting headers/pxd files for extension authors.
+
+Best practices
+--------------
+- Prefer SeedSequence.spawn to create independent, reproducible streams for workers.
+- Use counter-based generators (Philox) when you need index-addressable randomness or GPU-style parallelism.
+- When using skip-ahead/jump, verify the generator-specific jump size and guarantees; use library-provided jump routines where available.
+- Keep one Generator per worker to avoid contention and ensure deterministic results.
+
+Examples
+--------
+Spawn-based reproducible parallel generators:
+::
+  import numpy as np
+  ss = np.random.SeedSequence(2021)
+  children = ss.spawn(4)
+  generators = [np.random.Generator(np.random.Philox(s)) for s in children]
+  # each generator is independent and reproducible across runs
+
+Counter-based assignment (conceptual):
+::
+  # For counter-based BitGenerators assign disjoint counter ranges or keys:
+  # worker i uses counter base = i * block_size
+  # generate block_size outputs deterministically from that counter range
+
+References
+----------
+- numpy.random.SeedSequence: deterministic seed spawning for parallel use
+- BitGenerator documentation: behavior, jump/advance APIs, and per-generator guarantees
+- Implementation sources: native C bit generator and distribution code for performance and jump routines

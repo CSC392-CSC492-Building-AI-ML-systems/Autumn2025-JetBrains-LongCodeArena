@@ -1,0 +1,174 @@
+Working with text data
+======================
+
+This tutorial shows common patterns to prepare raw text for machine learning:
+decoding inputs, removing HTML and accents, tokenizing, filtering stop words,
+extracting n-grams, and turning text into numeric feature vectors (count or
+TF–IDF). It demonstrates reusable building blocks available in
+sklearn.feature_extraction.text and how to customize them.
+
+Overview
+--------
+Text processing pipelines typically perform, in order:
+
+- decoding input bytes / files to unicode
+- optional preprocessing (lowercasing, stripping HTML, removing accents)
+- tokenization (splitting text into tokens)
+- optional stop-word filtering
+- generation of n-grams from tokens
+- vectorization: counts, hashing, or TF–IDF weighting
+
+Decoding inputs
+---------------
+Vectorizers internally support different input types:
+- raw unicode (str), bytes, filename or file-like objects.
+- bytes are decoded using the configured encoding and decode error handler.
+- filenames and file objects are read and decoded.
+- np.nan is not a valid document and will raise an error.
+
+Basic preprocessing utilities
+-----------------------------
+Two helper functions convert accented characters:
+
+- strip_accents_unicode(s)
+  - Uses Unicode normalization (NFKD) and removes combining marks.
+  - Works for all unicode but is slower.
+
+- strip_accents_ascii(s)
+  - Normalizes and encodes to ASCII, dropping non-ASCII accents.
+  - Faster, but only suitable when ASCII transliteration is acceptable.
+
+To remove HTML/XML tags, use:
+
+- strip_tags(s)
+  - A simple regexp-based tag stripper. For complex HTML prefer BeautifulSoup.
+
+Lowercasing and accent removal can be chained in a preprocessor.
+
+Tokenization, analyzers, and n-grams
+-----------------------------------
+A vectorizer can be customized by setting any of the following callable
+parameters:
+
+- decoder(doc): convert input into a unicode string (used first)
+- preprocessor(doc): e.g., lowercasing, strip_tags, strip_accents_*
+- tokenizer(doc): split a preprocessed string into tokens (words)
+- analyzer(doc): a single callable that replaces preprocessor + tokenizer +
+  ngram construction. If provided, the other tokenization-related callables
+  are ignored.
+- ngrams(tokens, stop_words=None): construct token n-grams (e.g., bigrams)
+
+Important behaviors:
+- If an analyzer is provided, it receives the decoded document and should
+  return tokens (possibly already combining n-grams).
+- If no analyzer is provided, the vectorizer uses preprocessor, tokenizer,
+  then n-gram construction.
+- Stop words can be passed to n-gram construction to filter tokens prior to
+  n-gram creation.
+
+Stop words
+----------
+- Pass stop_words=None (no filtering), a collection of strings, or the string
+  "english" to use the built-in ENGLISH_STOP_WORDS set.
+- A custom stop list should be a collection (e.g., set or list). Invalid
+  strings (other than "english") will raise an error.
+
+Vectorizers and transformers
+----------------------------
+- CountVectorizer: learns a vocabulary and produces a document-term matrix of
+  raw token counts.
+- TfidfTransformer: converts a count matrix to a TF–IDF representation.
+- TfidfVectorizer: combines CountVectorizer + TfidfTransformer into a single
+  estimator (learns vocabulary and returns TF–IDF).
+- HashingVectorizer: uses a hash function to map tokens to feature indices
+  without learning a vocabulary (stateless, fixed-size feature output).
+
+Examples
+--------
+
+1) Simple count features with preprocessing and built-in stop words:
+
+.. code-block:: python
+
+    from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
+    from sklearn.feature_extraction.text import strip_accents_ascii, strip_tags
+
+    corpus = [
+        "<p>Hello, world!</p>",
+        "Bonjour le monde",
+        b"Hola mundo"  # bytes will be decoded by the vectorizer
+    ]
+
+    vect = CountVectorizer(
+        input='content',         # 'content' expects str/bytes, 'file' and 'filename' are also supported
+        encoding='utf-8',
+        decode_error='strict',
+        preprocessor=lambda s: strip_accents_ascii(strip_tags(s.lower())),
+        stop_words='english',    # uses built-in ENGLISH_STOP_WORDS
+        ngram_range=(1, 2)       # unigrams + bigrams
+    )
+    X = vect.fit_transform(corpus)
+    feature_names = vect.get_feature_names_out()
+
+2) TF–IDF pipeline using TfidfVectorizer:
+
+.. code-block:: python
+
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    tfidf = TfidfVectorizer(
+        lowercase=True,
+        strip_accents='ascii',   # convenience option available on public vectorizers
+        stop_words='english',
+        ngram_range=(1, 1)
+    )
+    X_tfidf = tfidf.fit_transform(corpus)
+
+3) Using a custom tokenizer and analyzer:
+
+.. code-block:: python
+
+    import re
+    from sklearn.feature_extraction.text import CountVectorizer
+
+    # simple regex tokenizer (words only)
+    token_pattern = re.compile(r"(?u)\\b\\w\\w+\\b")
+    def tokenizer(s):
+        return token_pattern.findall(s)
+
+    def custom_preprocessor(s):
+        return s.lower()
+
+    vect = CountVectorizer(preprocessor=custom_preprocessor,
+                           tokenizer=tokenizer,
+                           ngram_range=(1, 2),
+                           stop_words=frozenset(['le', 'el']))
+    X = vect.fit_transform(["This is a simple test.", "Otro test en español."])
+
+4) Stateless hashing vectorizer:
+
+.. code-block:: python
+
+    from sklearn.feature_extraction.text import HashingVectorizer
+
+    hv = HashingVectorizer(n_features=2 ** 20, alternate_sign=False,
+                           ngram_range=(1, 1))
+    X_hash = hv.transform(["Some text to hash", "More text"])
+
+Tips and best practices
+-----------------------
+- Choose strip_accents_ascii for speed where ASCII transliteration is acceptable;
+  else use strip_accents_unicode.
+- For small to medium datasets where interpretability is needed, prefer
+  CountVectorizer or TfidfVectorizer to obtain feature names. For large-scale
+  streaming or memory-constrained workloads, use HashingVectorizer.
+- If you need custom behavior (e.g., language-specific tokenization or POS
+  filtering), implement an analyzer that yields the final tokens or n-grams.
+- When creating n-grams, consider applying stop-word filtering before n-gram
+  construction to avoid many stop-word-containing combinations.
+
+Further reading
+---------------
+- CountVectorizer, TfidfVectorizer, HashingVectorizer and TfidfTransformer
+  reference documentation for parameter details and additional convenience
+  options (such as strip_accents parameter on public vectorizers).

@@ -1,0 +1,125 @@
+Model
+=====
+
+Overview
+--------
+A Model maps a Python class to a database table. Define models by subclassing Model and declaring fields as class attributes. The inner Meta class configures table-level behaviour.
+
+Basic model example
+-------------------
+Example model declaration::
+
+    class User(Model):
+        id = IntField(pk=True)
+        name = CharField(max_length=50)
+        #:
+        #: User email address
+        email = CharField(max_length=255, unique=True)
+
+        class Meta:
+            table = "users"
+            app = "auth"
+            ordering = ["-id"]
+            unique_together = (("email", "name"),)
+            indexes = (("email",),)
+
+Meta options
+------------
+- abstract (bool): do not create a DB table for this model.
+- table (str): explicit DB table name.
+- app (str): application label used by migration/registry.
+- ordering (iterable[str]): default ordering; strings accept field names with optional "-" prefix (parsed into internal Order values).
+- unique_together / indexes: accept a tuple or list of tuples (or a single tuple) and are normalized into tuples of tuples.
+
+Field documentation
+-------------------
+Inline field comments may be supplied immediately above field declarations using the "#:" convention. Multiline comments are supported. The placeholder "{model}" in comments will be replaced with the model class name by the documentation extractor.
+
+Primary and simple fields
+-------------------------
+Declare primary keys and ordinary fields using Field subclasses (IntField, CharField, etc.). The model metainformation collects:
+- fields, db_fields
+- generated_db_fields
+- db_pk_column and pk
+
+Relational fields
+-----------------
+Supported relation types:
+- ForeignKeyField / ForeignKeyFieldInstance (FK to another Model)
+- OneToOneFieldInstance
+- ManyToManyFieldInstance
+
+Access patterns:
+- Foreign-key attributes are lazy and return awaitables. You can assign either the related instance or the FK value. Example::
+    
+    user = await User.create(name="A")
+    profile = await Profile.create(user=user)      # assign instance
+    profile.user_id = user.id                      # assign raw FK value
+
+    # Accessing related object (awaitable)
+    u = await profile.user                         # may perform a DB lookup
+
+- Reverse relations (backward FK / O2O) and many-to-many relations are provided as helper objects:
+  - ReverseRelation for backward FK access (queryable like a QuerySet).
+  - QuerySetSingle for reverse one-to-one lookups (.first() returns awaitable).
+  - ManyToManyRelation for M2M access (supports add/remove/clear and query operations).
+
+Relations are created lazily and cached on the instance. Example usage::
+
+    # Reverse relation (many profiles for a user)
+    profiles_qs = user.profile_set.filter(active=True)
+    profiles = await profiles_qs.all()
+
+    # One-to-one reverse
+    profile = await user.profile.first()
+
+    # Many-to-many
+    await book.authors.add(author1, author2)
+    await book.authors.remove(author3)
+    authors = await book.authors.all()
+
+Querying and querysets
+----------------------
+Models expose QuerySet APIs (filter, exclude, order_by, limit/offset, first, all, get, count, exists, etc.). QuerySet methods are chainable and evaluate on await. Examples::
+
+    users = await User.filter(active=True).order_by("-created_at").limit(10).all()
+    one = await User.filter(email="x").first()
+    exists = await User.filter(name__icontains="admin").exists()
+
+Default ordering declared in Meta.ordering is parsed and stored for use by QuerySets when no explicit ordering is provided.
+
+Transactions and concurrency
+----------------------------
+Use transaction helpers to run atomic operations. Example::
+
+    async with in_transaction() as conn:
+        await User.filter(pk=1).update(name="new")
+
+Signals
+-------
+Model lifecycle signals are available (pre_save, post_save, pre_delete, post_delete, etc.). Connect handlers via the Signals API.
+
+Exceptions
+----------
+Common exceptions raised by model operations:
+- ConfigurationError
+- IncompleteInstanceError
+- IntegrityError
+- OperationalError
+- TransactionManagementError
+
+Advanced notes
+--------------
+- The ORM maintains MetaInfo for each Model with internal attributes (db_table, basequery, pk, fields mapping, default ordering, filters and projections).
+- Field-level filters are resolved automatically by the filters subsystem when calling .filter().
+- Comments extraction for fields uses source inspection; if a class source is unavailable, comments extraction yields an empty mapping.
+
+Quick reference
+---------------
+- Create: await Model.create(**data)
+- Save/update: await instance.save()
+- Delete: await instance.delete()
+- Query: Model.filter(...), Model.get(...), await Model.filter(...).first()
+- Relations: await instance.related_field, instance.m2m_relation.add(...), instance.reverse_relation.filter(...)
+
+This summary outlines typical Model usage, relation patterns, Meta configuration, and common operations.

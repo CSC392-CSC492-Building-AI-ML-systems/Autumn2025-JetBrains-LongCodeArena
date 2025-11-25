@@ -1,0 +1,144 @@
+How Mitogen Works
+=================
+
+Overview
+--------
+Mitogen implements a lightweight remoting and RPC layer for Python. It
+relies on a small bootstrap module which is sent to each new slave context.
+That bootstrap contains the minimal runtime required to create channels,
+route messages, load code, and carry out RPCs. The implementation is
+carefully designed to be compact and to avoid common deadlocks and
+compatibility issues across many Python versions.
+
+Bootstrap and Minified Runtime
+------------------------------
+A dedicated module serves as the bootstrap runtime and is transmitted to
+child/slave contexts. It is annotated with a small-surface API and marked
+to be "minify safe" so it can be shipped in a compact form. The bootstrap
+contains only essential imports and implementations so it can be executed
+in constrained or newly spawned contexts without pulling in the whole
+package.
+
+Core Concepts
+-------------
+- Contexts: independent execution environments (master, slaves). Each
+  slave receives the bootstrap runtime which implements routing and I/O.
+- Broker / Router: central components that forward and dispatch message
+  frames between contexts, maintaining routes and handler registrations.
+- Channels: logical endpoints used to perform RPCs and send/receive
+  messages between contexts.
+- Messages: small frames tagged with an integer type describing the action.
+  The bootstrap defines message type constants used throughout the protocol.
+
+Message Types
+-------------
+The protocol uses integer codes for common operations. Common examples:
+
+- GET_MODULE (100): Request a module from another context.
+- CALL_FUNCTION (101): Invoke a function remotely.
+- FORWARD_LOG (102): Forward a log message to the master or a logger.
+- ADD_ROUTE (103) / DEL_ROUTE (104): Add or remove routing entries.
+- ALLOCATE_ID (105): Allocate a new identifier for channels/replies.
+- SHUTDOWN (106): Gracefully stop a context or broker.
+- LOAD_MODULE (107) / FORWARD_MODULE (108): Load and forward module code.
+- DETACHING (109): Indicate a context is detaching its routes/handlers.
+- CALL_SERVICE (110) / STUB_CALL_SERVICE (111): Invoke named services.
+
+Special Sentinels and Error Handling
+-----------------------------------
+- IS_DEAD (999): A special sentinel used in the `reply_to` field to signal
+  that a peer is disconnected or that a message could not be routed. When
+  received, it typically causes channel-related errors (e.g., ChannelError)
+  and prompts cleanup of handlers or retry logic.
+
+Data Representation, Pickling and Streams
+----------------------------------------
+- Pickle: The runtime uses Python's pickle module for serializing message
+  payloads. Compatibility fallbacks ensure the best available implementation
+  is used across Python versions.
+- BytesIO / StringIO: Lightweight in-memory streams are used for constructing
+  and reading serialized frames. The bootstrap attempts to import optimized
+  C implementations when available and falls back to pure-Python ones.
+- Latin-1 Codec: A LATIN1_CODEC is cached to avoid acquiring the global
+  import lock at runtime (reduces deadlock risk when many threads and
+  imports interact).
+
+Python Version Compatibility
+----------------------------
+The bootstrap includes a number of compatibility shims so it can operate
+on a wide range of Python versions:
+
+- Conditional imports for cProfile, thread / threading, cPickle / pickle.
+- Fallback definitions for NameErrors (e.g., ModuleNotFoundError).
+- Abstractions for bytes/unicode types and buffer access (BytesType,
+  UnicodeType, BufferType) so the same logic works on Python 2 and 3.
+- Guards for calling next() in older runtimes.
+
+IO, Buffering and Performance
+-----------------------------
+- Default IO buffer size: The bootstrap documents and uses a large default
+  transfer buffer (128 KiB). This value balances:
+  - Too-small buffers: many small reads/writes causing CPU overhead.
+  - Too-large buffers: excessive kernel and userspace memory allocation.
+- Considerations for platform-specific limits: TTYs and pipes may impose
+  smaller fixed buffer sizes; intermediaries (e.g., SSH) introduce their
+  own buffering characteristics that affect throughput.
+
+Routing and Module Distribution
+-------------------------------
+- Module retrieval: When a slave requires a Python module not present
+  locally, a GET_MODULE/LOAD_MODULE sequence can be used to request and
+  receive the module source or bytecode from the master.
+- Forwarding: FORWARD_MODULE and FORWARD_LOG enable transparent
+  propagation of modules and logging records across contexts.
+- Route lifecycle: Routes may be added or removed at runtime (ADD_ROUTE /
+  DEL_ROUTE). During teardown, DETACHING messages let receivers clean up.
+
+Logging and Diagnostics
+-----------------------
+- Dedicated loggers: The runtime initializes named loggers (e.g. 'mitogen'
+  and 'mitogen.io') and sets sensible default levels so I/O and broker
+  activity can be observed.
+- Profiling support: cProfile is imported if available; profiling-related
+  logic is guarded to avoid import-time side effects in minimal bootstraps.
+- Linecache and tracebacks are available to improve error reporting for
+  remote execution.
+
+Safety and Robustness
+---------------------
+- Import warnings and deprecated modules: The bootstrap suppresses a
+  number of noisy warnings (for example related to the imp module) so
+  that the small runtime remains clean and predictable.
+- Deadlock avoidance: Cached encodings and careful ordering of imports
+  reduce the risk of deadlocks when multiple threads or contexts perform
+  imports concurrently.
+- Graceful shutdown: SHUTDOWN and IS_DEAD sentinel messages provide
+  mechanisms for orderly context termination and resource cleanup.
+
+Typical RPC Flow Example
+------------------------
+1. Caller allocates an ID (ALLOCATE_ID) for replies.
+2. Caller sends CALL_FUNCTION with: function identifier, args, kwargs and
+   reply_to set to the allocated ID.
+3. Broker routes the message to the destination context.
+4. Destination receives, deserializes, invokes the function, and sends
+   back the result (or an error) to the `reply_to` ID.
+5. Caller receives the reply and correlates it with the original request.
+
+Notes and Implementation Remarks
+--------------------------------
+- The bootstrap is intentionally small and self-contained so it can be
+  serialized and executed in remote contexts with minimal dependencies.
+- Many implementation details are designed around safety across diverse
+  environments including older Python versions, WSL quirks, and varying
+  OS buffer behaviors.
+- The protocol uses simple integer message type codes and plain pickled
+  payloads to keep the wire format compact and easy to implement in other
+  languages or lightweight runtimes.
+
+Further Reading
+---------------
+For a deeper dive, consult the full Mitogen source tree where the broker,
+router, channel, and service implementations expand on the primitives
+described here and show concrete examples of message handling, module
+forwarding, and error recovery.

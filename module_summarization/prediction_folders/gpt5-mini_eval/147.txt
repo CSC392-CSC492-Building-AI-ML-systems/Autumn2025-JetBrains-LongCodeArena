@@ -1,0 +1,88 @@
+# Fleur input/output parsers
+
+This module provides helper parsers to extract meaningful, version-aware information from FLEUR XML input and output files. The parsers rely on the FLEUR XML schema dispatching (fleur_schema) and a lightweight XML access context (FleurXMLContext) that exposes convenient methods such as attribute(...), tag_exists(...), and find(...). These utilities centralize schema/version handling so parsers can work consistently across input/output file versions.
+
+Supported types
+- xmltree: any XML-like tree accepted by FleurXMLContext (XMLLike).
+- schema_dict: schema dictionary (InputSchemaDict or OutputSchemaDict) returned by the FLEUR schema-dispatch utilities.
+- logger: optional Logger for warnings/errors.
+
+Notes on versioning
+- Many checks are guarded by schema_dict.inp_version to support differences in tag names/semantics across FLEUR versions. Parsers use FleurXMLContext to abstract attribute/tag access and version-dependent behavior.
+- Some tags or attributes change name across versions (examples documented per function below). Parsers attempt sensible fallbacks when possible.
+
+Common behavior
+- Parsers open a FleurXMLContext(xmltree, schema_dict, logger=logger) for safe, version-aware access.
+- Attribute reads use default / optional flags where appropriate.
+- Tag existence checks may inspect contained subtags (contains=...) when relevant.
+- Validation errors (missing required data or unexpected types) raise ValueError.
+
+Functions
+
+1) get_fleur_modes(xmltree, schema_dict, logger=None) -> dict[str, Any]
+
+Purpose
+- Determine the calculation modes/features enabled in a FLEUR XML file. This is useful to infer which outputs/results to expect or how to interpret them.
+
+Returned dictionary keys and meanings
+- jspin: number of considered spins (value from attribute 'jspins').
+- noco: bool — non-collinear calculation? (from 'l_noco').
+- soc: bool — spin-orbit coupling included? (from 'l_soc').
+- relax: bool — structure relaxation? (from 'l_f').
+- spex: int/flag — GW/SPEX special mode. For older versions this is read from expertModes.gw; for schema versions >= 0.34 it falls back to expertModes.spex.
+- force_theorem: bool — Force theorem calculation? (present only for inp_version > (0,27); checks existence of 'forceTheorem' tag).
+- cf_coeff: bool — Uses core/charge-force coefficients (cFCoeffs). For inp_version >= (0,33) this checks both potential and chargeDensity entries inside the cFCoeffs tag.
+- plot: bool — plotting enabled. If a plotting tag exists, reads 'iplot'; for schema versions >= (0,29) numeric iplot is interpreted as enabled if non-zero.
+- film: bool — film system? (presence of 'filmPos' tag).
+- ldau: bool — LDA+U present? (checks presence of 'ldaU' containing 'species').
+- dos: value of 'dos' attribute (if present).
+- band: value of 'band' attribute (if present).
+- bz_integration: value of attribute 'mode' from 'bzIntegration' tag (how Brillouin-zone integration is performed).
+- greensf: bool — Green's-function / torque related calculation. For inp_version >= (0,32) checks for 'greensfCalculation' containing 'species'. For versions >= (0,35) also checks 'torqueCalculation'; older versions used tag name 'torgueCalculation' (misspelling) and the parser accounts for that.
+- ldahia: bool — LDA+HIA present? For inp_version >= (0,32) checks presence of 'ldaHIA' containing 'species'.
+
+Behavior notes
+- The function uses tag existence and attribute access through FleurXMLContext.
+- Where tag names or attribute semantics changed across versions, the function inspects the schema version and checks the appropriate tags/attributes.
+- Returns a dictionary with the keys above; keys not pertinent to a version are still returned (typically False or 0).
+
+Example (conceptual)
+- result = get_fleur_modes(xmltree, schema_dict)
+- result['soc'] will be True if spin-orbit coupling is enabled.
+
+2) get_nkpts(xmltree, schema_dict, logger=None) -> int
+
+Purpose
+- Return the number of k-points that will be used in the calculation described by the given FLEUR XML (input or output). This inspects the active kPointSet selection and reads the corresponding kPointList entry.
+
+Behavior
+- The function is version-dispatched (schema_dict_version_dispatch) and uses FleurXMLContext for safe access.
+- Reads the currently selected k-point set name from attribute 'listName'.
+- Collects all names from kPointList entries (tag_name='kPointList' under 'kPointLists') and validates that the selected list exists.
+- Finds the kPointList with the matching name and reads its 'count' attribute to determine nkpts.
+- If the selected list is missing, raises ValueError listing available list names.
+- If the resolved count is not an integer, raises ValueError ("Failed to evaluate n...").
+
+Version-specific caveats
+- For very old file versions (before Max5 in the original codebase), only kPointList or kPointCount tags were available and their meanings were inconsistent. The parser warns in such situations (via logger) because kPointCount does not always reliably correspond to the actual number of k-points used.
+
+Example (conceptual)
+- nkpts = get_nkpts(xmltree, schema_dict)
+- If the active kPointList name is missing, a ValueError is raised.
+
+Additional utilities and types referenced
+- FleurXMLContext: context manager for XML access that couples a schema_dict and optional logger. Provides methods:
+  - attribute(name, tag_name=None, list_return=False, optional=False, default=None, contains=None)
+  - tag_exists(tag_name, contains=None)
+  - find(tag_name, contains=None, filters=None) — context-managed finder returning a subcontext for nested access
+- schema_dict: fleur_schema.InputSchemaDict / OutputSchemaDict — used to dispatch behavior by inp_version.
+- schema_dict_version_dispatch decorator: registers function versions according to schema_dict (used e.g. on get_nkpts).
+
+Error handling
+- Missing required tags or attributes and unexpected types raise ValueError.
+- Version-specific ambiguous semantics may produce warnings via the provided logger.
+
+Guidelines
+- Always pass the schema_dict corresponding to the file version of xmltree (use the project schema utilities to obtain it).
+- Provide a logger to capture warnings for ambiguous or version-sensitive cases.
+- Use the returned fleur modes and nkpts to decide which outputs to expect or how to post-process results (e.g., SOC-related outputs, band/dos calculations, Green's function results, or the number of k-points to iterate over).

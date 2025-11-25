@@ -1,0 +1,144 @@
+Scheduler Utilities
+===================
+
+Stateless learning rate schedulers.
+
+This module provides stateless schedulers that are designed to interoperate with Composer's
+time abstraction (see :class:`~composer.core.time`). The primary goal is to provide schedulers
+that can be configured using explicit time units (epochs, batches, durations, etc.) and that
+are pure functions (or callable objects) that return a learning rate multiplier rather than
+directly mutating optimizer state.
+
+Overview
+--------
+
+- Schedulers implemented here are stateless: they compute a multiplier
+  :math:`\alpha(t)` for the optimizer learning rate at the current trainer time.
+- The computed multiplier is applied multiplicatively to the optimizer's initial learning
+  rate :math:`\eta_i`, so the effective learning rate is
+  :math:`\eta(t) = \eta_i \times \alpha(t)`.
+- Multiple schedulers may be supplied; their multipliers are multiplied together.
+- Each scheduler receives the current :class:`~composer.core.state.State` and an optional
+  "scale schedule ratio" (SSR) that stretches/shrinks the schedule:
+  :math:`\alpha_{\sigma}(t) = \alpha(t / \sigma)`.
+
+Publicly exported scheduler names
+--------------------------------
+(The implementations are provided elsewhere in the package; these names are exported by this module.)
+
+- StepScheduler
+- MultiStepScheduler
+- ConstantScheduler
+- LinearScheduler
+- ExponentialScheduler
+- CosineAnnealingScheduler
+- CosineAnnealingWarmRestartsScheduler
+- PolynomialScheduler
+- MultiStepWithWarmupScheduler
+- ConstantWithWarmupScheduler
+- LinearWithWarmupScheduler
+- CosineAnnealingWithWarmupScheduler
+- PolynomialWithWarmupScheduler
+
+ComposerScheduler (protocol)
+----------------------------
+
+A specification for a stateless scheduler function. A valid scheduler is any callable that
+matches the following signature:
+
+  def scheduler(state: State, ssr: float = 1.0) -> float
+
+- Args:
+  - state (State): The current Trainer state.
+  - ssr (float): Scale schedule ratio. Default: ``1.0``.
+- Returns:
+  - alpha (float): A multiplier to apply to the optimizer's provided learning rate.
+
+Notes and examples
+- Schedulers may be simple functions:
+
+  .. code:: python
+
+      def ten_epoch_decay_scheduler(state: State) -> float:
+          if state.timestamp.epoch < 10:
+              return 1.0
+          return 0.5
+
+- Or they may be callable classes to allow configuration:
+
+  .. code:: python
+
+      class VariableEpochDecayScheduler(ComposerScheduler):
+          def __init__(self, num_epochs: int):
+              self.num_epochs = num_epochs
+
+          def __call__(self, state: State) -> float:
+              if state.time.epoch < self.num_epochs:
+                  return 1.0
+              return 0.5
+
+- The :pyarg:`ssr` parameter should satisfy the stretching relation
+  :math:`\alpha_{\sigma}(t) = \alpha(t / \sigma)` when used.
+
+_convert_time
+--------------
+
+Utility for converting a time specification into a :class:`~composer.core.time.Time[int]`
+value appropriate for use with schedulers.
+
+- Accepts:
+  - a :class:`~composer.core.time.Time` instance,
+  - a timestring (e.g., ``"10ep"``) which will be parsed via :meth:`Time.from_timestring`, or
+  - a mixed unit that will be converted relative to the current state.
+
+- Behavior:
+  - Requires that ``state.max_duration`` is set when schedulers are invoked.
+  - If the provided time has unit ``TimeUnit.DURATION``, it is converted according to the
+    trainer's ``state.max_duration`` unit. If ``max_duration`` is in epochs and a conversion
+    to batches is required, ``state.dataloader_len`` must be set.
+  - If the provided time has unit ``TimeUnit.EPOCH``, it is converted to batches (to preserve
+    granularity and allow SSR scaling). This requires ``state.dataloader_len``.
+  - The returned :class:`Time` value uses integer-valued time and is scaled by the provided
+    SSR (i.e., its numeric value is multiplied by ``ssr``).
+- Errors:
+  - Raises a ``RuntimeError`` if conversion to batches is required but ``state.dataloader_len``
+    is ``None``.
+  - Asserts that ``state.max_duration`` is not ``None``.
+
+compile_composer_scheduler
+--------------------------
+
+Converts a stateless :class:`ComposerScheduler` into a PyTorch-compatible scheduler
+(:class:`~composer.core.PyTorchScheduler`). The returned scheduler exposes a ``.step()``
+interface similar to standard PyTorch schedulers but is bound to the provided
+:class:`~composer.core.state.State`. Because the produced scheduler reads the external
+trainer :class:`State`, any internal step-induced state in the PyTorch scheduler can be
+ignored; the authoritative schedule is provided by the original stateless callable.
+
+Typical usage (conceptual):
+
+.. code:: python
+
+    # given: my_stateless_scheduler: ComposerScheduler, trainer_state: State
+    pytorch_scheduler = compile_composer_scheduler(my_stateless_scheduler, trainer_state)
+    # pytorch_scheduler.step() will consult trainer_state and apply the scheduler's multiplier
+
+Notes
+-----
+- All schedulers in this module return multipliers rather than absolute learning rates.
+- When times are specified using epochs, they are converted to batches before SSR scaling
+  to preserve granularity (epochs alone are not sufficient for fractional scaling).
+- Converting from duration units depends on :pyattr:`state.max_duration` and may require
+  knowing :pyattr:`state.dataloader_len` when converting epoch-like durations to batch counts.
+
+Logging and warnings
+--------------------
+- The module uses the standard Python :mod:`logging` module to emit informational and debugging
+  messages. Warnings may be emitted for deprecated or problematic configurations.
+
+See Also
+--------
+- :class:`~composer.core.State`
+- :class:`~composer.core.time.Time`
+- :class:`~composer.core.time.TimeUnit`
+- The scheduler classes listed in "Publicly exported scheduler names" above.

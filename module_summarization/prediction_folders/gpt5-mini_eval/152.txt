@@ -1,0 +1,138 @@
+Executing notebooks
+===================
+
+This document describes the API for executing notebooks provided by the execute preprocessors.
+
+Synopsis
+--------
+
+- ``executenb(*args, **kwargs)`` — deprecated helper that forwards to ``nbclient.execute``.
+- ``ExecutePreprocessor`` — preprocessor that executes all code cells in a notebook using ``nbclient.NotebookClient``.
+- ``HighlightMagicsPreprocessor`` — preprocessor that detects cell magics (e.g. ``%%R``, ``%%bash``) and tags cells for appropriate syntax highlighting.
+
+executenb (deprecated)
+----------------------
+
+.. function:: executenb(*args, **kwargs)
+
+A thin compatibility wrapper that issues a ``FutureWarning`` and calls ``nbclient.execute(*args, **kwargs)``. Use ``nbclient.execute`` directly in new code.
+
+ExecutePreprocessor
+-------------------
+
+.. class:: ExecutePreprocessor(**kw)
+
+ExecutePreprocessor executes all code cells in a notebook. It inherits from the nbconvert ``Preprocessor`` base and ``nbclient.NotebookClient`` so that traitlets resolve as in pre-6.0 nbconvert.
+
+Construction
+^^^^^^^^^^^^
+The constructor signature accepts keyword arguments forwarded to the parent classes (for example, ``nb``, ``timeout``, ``kernel_name``). If no notebook object (``nb``) is provided, an empty ``NotebookNode`` is used for initialization.
+
+Behavior
+^^^^^^^^
+- The primary entrypoint is ``preprocess(self, nb, resources=None, km=None)`` which executes the notebook in-place and returns ``(nb, resources)``.
+- ``preprocess`` calls ``NotebookClient.__init__`` internally (again) to reset execution-related state prior to running. This is intentional to ensure a fresh execution state even though it results in a second initialization of the client.
+- Execution is performed by starting a kernel (using an optional provided ``KernelManager`` via the ``km`` parameter or creating one), executing the notebook cells sequentially, and storing outputs back into the notebook.
+- The preprocessor sets ``nb.metadata['language_info']`` from the kernel ``kernel_info`` reply.
+- After execution, ``set_widgets_metadata`` is called to persist widget state metadata where appropriate.
+
+Methods
+^^^^^^^
+
+- preprocess(nb, resources=None, km=None)
+  - Parameters
+    - ``nb`` (NotebookNode): notebook to execute (modified in-place).
+    - ``resources`` (dict, optional): additional conversion resources. Example: passing ``{'metadata': {'path': run_path}}`` sets the execution path.
+    - ``km`` (KernelManager, optional): custom kernel manager. If omitted a kernel manager is created.
+  - Returns
+    - ``(nb, resources)``: executed notebook and resources dict.
+  - Notes
+    - ``NotebookClient.__init__`` is invoked inside this method to ensure execution state is reset.
+    - Execution errors originating from cell execution raise the appropriate ``nbclient`` exceptions (e.g. ``CellExecutionError``).
+
+- preprocess_cell(cell, resources, index)
+  - Parameters
+    - ``cell`` (NotebookNode): cell to process.
+    - ``resources`` (dict): resources dict updated/passed-through.
+    - ``index`` (int): index of the cell in the notebook.
+  - Behavior
+    - Calls ``execute_cell(cell, index, store_history=True)`` provided by ``nbclient.NotebookClient``.
+    - Returns ``(cell, resources)``. Override to customize pre-execution handling per cell.
+
+Usage example
+^^^^^^^^^^^^^
+.. code-block:: python
+
+    from nbformat import read, write, NO_CONVERT
+    from nbconvert.preprocessors import ExecutePreprocessor
+
+    with open("notebook.ipynb") as f:
+        nb = read(f, as_version=4)
+
+    ep = ExecutePreprocessor(timeout=600, kernel_name="python3")
+    nb, resources = ep.preprocess(nb, resources={"metadata": {"path": "/path/to/run"}})
+
+    with open("executed.ipynb", "w") as f:
+        write(nb, f)
+
+HighlightMagicsPreprocessor
+---------------------------
+
+.. class:: HighlightMagicsPreprocessor(config=None, **kw)
+
+Detects code cells that use a non-default language via cell magics (for example, ``%%R`` or ``%%bash``) and tags them so syntax highlighting can use the appropriate lexer.
+
+Attributes
+^^^^^^^^^^
+
+- ``default_languages`` (traitlets.Dict) — built-in mapping of magic line to a Pygments lexer name. Built-in defaults include:
+
+  - ``%%R`` -> ``r``
+  - ``%%bash`` -> ``bash``
+  - ``%%cython`` -> ``cython``
+  - ``%%javascript`` -> ``javascript``
+  - ``%%julia`` -> ``julia``
+  - ``%%latex`` -> ``latex``
+  - ``%%octave`` -> ``octave``
+  - ``%%perl`` -> ``perl``
+  - ``%%ruby`` -> ``ruby``
+  - ``%%sh`` -> ``sh``
+  - ``%%sql`` -> ``sql``
+
+- ``languages`` (traitlets.Dict, configurable) — user-provided mappings that augment/override ``default_languages``. The constructor updates ``default_languages`` with values from ``languages``.
+
+Behavior
+^^^^^^^^
+- On initialization a regular expression is compiled to detect leading magic lines matching any configured magic keys.
+- which_magic_language(source) inspects a cell source string; if a leading magic is found it returns the corresponding lexer name (string), otherwise ``None``.
+- preprocess_cell(cell, resources, cell_index) tags code cells that start with a recognized magic by setting:
+
+  ``cell['metadata']['magics_language'] = <lexer_name>``
+
+  and returns ``(cell, resources)``.
+
+Customization example
+^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: python
+
+    from nbconvert.preprocessors import HighlightMagicsPreprocessor
+
+    pre = HighlightMagicsPreprocessor()
+    # Add a custom magic mapping
+    pre.languages.update({"%%mylang": "mylexer"})
+    # When run as part of preprocessing, cells beginning with "%%mylang" will
+    # get metadata['magics_language'] == "mylexer"
+
+Notes
+-----
+
+- Execution relies on nbclient for kernel management and cell execution. Exceptions raised during execution are those from nbclient (e.g. ``CellExecutionError``).
+- The execute preprocessor modifies notebooks in-place; callers should write out the notebook after preprocessing if persistence is desired.
+- For new code, prefer calling nbclient APIs directly where appropriate; ``executenb`` is deprecated and only retained for backward compatibility.
+
+See also
+--------
+
+- nbclient (for the execution backend and details on kernel/session handling).
+- nbconvert.preprocessors (for other preprocessors used in notebook conversion).

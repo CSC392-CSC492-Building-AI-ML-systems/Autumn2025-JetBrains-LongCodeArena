@@ -1,0 +1,169 @@
+Queues
+======
+
+An asynchronous producer / consumer pattern for coroutines.
+
+These queue classes coordinate producers and consumers running on a
+Tornado IOLoop. They are conceptually similar to the queue classes in
+the standard library's asyncio package but are implemented for use with
+Tornado coroutines and Futures.
+
+Warning
+-------
+Unlike the standard library's `queue` module, these queue classes are
+not thread-safe. If you need to interact with a queue from another
+thread, use `.IOLoop.add_callback` to transfer control to the IOLoop
+thread before calling any queue methods.
+
+Provided classes
+----------------
+- Queue: a FIFO queue for coroutines.
+- PriorityQueue: a queue that returns entries in priority order.
+- LifoQueue: a LIFO (stack-like) queue.
+- QueueFull: exception raised by put_nowait when the queue is full.
+- QueueEmpty: exception raised by get_nowait when the queue is empty.
+
+Basic example
+-------------
+This example demonstrates a producer putting items into a queue and a
+consumer processing them. The consumer uses "async for" to iterate over
+the queue and calls task_done() for each finished item; the producer
+awaits q.join() to wait until all tasks are processed.
+
+.. testcode::
+
+    import asyncio
+    from tornado.ioloop import IOLoop
+    from tornado.queues import Queue
+
+    q = Queue(maxsize=2)
+
+    async def consumer():
+        async for item in q:
+            try:
+                print('Doing work on %s' % item)
+                await asyncio.sleep(0.01)
+            finally:
+                q.task_done()
+
+    async def producer():
+        for item in range(5):
+            await q.put(item)
+            print('Put %s' % item)
+
+    async def main():
+        # Start consumer without waiting (since it never finishes).
+        IOLoop.current().spawn_callback(consumer)
+        await producer()     # Wait for producer to put all tasks.
+        await q.join()       # Wait for consumer to finish all tasks.
+        print('Done')
+
+    asyncio.run(main())
+
+.. testoutput::
+
+    Put 0
+    Put 1
+    Doing work on 0
+    Put 2
+    Doing work on 1
+    Put 3
+    Doing work on 2
+    Put 4
+    Doing work on 3
+    Doing work on 4
+    Done
+
+API
+---
+
+Constructor
+~~~~~~~~~~~
+Queue(maxsize=0)
+    Create a queue. If maxsize is 0 (the default) the queue size is
+    unbounded. Passing None for maxsize raises TypeError; negative
+    maxsize raises ValueError.
+
+Properties
+~~~~~~~~~~
+maxsize
+    The maximum number of items allowed in the queue (0 means infinite).
+
+Methods
+~~~~~~~
+put(item, timeout=None) -> Future
+    Put an item into the queue, waiting (asynchronously) until there is
+    room if the queue is full. Returns a Future that completes when the
+    item has been enqueued. If the optional timeout is reached before
+    the put can complete, the Future will raise `tornado.gen.TimeoutError`.
+
+put_nowait(item)
+    Put an item into the queue without blocking. If no free slot is
+    immediately available, raises QueueFull.
+
+get(timeout=None) -> Awaitable[item]
+    Remove and return an item from the queue. Returns an awaitable that
+    resolves once an item is available, or raises `tornado.gen.TimeoutError`
+    if the optional timeout elapses.
+
+get_nowait() -> item
+    Remove and return an item without blocking. If the queue is empty,
+    raises QueueEmpty.
+
+qsize() -> int
+    Return the approximate number of items in the queue.
+
+empty() -> bool
+    Return True if the queue is empty.
+
+full() -> bool
+    Return True if the queue is full (based on maxsize).
+
+task_done()
+    Indicate that a formerly enqueued task is complete. Used by consumers
+    to signal that work on a fetched item is finished. Calling task_done
+    decrements the internal unfinished task counter and will set the
+    join() condition when it reaches zero. Calling task_done more times
+    than items fetched may raise an exception.
+
+join() -> Awaitable[None]
+    Block (asynchronously) until all items that have been put into the
+    queue have been processed (i.e., until task_done() has been called
+    for each one). Useful for waiting for consumers to finish all
+    work started by producers.
+
+Iteration support
+-----------------
+Queue objects support asynchronous iteration; e.g. "async for item in q"
+yields items as they become available. This requires a consumer to call
+task_done() for each yielded item when processing is finished.
+
+Timeouts
+--------
+The optional timeout parameters accepted by put() and get() may be a
+float (in the same time base as `IOLoop.time`, typically time.time) or
+a datetime.timedelta giving an absolute deadline relative to now. If a
+timeout elapses before the operation completes, the returned Future or
+awaitable will raise `tornado.gen.TimeoutError`.
+
+Behavior notes
+--------------
+- If getters (coroutines waiting in get()) are present when an item is
+  put, a waiting getter is fulfilled immediately rather than placing
+  the item in the internal buffer.
+- If putters (coroutines waiting in put() because the queue is full)
+  are present when space becomes available, queued putters are served
+  in FIFO order.
+- The implementation is not thread-safe. Use IOLoop.add_callback from
+  other threads to manipulate queues on the IOLoop thread.
+
+Compatibility
+-------------
+In versions of Python prior to 3.5 (without native async/await syntax),
+Tornado coroutines can use gen.coroutine and yield. The queue API works
+with both Tornado futures/coroutines and native async/await coroutines.
+
+Exports
+-------
+The module exports the names: Queue, PriorityQueue, LifoQueue, QueueFull,
+QueueEmpty.

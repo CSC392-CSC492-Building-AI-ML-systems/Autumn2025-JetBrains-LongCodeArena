@@ -1,0 +1,107 @@
+w_assign
+========
+
+Synopsis
+--------
+w_assign [OPTIONS]
+
+Assign walkers to bins, producing an HDF5 file (default: assign.h5) that contains per-iteration, per-segment, per-timepoint bin assignments and auxiliary datasets used for subsequent analysis (for example, kinetic and population analyses).
+
+Description
+-----------
+w_assign maps every saved trajectory timepoint in a WESTPA dataset to the bin that contains its progress-coordinate value(s). For consistency in downstream analyses that trace trajectories across iterations, the entire dataset is assigned even if only a subset of the data will be used.
+
+Source data
+-----------
+Source data for assignment may be provided in one of two ways:
+
+- --construct-dataset=MODULE.FUNCTION
+  Provide a Python function that the tool will call as function(n_iter, iter_group). The function must return data indexable as [segment][timepoint][dimension], i.e., segment-major arrays of progress coordinates or other data used for mapping.
+
+- --dsspecs NAME[,file=FILENAME,slice=SLICE] ...
+  A list of data-set specifications. Each specification uses NAME (a dataset name in an HDF5 file), optionally specifying file=FILENAME (defaults to the main WEST HDF5 file, usually west.h5) and slice=SLICE to select portions of the dataset (Python slice syntax). The slice option is useful to pick specific columns from multi-column datasets (e.g., selecting one dimension of a multi-dimensional progress coordinate).
+
+If neither --construct-dataset nor --dsspecs is supplied, the progress-coordinate dataset pcoord is used.
+
+Macrostates (kinetic state labeling)
+-----------------------------------
+Optionally, macrostates may be defined so that each trajectory timepoint is labeled by the most-recently-visited macrostate. These labeled populations are required for kinetic analyses (w_kintrace, w_kinmat).
+
+Three ways to define macrostates:
+
+1. --states
+   Specify one or more states on the command line. Each state is given as a coordinate tuple, optionally with a label prefix: label:coord or simply coord. Example forms:
+   - bound:(0.1,0.0)
+   - unbound:(9.0,1.0)
+   Unlabeled states are named stateN (zero-based index by position in the list).
+
+2. --states-from-file=FILE (YAML)
+   Provide a YAML file describing a list of states. Each state entry contains a label (optional) and a list of coordinate tuples. Example YAML:
+     ---
+     states:
+       - label: unbound
+         coords:
+           - [9.0, 1.0]
+           - [9.0, 2.0]
+       - label: bound
+         coords:
+           - [0.1, 0.0]
+   Each coordinate tuple maps to a bin; the union of bins mapped by a state's coordinate list defines that state.
+
+3. --states-from-function=MODULE.FUNCTION
+   Supply a Python function called with the bin mapper (function(mapper)) that returns a list of dictionaries, one per state. Each dictionary must include the key "coords" with a sequence of coordinate tuples; an optional "label" key may provide a state name. The mapper is used to determine which bins correspond to the supplied coordinates.
+
+Output file and datasets
+------------------------
+By default, the tool writes assign.h5 (settable with -o/--output). The output contains the following attributes and datasets:
+
+- nbins (attribute)
+  Integer. Number of valid bins. Bin indices range from 0 to nbins-1.
+
+- nstates (attribute)
+  Integer. Number of macrostates defined (may be zero). Trajectory-state labels range from 0 to nstates-1 when states are present.
+
+- /assignments [iteration][segment][timepoint]
+  Integer dataset giving the bin index assigned to each saved timepoint for every segment and iteration.
+
+- /npts [iteration]
+  Integer dataset with the number of timepoints recorded in each iteration.
+
+- /nsegs [iteration]
+  Integer dataset with the number of segments present in each iteration.
+
+- /labeled_populations [iteration][state][bin]
+  Floating-point dataset of bin populations per iteration, labeled by the most-recently-visited macrostate for each trajectory. The last state index (nstates-1) corresponds to trajectories initiated outside any defined macrostate.
+
+- /bin_labels [bin]
+  Per-bin coordinate labels (coordinate tuples) identifying each bin (the representative coordinates used to label bins).
+
+Notes
+-----
+- The entire dataset must be assigned to ensure consistent tracing of trajectory origins across analyses.
+- Custom construct-dataset functions must return arrays shaped [segment][timepoint][dimension]. Single-dimension results may be shaped accordingly to match this interface.
+- Data-set specifications in --dsspecs use standard Python slice expressions for selecting dataset subsets (for example, slice=[0:2]).
+
+Examples
+--------
+Assign using the default pcoord dataset and write to assign.h5:
+  w_assign
+
+Assign using a custom dataset constructor:
+  w_assign --construct-dataset=my_module.my_constructor -o assign.h5
+
+Assign using multiple dataset specifications (selecting column 0 of dataset X in another file):
+  w_assign --dsspecs X,file=other.h5,slice=[0:] Y
+
+Define two macrostates on the command line:
+  w_assign --states "bound:(0.1,0.0)" "unbound:(9.0,1.0)"
+
+Define macrostates from a YAML file:
+  w_assign --states-from-file=states.yml
+
+Define macrostates using a Python function:
+  w_assign --states-from-function=my_module.define_states
+
+See also
+--------
+w_kintrace, w_kinmat (kinetic analyses that require labeled populations)

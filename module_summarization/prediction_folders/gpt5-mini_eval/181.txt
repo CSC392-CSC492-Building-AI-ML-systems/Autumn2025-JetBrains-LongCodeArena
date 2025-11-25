@@ -1,0 +1,120 @@
+Dataset loading utilities
+=========================
+
+This module provides utilities to download and cache datasets from OpenML.org
+and helpers used by higher-level dataset loaders.
+
+fetch_openml
+------------
+
+fetch_openml is the primary user-facing convenience for loading datasets from
+OpenML. It retrieves dataset description and data and returns a scikit-learn
+style Bunch-like object containing at least the data and the target. Typical
+usage:
+
+.. code-block:: pycon
+
+    >>> from sklearn.datasets import fetch_openml
+    >>> # by name
+    >>> iris = fetch_openml(name="iris", version=1)
+    >>> X, y = iris.data, iris.target
+    >>> # return_X_y style (supported)
+    >>> X, y = fetch_openml(name="iris", version=1, return_X_y=True)
+
+Key points
+
+- Datasets are downloaded from the OpenML REST API and parsed (ARFF support).
+- Returned object is a Bunch-like container that contains the dataset, target
+  and metadata (feature names, description, etc.).
+- The function integrates with pandas if pandas is available, enabling
+  DataFrame return types where applicable.
+
+Caching and data_home
+---------------------
+
+Downloaded OpenML resources are cached on disk under the user data directory
+returned by get_data_home(). Cache layout:
+
+    <data_home>/openml.org/<openml_path>.gz
+
+Where <openml_path> corresponds to the OpenML API path used to request the
+resource. If data_home is set to None, no caching is performed and resources
+are streamed directly from the network.
+
+Atomic writes and concurrency safety
+-----------------------------------
+
+To ensure a safe cache in the presence of concurrent processes, downloads are
+first written into a temporary directory located in the final cache directory.
+After a successful download the temporary file is moved atomically into the
+final location. If a download fails the partially written file is removed.
+
+GZIP handling
+-------------
+
+The OpenML client requests gzip-encoded responses and transparently handles
+decompression. Cached files are stored compressed (".gz") and reopened using a
+gzip reader when loaded from cache.
+
+Retry and cache-repair strategies
+---------------------------------
+
+Two retry-related helper decorators are used to improve robustness:
+
+- _retry_on_network_error(n_retries=3, delay=1.0, url="")
+  - Retries calls that raise URLError or TimeoutError up to n_retries times,
+    sleeping delay seconds between attempts.
+  - HTTPError with status code 412 (OpenML generic error) is not retried and is
+    propagated immediately.
+
+- _retry_with_clean_cache(openml_path, data_home, no_retry_exception=None)
+  - If the decorated call fails (except for URLError and optionally a
+    user-provided no_retry_exception), the local cached file for the given
+    openml_path is removed and the operation is retried once. If data_home is
+    None the decorated function is invoked only once (no cache cleaning).
+
+Network and OpenML-specific errors
+---------------------------------
+
+- URLError and TimeoutError are raised for transient network problems; these
+  are subject to the retry logic described above.
+- HTTP 412 responses from the OpenML API indicate a generic OpenML error and
+  are raised as-is (not retried). The module defines an OpenMLError type to
+  indicate such OpenML-specific failure conditions.
+
+Internal helpers
+----------------
+
+- _get_local_path(openml_path, data_home)
+  - Build the canonical on-disk path for an OpenML resource in the cache.
+
+- _open_openml_url(openml_path, data_home, n_retries=3, delay=1.0)
+  - Open an OpenML URL (prefixed with the OpenML API base), returning a file
+    like object. If data_home is provided the resource is cached locally and
+    subsequent calls will read from the cache. This function handles gzip
+    content-encoding differences and applies network retry logic.
+
+- JSON and metadata endpoints
+  - The client interacts with the OpenML API endpoints for dataset listing,
+    dataset info, features and qualities and for downloading dataset files.
+    JSON metadata responses are obtained from the API and parsed before being
+    used to construct the returned dataset object.
+
+Notes and best practices
+------------------------
+
+- To avoid unnecessary downloads, set data_home (or rely on the default) so
+  that resources are cached.
+- If you encounter unexpected parsing issues, set data_home and remove the
+  corresponding cache file to force a fresh download (the client also tries
+  to repair invalid cache entries automatically under many failure modes).
+- Be mindful of OpenML API rate limits and large dataset sizes when using
+  programmatic downloads.
+
+See also
+--------
+
+- get_data_home: locate or configure the dataset cache directory used by the
+  utilities above.
+- The OpenML REST API documentation for details about dataset identifiers,
+  versions and metadata fields.

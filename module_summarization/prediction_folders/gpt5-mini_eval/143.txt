@@ -1,0 +1,69 @@
+Managing Memory
+===============
+
+This document describes how memory is tracked and managed by the client-side machinery represented in the codebase. It covers lifetimes and references of remotely-held data, how the client and futures collaborate with the scheduler and workers to hold or release data, serialization and transfer considerations, and practical guidance and diagnostics for reducing and inspecting memory usage.
+
+Overview
+--------
+- The client maintains local bookkeeping for remote keys (data) via a mapping of key -> FutureState. Futures are local proxies that reference these remote keys.
+- When a Future is bound to a client it increases the client's internal reference count for the corresponding remote key. This prevents the scheduler/workers from dropping the remote data while the client still needs it.
+- The client communicates desired keys to the scheduler using messages such as "client-desires-keys". The scheduler and workers use this information to decide whether to keep or evict data.
+
+Reference counting and lifetimes
+--------------------------------
+- Each Future, when bound to a Client, calls an internal client method to increment a reference count for the associated key. This is the primary mechanism that keeps remote data alive while local proxies exist.
+- The client stores the state for each key (via a futures dictionary). This state is used to track the in-memory status, lifecycle, and bookkeeping of a particular remote value.
+- Future instances track whether they have been "cleared" locally (_cleared) and contain a generation marker to help detect version mismatches when clients are reconfigured or restarted.
+- The client and scheduler cooperate: the client informs the scheduler which keys it desires; once no clients or workers desire a key and there are no pinned references, the scheduler may allow workers to evict the corresponding data.
+
+Client-side/global client behavior
+----------------------------------
+- A global registry of clients is maintained using a weak-reference dictionary. This prevents client objects from being artificially kept alive solely by the registry.
+- There is also a context-local "current client" ContextVar so code can find the active client implicitly if one exists.
+- When a Future is created without a client argument, it attempts to bind to the current client (if available) and then registers itself with that client, incrementing internal refcounts.
+
+Data movement and serialization
+-------------------------------
+- Data movement between client and workers (scatter, gather, transfers for tasks, etc.) goes through the serialization and packing utilities:
+  - pack_data and unpack_remotedata are used to prepare and recover payloads transferred over the network.
+  - to_serialize and the distributed.protocol.pickle dumps/loads machinery determine how objects are marshalled.
+- The distributed.sizeof.sizeof utility provides a measured size of Python objects and serialized payloads — useful for estimating memory consumption and transfer sizes.
+- Wrap large payloads with the appropriate serialization flags so they are transferred efficiently and not accidentally duplicated in memory.
+
+Memory accounting and worker metadata
+------------------------------------
+- Worker-side metadata structures such as WhoHas and HasWhat (and corresponding scheduler data structures) record where keys live and which workers hold each key. This is essential for scheduling decisions and for movements such as replication or eviction.
+- The client can query the scheduler and workers to learn where data lives; those answers are used by higher-level helpers (gather_from_workers, scatter_to_workers) to orchestrate transfers or to request recomputation.
+
+Diagnostics and tooling
+-----------------------
+- Utilities imported from dask and distributed are available to help inspect and report memory usage:
+  - format_bytes to render byte counts in a human-friendly way.
+  - sizeof to compute object sizes.
+  - cluster_dump and other diagnostics helpers to collect state for troubleshooting.
+- When debugging memory pressure, inspect:
+  - which keys are referenced by which clients and workers,
+  - the size of those keys,
+  - replication/repinning behavior that may cause extra copies,
+  - long-lived Futures or global structures that hold references.
+- Use Python-level tools (gc.collect(), del references) on the client side to drop local references and allow the client's bookkeeping to decrement refcounts and notify the scheduler that the client no longer desires keys.
+
+Practical guidance to reduce memory usage
+----------------------------------------
+- Release or delete local Futures when you no longer need results. The client increments reference counts when Futures are bound; dropping those references allows the client to signal that data may be released.
+- Avoid fetching (gathering) very large datasets to the client process unless necessary. Prefer working on data in-place on workers or using persisted, distributed datasets.
+- Use scatter/persist to place data deliberately on workers, and then arrange tasks to operate on those keys rather than copying data back and forth.
+- Measure object sizes with sizeof before widespread replication or materialization.
+- Prefer smaller chunk sizes for large datasets to increase scheduling flexibility and reduce peak per-worker memory pressure.
+- When performing large collection or rebalancing operations, consider staggering work, increasing worker memory limits, or using on-disk spilling caches (worker-side) to avoid OOMs.
+
+Common pitfalls and troubleshooting tips
+---------------------------------------
+- Stale global references: Global registries or long-lived Python structures can keep Future objects (and therefore client refcounts) alive. Use weak references or explicitly drop references.
+- Duplicate copies: Serialization and intermediate buffering can create temporary duplicates; pay attention to how objects are serialized and whether they are being copied unnecessarily during transfer.
+- Unexpected pinning: Operations that publish datasets or assign keys to long-lived services (e.g., datasets or server-side caches) can pin keys longer than intended.
+- Generation mismatch: Clients track a generation stamp used to detect that state has changed; clients that survive restarts or reconfiguration may hold outdated state until re-bound.
+
+Summary
+-------
+Memory is managed cooperatively between client, scheduler, and workers. The client tracks local proxies (Futures) and increments internal reference counts for remote keys; it notifies the scheduler of desired keys so workers can avoid evicting required data. Properly releasing local references, relying on in-place distributed computation (rather than repeated gather/transfer), measuring sizes, and using the diagnostic utilities will yield predictable, lower memory usage and fewer out-of-memory events.

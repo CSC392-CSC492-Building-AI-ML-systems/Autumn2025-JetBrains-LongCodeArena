@@ -1,0 +1,151 @@
+Multiclass and multioutput algorithms
+====================================
+
+Overview
+--------
+This module provides meta-estimators that extend single-output estimators to
+handle multioutput regression and multioutput classification problems.
+The provided estimators require a base estimator (a single-output estimator)
+to be passed to their constructor; the meta-estimator fits one copy (or a
+chain of copies) of the base estimator per output.
+
+Provided estimators
+-------------------
+
+- MultiOutputRegressor
+- MultiOutputClassifier
+- ClassifierChain
+- RegressorChain
+
+Common concepts
+---------------
+- Meta-estimator: wraps a provided base estimator and manages cloning and
+  independent fitting of one estimator per target variable.
+- estimators_: list of fitted clones of the base estimator; one element per
+  output target.
+- Parallelism: fitting of independent sub-estimators is parallelizable via
+  the n_jobs parameter (if supported by the implementation).
+- Cloning: the base estimator is cloned internally before fitting to avoid
+  shared state between targets.
+- Method availability: methods such as predict_proba are exposed only when
+  the underlying sub-estimators implement them; availability checks are
+  performed at runtime.
+
+MultiOutputRegressor
+--------------------
+Purpose
+  Wraps a regressor to enable independent regression on multiple continuous
+  targets. Each target is modeled by an independent clone of the base regressor.
+
+Key parameters
+  - estimator: the base regressor implementing fit(X, y) and predict(X).
+  - n_jobs: int or None, number of jobs to run in parallel for fitting the
+    independent estimators (if supported).
+
+Behavior
+  - During fit, the meta-estimator clones the provided estimator for each
+    output target and fits it on X and the corresponding column of y.
+  - Predictions are produced by querying each fitted sub-estimator and
+    assembling their outputs into a multi-column array with shape
+    (n_samples, n_outputs).
+
+MultiOutputClassifier
+---------------------
+Purpose
+  Wraps a classifier to enable independent classification for multiple
+  target variables (each target can be binary or multiclass). Each target
+  is modeled by an independent clone of the base classifier.
+
+Key parameters
+  - estimator: the base classifier implementing fit(X, y) and predict(X).
+  - n_jobs: int or None, number of jobs for parallel fitting of independent
+    classifiers.
+
+Behavior
+  - check_classification_targets is used to validate y for classification.
+  - Each target is fitted independently; methods such as predict_proba are
+    only available when all sub-classifiers implement them.
+  - Predictions combine the per-target outputs into an array of shape
+    (n_samples, n_outputs).
+
+ClassifierChain
+---------------
+Purpose
+  Models dependencies between multiple classification targets by chaining
+  classifiers: each classifier in the chain is trained to predict one target
+  and receives the original features plus the ground-truth (during training)
+  or previously predicted targets (during prediction) as additional features.
+
+Key points
+  - Useful when targets are not conditionally independent given X.
+  - The order of targets in the chain matters; different ordering can be
+    specified (or randomized with a given random_state).
+  - As each step of the chain may rely on predictions from previous steps,
+    errors can propagate along the chain.
+
+RegressorChain
+--------------
+Purpose
+  Like ClassifierChain but for regression targets: regressors are chained so
+  that predictions for earlier targets are used as additional inputs when
+  predicting later targets.
+
+Key points
+  - Captures dependencies between continuous targets.
+  - Order of the chain influences results and can be chosen or randomized.
+
+Parallel fitting and helpers
+----------------------------
+- Independent-subestimator meta-estimators fit each sub-estimator using clones
+  of the base estimator; this is implemented via helper functions that
+  perform cloning and call fit or partial_fit appropriately.
+- Parallel execution for independent fits is supported via n_jobs and
+  utilities such as joblib/Parallel.
+
+Sample weights and partial fit
+------------------------------
+- When provided, sample_weight is forwarded to the base estimator's fit
+  method for each sub-estimator when supported.
+- For online learners supporting partial_fit, per-target partial fitting is
+  handled by cloning (on the first call) and then calling partial_fit on each
+  sub-estimator; classes can be passed where required by the base estimator.
+
+Usage examples
+--------------
+Example: MultiOutputRegressor
+  from sklearn.multioutput import MultiOutputRegressor
+  from sklearn.linear_model import LinearRegression
+
+  base = LinearRegression()
+  mor = MultiOutputRegressor(base, n_jobs=4)
+  mor.fit(X_train, Y_train)        # Y_train shape: (n_samples, n_targets)
+  Y_pred = mor.predict(X_test)
+
+Example: ClassifierChain
+  from sklearn.multioutput import ClassifierChain
+  from sklearn.linear_model import LogisticRegression
+
+  base = LogisticRegression()
+  chain = ClassifierChain(base, order='random', random_state=0)
+  chain.fit(X_train, Y_train)     # Y_train shape: (n_samples, n_targets)
+  Y_pred = chain.predict(X_test)
+
+Notes and best practices
+------------------------
+- Choose a base estimator appropriate for a single-target problem. The
+  meta-estimator will make independent copies of that estimator.
+- If targets are independent, MultiOutputRegressor/MultiOutputClassifier (independent
+  fitting) is simple and often effective.
+- If targets exhibit conditional dependencies, consider Chain variants to
+  exploit relationships between targets—but be aware of error propagation
+  along the chain.
+- Check availability of methods (e.g., predict_proba) on the base estimator
+  if you rely on these methods; they will only be exposed when all
+  sub-estimators implement them.
+
+See also
+--------
+- cross_val_predict: can be used to obtain cross-validated predictions for
+  multioutput estimators (useful for stacking and meta-modeling).
+- sklearn.utils.validation.has_fit_parameter: helpful to detect if a base
+  estimator accepts parameters such as sample_weight.

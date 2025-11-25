@@ -1,0 +1,214 @@
+Plans
+=====
+
+This module implements a small set of high-level "plans" (generator-based protocols)
+used to drive experiments: taking readings from detectors and scanning motors.
+The plans are implemented as generators that yield message objects (Msg) consumed
+by a RunEngine. They make use of preprocessing and plan-stub utilities
+(in this module: bpp, bps) and plan pattern helpers (plan_patterns) to build
+composite behaviors. Each plan constructs a metadata (_md) dictionary describing
+the run and uses the provided stage/run decorators to properly stage devices
+and create a Run.
+
+Common concepts
+---------------
+
+- Plans are generator functions that yield Msg objects. They are intended to be
+  driven by a bluesky-style RunEngine.
+- Plans build a metadata dictionary (_md) that is added to the Run; inspect the
+  plan implementations to see specific keys. Typical keys include:
+  - plan_name: short name for the plan
+  - detectors: list of detector names
+  - plan_args: serializable representation of the plan arguments
+  - num_points, num_intervals: counts used by tooling
+  - hints: optional plotting/consumption hints (e.g., dimensions)
+  - plan_pattern, plan_pattern_module, plan_pattern_args: (when a plan
+    corresponds to a plan pattern), facilitating higher-level tooling.
+
+- Hooks:
+  - per_shot: used by ``count`` to customize actions taken each exposure.
+    Expected signature:
+      f(detectors: Iterable[Readable]) -> Generator[Msg]
+    Default: bps.one_shot
+  - per_step: used by scan-like plans to customize per-step behavior.
+    Expected signature:
+      f(detectors, motor, step) -> Generator[Msg]
+
+- Decorators:
+  - bpp.stage_decorator(devices): stages and unstages devices around the plan.
+  - bpp.run_decorator(md=_md): creates a Run context and inserts the metadata.
+
+Public plans
+------------
+
+count
+^^^^^
+
+.. function:: count(detectors, num=1, delay=None, *, per_shot=None, md=None)
+
+Take one or more readings from detectors.
+
+Parameters
+  detectors
+    Iterable of readable objects (detectors). The plan will use detector.name
+    or repr(detector) when building metadata.
+  num : int or None, optional
+    Number of readings to take. If num is None, the plan captures data until
+    the outer caller cancels the plan (continuous acquisition). Default: 1.
+  delay : scalar or iterable, optional
+    Time delay in seconds between successive readings. If an iterable is
+    provided it must contain at least ``num - 1`` entries (otherwise a
+    ValueError will be raised during iteration).
+  per_shot : callable, optional
+    Hook for customizing the inner loop. Expected signature:
+      f(detectors: Iterable[Readable]) -> Generator[Msg]
+    If None, the default bps.one_shot is used.
+  md : dict, optional
+    Metadata to merge into the plan metadata.
+
+Behavior and notes
+  - The plan builds an _md dictionary which includes:
+    - 'detectors' (list of names), 'num_points', 'num_intervals'
+    - 'plan_args', 'plan_name' == 'count', and 'hints' (default 'dimensions')
+  - The plan is wrapped with bpp.stage_decorator and bpp.run_decorator and
+    delegates the repeated-shot behavior to bps.repeat, using the provided
+    per_shot hook.
+
+Returns
+  A generator (to be run by a RunEngine) that yields Msg objects.
+
+Example
+  >>> RE(count([det1, det2], num=5, delay=1.0))
+
+
+list_scan
+^^^^^^^^^
+
+.. function:: list_scan(detectors, *args, per_step=None, md=None)
+
+Scan over one or more motors following explicit lists of positions.
+The lists are iterated in lock-step (inner product across the N lists,
+i.e., one step per tuple of positions).
+
+Parameters
+  detectors
+    Iterable of readable objects.
+  *args
+    Provided as motor, [pos1, pos2, ...], motor2, [pos1, pos2, ...], ...
+    Each motor must be followed by a finite iterable of target positions.
+    All position lists must have the same length.
+  per_step : callable, optional
+    Hook customizing the action on each step. Expected signature:
+      f(detectors, motor, step) -> Generator[Msg]
+  md : dict, optional
+    Metadata to merge into the plan metadata.
+
+Behavior and notes
+  - Validates that the number of positional lists is consistent. If the lists
+    do not all have the same length, raises ValueError.
+  - Constructs metadata (_md) including:
+    - 'detectors', 'motors' (names), 'num_points', 'num_intervals'
+    - 'plan_args' with repr of detectors and args, 'plan_name' == 'list_scan'
+    - 'plan_pattern' == 'inner_list_product', 'plan_pattern_module'
+    - 'plan_pattern_args' containing serialized args
+    - 'hints' which attempts to derive plotting dimensions from motor
+      .hints.fields when available
+  - Uses plan_patterns.inner_list_product(args) to construct a cycler (full
+    sequence of positions) and delegates to scan_nd (a higher-level
+    N-dimensional scan driver) with the constructed cycler.
+
+Raises
+  ValueError
+    If the provided position lists do not all have the same length.
+
+Returns
+  A generator (to be run by a RunEngine) that yields Msg objects.
+
+Example
+  >>> RE(list_scan([det], motor1, [0, 1, 2], motor2, [10, 11, 12]))
+
+
+rel_list_scan
+^^^^^^^^^^^^^
+
+.. function:: rel_list_scan(detectors, *args, per_step=None, md=None)
+
+Intended to scan motors over lists of positions specified relative to the
+current position of each motor.
+
+Parameters (intended)
+  detectors
+    Iterable of readable objects.
+  *args
+    Provided as motor, [rel_pos1, rel_pos2, ...], ...
+    Each position in the lists is interpreted as an offset added to the
+    motor's current position at the start of the scan.
+  per_step : callable, optional
+    Hook customizing per-step behavior; same expected signature as in
+    list_scan.
+  md : dict, optional
+    Metadata to merge into the plan metadata.
+
+Notes
+  - This function is a relative-position variant of list_scan and is expected
+    to compute absolute target positions by adding the provided relative
+    offsets to each motor's current position, then behave similarly to
+    list_scan. Implementation is marked TODO in the source.
+
+Internal and implementation details
+-----------------------------------
+
+- Preprocessors & plan stubs:
+  - bpp.* provides decorators such as stage_decorator and run_decorator that
+    manage staging/unstaging and Run creation.
+  - bps.* provides plan stubs and helpers: one_shot, repeat, and other small
+    generators used to construct the plan behavior.
+
+- plan_patterns
+  - The module plan_patterns contains helpers to transform human-facing
+    scan arguments (like lists of positions) into cyclers or ND sequences.
+  - list_scan uses plan_patterns.inner_list_product to form the full
+    per-step sequence and records the pattern metadata so higher-level tools
+    can understand the scan layout.
+
+- Metadata construction
+  - Plans create a basic _md dict with keys designed for tooling and plotting.
+    Typical keys:
+      - plan_name: string name of the plan
+      - detectors: list of detector names
+      - plan_args: serializable parameters
+      - num_points: int
+      - num_intervals: int (num_points - 1, or None)
+      - hints: a dict containing plotting hints; commonly contains
+        a 'dimensions' entry like [((field_names,), 'primary')]
+
+- Error handling
+  - Input validation is performed for argument shapes (e.g., matching list
+    lengths in list_scan). Other runtime errors (device failures, cancellation)
+    are surfaced via the RunEngine protocol.
+
+See also
+--------
+- scan_nd: an ND scan driver used by list_scan (not shown here)
+- plan_patterns: cycler / pattern helpers
+- bpp, bps: preprocessors and plan stubs/helpers used by these plans
+
+Examples
+--------
+
+Simple count:
+.. code-block:: python
+
+    RE(count([det1, det2], num=3, delay=0.5))
+
+Two-motor list scan (lock-step lists of equal length):
+.. code-block:: python
+
+    RE(list_scan([det], motor_x, [0, 1, 2], motor_y, [10, 11, 12]))
+
+Notes
+-----
+- These plans are building blocks; for complex scans combine plan patterns,
+  per_step/per_shot hooks and the scan_nd infrastructure.
+- Review the produced metadata (_md) when integrating with GUIs or plotting
+  code to ensure correct axis/hint information is present.

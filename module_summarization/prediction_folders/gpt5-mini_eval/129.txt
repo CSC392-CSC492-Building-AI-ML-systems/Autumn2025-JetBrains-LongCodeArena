@@ -1,0 +1,173 @@
+Table Data
+==========
+
+This document summarizes the Table Data verification and notification utilities used
+internally for FITS table handling.
+
+Overview
+--------
+Table data and related objects implement a lightweight verification mechanism
+and a notifier mixin to allow listeners to register for and react to changes.
+The verification utilities report fixable and unfixable errors in a structured
+way and support multiple reporting/fixing options.
+
+Verification
+------------
+
+Classes
+^^^^^^^
+
+VerifyError
+    Exception raised when verification reports errors and the chosen
+    reporting option requires an exception.
+
+VerifyWarning
+    Warning class (subclass of AstropyUserWarning) used to emit verification
+    warnings.
+
+VERIFY_OPTIONS
+    Supported verification option strings:
+
+    - "ignore"
+    - "warn"
+    - "exception"
+    - "fix"
+    - "silentfix"
+    - "fix+ignore"
+    - "fix+warn"
+    - "fix+exception"
+    - "silentfix+ignore"
+    - "silentfix+warn"
+    - "silentfix+exception"
+
+_Verify
+^^^^^^^
+Shared verification mixin used to implement object-level verification.
+
+Methods
+    run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+        Execute a single verification outcome according to the chosen sub-option.
+
+        Parameters
+        - option: str
+            One of the options in VERIFY_OPTIONS (or equivalent simple form).
+            Controls whether to attempt fixes and how to report results.
+        - err_text: str
+            Description of the error.
+        - fix_text: str
+            Text appended to the message when a fix is performed.
+        - fix: callable or None
+            Optional callable to attempt to fix the error when a fix mode is in effect.
+        - fixable: bool
+            Whether the error is fixable.
+
+        Returns
+        - (fixable: bool, text: str)
+
+    verify(option="warn")
+        Run verification over the object and handle reporting/fixing according
+        to option.
+
+        Parameters
+        - option: str
+            Controls verification behavior. Must be one of VERIFY_OPTIONS or a
+            simple form ("ignore", "warn", "exception", "fix", "silentfix").
+            Combinations like "fix+warn" are supported.
+
+        Behavior summary
+        - "ignore": do nothing.
+        - "warn": collect issues and emit VerifyWarning messages.
+        - "exception": raise VerifyError with formatted messages when issues exist.
+        - "fix": attempt to fix fixable issues; by default raises for unfixable issues
+          unless combined with "+ignore" or "+warn"/"+exception".
+        - "silentfix": attempt to fix but do not emit messages for fixed issues
+          (may still warn/raise for unfixable issues depending on combination).
+
+        Notes
+        - The implementation separates the fix decision (fix/silentfix/none) from
+          the report decision (ignore/warn/exception) to allow combinations such
+          as "fix+warn" or "silentfix+ignore".
+        - When reporting an error block, messages are prefixed by
+          "Verification reported errors:" and suffixed with the note
+          "Note: astropy.io.fits uses zero-based indexing."
+
+Error aggregation: _ErrList
+--------------------------
+
+_ErrList extends list to represent nested verification errors produced by
+hierarchical checks (e.g., file -> HDU -> column -> cell). It preserves a
+nested structure and provides iteration and string conversion utilities.
+
+Constructor
+    _ErrList(val=(), unit="Element")
+        - val: initial iterable of items or nested _ErrList instances.
+        - unit: a string used as a header for nested levels when printing.
+
+Key methods
+    __str__()
+        Return a multi-line string of all error messages with indentation.
+
+    iter_lines(filter=None, shift=0)
+        Yield flattened lines from the nested structure as (fixable, message)
+        pairs with indentation according to nesting.
+
+        Parameters
+        - filter: callable or None
+            If provided, only yield items for which filter(item) is truthy.
+            Items yielded from nested _ErrList instances are produced after
+            top-level messages, and a header line of the form "<unit> N:"
+            is yielded when a nested group contains content.
+        - shift: int
+            Indentation shift (used internally for recursion).
+
+Behavioral notes
+    - Top-level simple messages are yielded first, then nested group headers
+      and their lines.
+    - When iterating, a boolean first element in an item tuple indicates
+      whether the condition was fixable (useful for "fix" vs "warn"/"ignore"
+      decisions).
+
+NotifierMixin
+-------------
+
+NotifierMixin provides a small listener/observer framework for internal use.
+It allows objects to register listeners with weak references and notify them of
+changes. All public methods are underscored to indicate internal use.
+
+Key behavior
+    - _add_listener(listener)
+        Register a listener (stored via weak reference). If no other strong
+        references exist to the listener, it will automatically be dropped.
+
+    - _notify(change_type, *args, **kwargs)
+        Notify all registered listeners by attempting to call
+        listener._update_<change_type>(*args, **kwargs) on each listener.
+        Listeners that do not implement the update method for the given
+        change type are ignored.
+
+Usage sketch
+    - A class that wants to inform other objects of changes mixes in
+      NotifierMixin and calls _notify("change_name", ...) when appropriate.
+    - A listener implements corresponding update methods such as
+      _update_change_name(self, *args, **kwargs) and registers via _add_listener().
+
+Examples
+--------
+- Verifying an object:
+  - Call obj.verify("warn") to collect issues and emit warnings.
+  - Call obj.verify("fix+warn") to fix fixable issues and warn about remaining
+    unfixable issues.
+  - Call obj.verify("silentfix+ignore") to silently apply fixes and suppress
+    all reporting.
+
+- Nested error reporting:
+  - Objects assemble _ErrList instances with tuples (fixable, message) and/or
+    nested _ErrList children to represent hierarchical errors. The top-level
+    verify() implementation flattens and formats these for output based on the
+    chosen verification option.
+
+Notes
+-----
+- The verification/reporting behavior and option names are compatible with
+  Astropy conventions; consult the broader Astropy documentation for the
+  canonical :ref:`astropy:verify` documentation for additional context.

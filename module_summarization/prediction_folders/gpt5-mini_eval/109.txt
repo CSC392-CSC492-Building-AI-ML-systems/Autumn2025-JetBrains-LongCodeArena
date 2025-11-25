@@ -1,0 +1,199 @@
+Async plans
+==========
+
+This module provides a small set of high-level asynchronous "plans" (generator-based
+experiment plans) used to orchestrate measurements. The plans yield message sequences
+that an engine (e.g., a Bluesky Run Engine) can consume. The primary plans documented
+here are:
+
+- count
+- list_scan
+- rel_list_scan
+
+Common concepts
+---------------
+
+All plans return a generator that yields plan messages. They build and attach a
+metadata dictionary (md) describing the run. The built metadata typically contains
+the following keys (combined with any user-supplied md):
+
+- detectors: list of detector names
+- motors: list of motor names (when applicable)
+- num_points: number of dataset points to be collected
+- num_intervals: number of intervals (usually num_points - 1)
+- plan_args: representation of plan arguments (for reproducibility)
+- plan_name: canonical plan name (e.g., "count", "list_scan")
+- plan_pattern: name of the plan pattern used (when applicable)
+- plan_pattern_module: module name that provides the plan pattern
+- plan_pattern_args: args passed to the plan pattern (when applicable)
+- hints: plotting / dimension hints (may include "dimensions")
+
+These plans rely on helper modules imported as:
+- preprocessors (bpp) — decorators for staging/running
+- plan_stubs (bps) — commonly used atomic plan fragments (per-shot/per-step)
+- plan_patterns — utilities to build multidimensional cyclers or patterns
+- utils.Msg — canonical message objects (used by plan fragments)
+
+Function: count
+---------------
+
+Signature:
+    count(detectors, num=1, delay=None, *, per_shot=None, md=None)
+
+Description:
+    Take one or more readings from detectors. The plan yields the messages
+    required to stage devices, trigger/read detectors, and collect data points.
+
+Parameters:
+- detectors: iterable of "readable" objects (detectors)
+- num: int or None, optional
+    Number of readings to take (default 1). If num is None, capture data until
+    the run is externally canceled.
+- delay: scalar or iterable, optional
+    Time delay(s) in seconds between successive readings. If an iterable,
+    it must contain at least num - 1 entries (otherwise iteration raises
+    ValueError).
+- per_shot: callable, optional
+    Hook to customize the inner loop that executes one shot; expected to be a
+    callable with signature similar to:
+        def f(detectors: Iterable[OphydObj]) -> Generator[Msg]: ...
+    If not provided, the plan uses the default one_shot stub from plan_stubs.
+- md: dict, optional
+    Additional metadata merged into the generated run metadata.
+
+Behavior and notes:
+- The plan builds _md with detectors, num_points, num_intervals and hints.
+- If an iterable delay is supplied, it is consumed to provide inter-shot wait times.
+- Uses decorators from preprocessors (bpp.stage_decorator, bpp.run_decorator)
+  to stage devices and open/close a run.
+- Yields messages via repeat(...) from plan_stubs to perform the requested shots.
+
+Example:
+.. code-block:: python
+
+    # Take 5 readings with a 1-second delay
+    RE(count([det1, det2], num=5, delay=1.0))
+
+Function: list_scan
+-------------------
+
+Signature:
+    list_scan(detectors, *args, per_step=None, md=None)
+
+Description:
+    Scan one or more settable devices (motors, temperature controllers, etc.)
+    over given lists of positions. When multiple motors are provided, this scan
+    performs a simultaneous step (inner product) across the provided lists of
+    positions (i.e., each step takes one entry from each list).
+
+Parameters:
+- detectors: iterable of "readable" objects
+- *args: sequence of pairs: motor, [point1, point2, ...]
+    For each dimension supply the motor followed by its list of target positions.
+    All provided position lists must have the same length.
+- per_step: callable, optional
+    Hook for customizing the action at each step. Expected signature:
+        f(detectors, motor, step) -> plan (a generator)
+    If not provided, the default per-step behavior from plan_stubs is used.
+- md: dict, optional
+    Additional metadata merged into the generated run metadata.
+
+Behavior and notes:
+- Validates that args contains an even number of elements (motor, positions pairs).
+  If not, raises ValueError.
+- Validates that all provided position lists have the same length. If not, raises
+  ValueError (with a dict showing the lengths for each motor).
+- Builds metadata (_md) with detectors, motors, num_points, num_intervals,
+  plan_name='list_scan', plan_pattern='inner_list_product', and related args.
+- Collects motor hint fields (motor.hints.fields) and sets default plot dimensions
+  in md['hints'] when available.
+- Internally constructs a cycler/plan pattern via plan_patterns.inner_list_product(args)
+  and delegates execution to scan_nd(detectors, full_cycler, ...).
+
+Example:
+.. code-block:: python
+
+    # Two-axis simultaneous list scan (each list must be same length)
+    RE(list_scan([det], motor_x, [0, 1, 2], motor_y, [10, 11, 12]))
+
+Function: rel_list_scan
+-----------------------
+
+Signature:
+    rel_list_scan(detectors, *args, per_step=None, md=None)
+
+Description:
+    Like list_scan, but the positions provided for each motor are interpreted
+    as offsets relative to the current position of that motor. Each motor is
+    moved to (current_position + offset) for each step in the scan.
+
+Parameters:
+- detectors: iterable of "readable" objects
+- *args: sequence of pairs: motor, [offset1, offset2, ...]
+    Offsets are applied to the motor's current position. All position lists must
+    have the same length.
+- per_step: callable, optional
+    Hook for customizing the action at each step (see list_scan).
+- md: dict, optional
+    Additional metadata merged into the generated run metadata.
+
+Behavior and notes:
+- Intended to mirror list_scan behavior but in relative coordinates.
+- The implementation is noted as TODO in the provided code; callers should
+  expect the same validations and metadata structure as list_scan when implemented.
+
+Common errors
+-------------
+
+- ValueError: list_scan raises ValueError if
+  - the args list length is not even (no positions list for a motor), or
+  - not all position lists have the same length.
+- ValueError: count will raise if a supplied iterable delay has insufficient
+  entries relative to num (num - 1 needed).
+
+Implementation pointers (what the code uses)
+-------------------------------------------
+
+- The plans use:
+  - bpp.stage_decorator to stage devices before running the inner generator.
+  - bpp.run_decorator to open/close runs and attach metadata.
+  - bps.repeat, bps.one_shot, and other plan_stubs for composing atomic message
+    sequences.
+  - plan_patterns.inner_list_product to convert lists-of-points into a full
+    cycler (used with scan_nd).
+- The produced metadata is intended for downstream consumers (plotters, databases).
+- The plans return generators that should be driven by an executor/RunEngine.
+
+See also
+--------
+
+- scan_nd (the ND scanning primitive used by list_scan)
+- plan_patterns (for cycler/plan-pattern builders)
+- preprocessors (bpp) and plan_stubs (bps) for reusable plan building blocks
+
+Examples summary
+----------------
+
+.. code-block:: python
+
+    # Simple count: one shot with two detectors
+    RE(count([det1, det2]))
+
+    # Repeated count with per-shot customization and iterable delays
+    delays = [0.5, 1.0, 0.5]
+    RE(count([det], num=4, delay=delays, per_shot=my_per_shot))
+
+    # List scan: simultaneous stepping across two motors
+    RE(list_scan([det], motor_x, [0.0, 1.0, 2.0], motor_y, [10.0, 11.0, 12.0]))
+
+    # Relative list scan (offsets relative to current positions)
+    RE(rel_list_scan([det], motor_x, [-1, 0, 1], motor_y, [0, 5, 10]))
+
+Notes
+-----
+
+- These plans are small composable building blocks that expect a typical
+  Bluesky-like RunEngine to execute the yielded messages.
+- The rel_list_scan implementation is marked TODO in the provided source;
+  consult the codebase for the canonical implementation or use list_scan with
+  computed absolute positions as a workaround.

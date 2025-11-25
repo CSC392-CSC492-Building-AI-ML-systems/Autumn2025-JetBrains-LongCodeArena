@@ -1,0 +1,73 @@
+File Objects
+============
+
+The `ObjectID` class represents an HDF5 identifier within the h5py library, which provides a Python interface to the HDF5 library. This class serves as a base for managing HDF5 objects by encapsulating their identifiers and ensuring proper handling of their lifecycle and thread safety.
+
+Overview
+--------
+
+HDF5 identifiers are integral to managing objects such as files, groups, and datasets in the HDF5 format. However, due to the nature of the HDF5 library and its interaction with Python, special care must be taken to avoid issues such as identifier reuse, stale references, and thread safety problems.
+
+The `ObjectID` class and its associated mechanisms address these challenges by:
+
+- Maintaining a registry of all live HDF5 object identifiers to track their validity.
+- Implementing locking to serialize access to the low-level HDF5 API, preventing concurrent access issues.
+- Providing mechanisms to detect and invalidate "zombie" identifiers that may arise when HDF5 reuses identifier values.
+- Managing reference counting and cleanup of HDF5 objects to avoid resource leaks.
+
+Locking Mechanism
+-----------------
+
+To ensure thread safety, h5py uses a recursive lock (`FastRLock`) to serialize all access to the low-level HDF5 API. This lock, referred to as `phil`, prevents multiple threads from simultaneously calling HDF5 routines, which could otherwise lead to race conditions or corrupted state.
+
+The locking decorator `with_phil` is used to wrap functions that interact with the HDF5 API, ensuring that the lock is acquired before the function executes and released afterward.
+
+Registry of Object Identifiers
+------------------------------
+
+HDF5 1.8 and later versions may reuse identifier values immediately after they are closed. This behavior can cause "zombie" identifiers—Python objects that still hold an identifier that now refers to a different HDF5 object or is invalid.
+
+To manage this, h5py maintains a registry mapping Python object IDs to weak references of `ObjectID` instances. This registry allows h5py to:
+
+- Track all live HDF5 object wrappers.
+- Detect when identifiers become invalid due to external events (e.g., closing a file with `H5F_CLOSE_STRONG`).
+- Invalidate stale identifiers by setting their `id` attribute to zero, preventing accidental use of invalid or reused identifiers.
+
+The function `nonlocal_close()` is responsible for scanning the registry and invalidating any dead or stale identifiers. It is called explicitly during file closure operations.
+
+The `print_reg()` function can be used for debugging purposes to print the current state of the registry, including counts of live `FileID` and `GroupID` objects.
+
+The ObjectID Class
+------------------
+
+The `ObjectID` class encapsulates an HDF5 identifier (`hid_t`) and provides properties and methods to interact with it safely.
+
+Attributes:
+
+- `id` (readonly): The HDF5 identifier associated with the object.
+- `locked` (public int): Indicates whether the object is locked and cannot be closed.
+- `_hash`: Internal attribute used for hashing.
+- `_pyid`: The Python object ID of the instance, used as a key in the registry.
+
+Properties:
+
+- `fileno`: Returns a tuple representing the file number associated with the HDF5 object. This is obtained by querying the HDF5 object info.
+- `valid`: Returns a boolean indicating whether the HDF5 identifier is currently valid.
+
+Lifecycle Management:
+
+- `__cinit__(self, id_)`: Constructor that initializes the object with a given HDF5 identifier, registers it in the global registry, and sets the locked state to false.
+- `__dealloc__(self)`: Destructor that unregisters the object from the registry and decrements the HDF5 reference count if the object is not locked and still valid. Warnings are issued if reference counting issues are detected.
+
+Usage Notes
+-----------
+
+- The locking mechanism ensures that only one thread at a time can interact with the low-level HDF5 API, which is critical for maintaining consistency and preventing race conditions.
+- The registry and `nonlocal_close()` function help prevent the use of invalid or stale identifiers, which can otherwise lead to subtle bugs or data corruption.
+- Objects marked as `locked` are considered immortal and are typically provided by the HDF5 library itself (e.g., property list classes). These objects are not closed automatically.
+- Proper management of HDF5 identifiers and their lifecycle is essential for robust and safe use of the h5py library, especially in multithreaded environments or when used alongside other HDF5-based libraries such as PyTables or NetCDF4.
+
+Summary
+-------
+
+The `ObjectID` class and its supporting infrastructure form the foundation for managing HDF5 objects in h5py. By combining identifier tracking, thread-safe locking, and careful lifecycle management, h5py ensures that HDF5 objects are used safely and efficiently within Python applications.

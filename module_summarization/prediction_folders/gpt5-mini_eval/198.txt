@@ -1,0 +1,112 @@
+Nearest Neighbors
+=================
+
+Overview
+--------
+Nearest-neighbor search finds the points in a dataset that are closest to a query point (or points)
+according to some distance metric. Tree-based spatial indexes partition the dataset so that large
+regions can be pruned during search, reducing the number of distance evaluations compared to a
+naive linear scan. The implementation documented here focuses on the Ball Tree variant.
+
+Ball Tree
+---------
+A Ball Tree is a binary space-partitioning data structure where each node stores:
+
+- a centroid (center) for the points contained in the node,
+- a radius that bounds the node (every point in the node lies within radius of the centroid),
+- an index range into a global index array that lists the points contained in the node.
+
+The Ball Tree implementation inherits from a generic BinaryTree and specializes it by using
+centroid-and-radius node bounds. Two compiled variants exist for numeric precision:
+
+- BallTree64 — uses 64-bit floating point (np.float64)
+- BallTree32 — uses 32-bit floating point (np.float32)
+
+These concrete classes are aliases of the parameterized implementation for the respective dtype.
+
+Valid Metrics
+-------------
+The Ball Tree supports a number of distance metrics. Implementations of these metrics may
+provide a "reduced distance" (an alternative quantity cheaper to compute that preserves
+relative ordering with respect to the true distance). Supported metric types include (names
+listed without dtype suffix):
+
+- BrayCurtisDistance
+- CanberraDistance
+- ChebyshevDistance
+- DiceDistance
+- EuclideanDistance
+- HammingDistance
+- HaversineDistance
+- JaccardDistance
+- MahalanobisDistance
+- ManhattanDistance
+- MinkowskiDistance
+- PyFuncDistance
+- RogersTanimotoDistance
+- RussellRaoDistance
+- SEuclideanDistance
+- SokalMichenerDistance
+- SokalSneathDistance
+- WMinkowskiDistance
+
+Implementation details
+----------------------
+Node allocation and storage
+- Node bounds are stored in a single contiguous array with shape (1, n_nodes, n_features)
+  and dtype matching the tree variant (float32 or float64). The centroid for node i is
+  located at node_bounds[0, i, :].
+
+Node initialization (init_node)
+- Centroid computation:
+  - If sample weights are provided, the centroid is the weighted mean of points in the node.
+  - If no sample weights, the centroid is the arithmetic mean.
+- Radius computation:
+  - The node radius is computed as the maximal reduced-distance from the centroid to any
+    point in the node. The stored node radius is converted from reduced distance to true
+    distance via the metric's _rdist_to_dist conversion when necessary.
+- Node metadata:
+  - node_data[i_node].radius is set to the node's radius (in true-distance units).
+  - node_data[i_node].idx_start and idx_end define the half-open index range of points
+    belonging to the node in the global index array.
+
+Distance-based pruning helpers
+- min_dist(tree, i_node, pt)
+  - Returns the minimum possible distance between the query point pt and any point in node i_node.
+  - Computed as max(0, dist(pt, centroid) - radius). This lower bound is used to prune nodes
+    that cannot contain nearer neighbors than the current best candidates.
+
+- max_dist(tree, i_node, pt)
+  - Returns an upper bound on the distance between pt and any point in the node:
+    dist(pt, centroid) + radius.
+
+- Reduced distance
+  - For metrics that provide reduced distances (e.g., squared Euclidean), internal computations
+    (like radius determination) use the reduced form for efficiency; conversions to the true
+    distance are applied where required for correctness.
+
+Usage notes
+-----------
+- The Ball Tree implementation is optimized for use with the supported metrics and for
+  the two floating-point precisions provided (float32/float64).
+- If sample weights are supplied they affect node centroids (weighted means) and thus influence
+  both tree construction and search behavior.
+- The stored node radius is always expressed in true-distance units (not reduced-distance units),
+  after conversion from the reduced-distance used during internal computations.
+
+API classes
+-----------
+- BallTree
+  - Generic Ball Tree interface (concrete implementations are provided per dtype).
+- BallTree64
+  - Ball Tree specialized for np.float64 data.
+- BallTree32
+  - Ball Tree specialized for np.float32 data.
+
+Notes
+-----
+This documentation summarizes the design and behavior of the Ball Tree nearest-neighbor
+structure and its key internal operations (centroid/radius node representation, reduced-distance
+optimizations, and pruning bounds). For higher-level user APIs (fit/query parameters, neighbor
+ordering, and exact method signatures), refer to the corresponding public neighbor-search
+wrappers that utilize this Ball Tree implementation.

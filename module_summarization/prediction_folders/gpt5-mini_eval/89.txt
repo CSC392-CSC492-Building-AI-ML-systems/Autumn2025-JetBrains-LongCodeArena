@@ -1,0 +1,114 @@
+Augmentations
+=============
+This module provides a standard set of image augmentations used by AutoAugment-style policies
+(e.g. ImageNet AutoAugment, RandAugment, TrivialAugmentWide). The augmentations are implemented
+with NVIDIA DALI operators and are exposed as augmentation definitions using the
+`@augmentation` decorator from nvidia.dali.auto_aug.core.
+
+Overview of the augmentation decorator
+--------------------------------------
+- The decorator handles computation of the transformation parameter from a magnitude bin.
+- Decorated augmentations expect:
+  - a single positional argument: the batch (images)
+  - keyword arguments `magnitude_bin` and `num_magnitude_bins` instead of the final parameter
+- The parameter is computed as if by:
+  magnitudes = linspace(mag_range[0], mag_range[1], num_magnitude_bins)
+  parameter = mag_to_param(magnitudes[magnitude_bin] * ((-1) ** random_sign))
+- Common decorator options used in this module:
+  - mag_range: tuple specifying the scalar magnitude range used to build the discrete bins
+  - randomly_negate: whether a random sign is applied to the magnitude
+  - mag_to_param: function mapping a magnitude scalar to the augmentation operator parameter
+  - name: override the augmentation name (used for duplicate / variant registrations)
+- Augmentations can be customized via the augmentation object, e.g.:
+  my_shear_x = shear_x.augmentation(mag_range=(0, 0.5))
+
+DALI operators used
+-------------------
+The implementations rely on DALI functions, e.g.:
+- fn.transforms.shear, fn.transforms.translation
+- fn.warp_affine, fn.rotate
+- fn.brightness, fn.reductions.mean, fn.reductions.sum, fn.cast_like
+- types.Constant for constant tensors
+
+Augmentations provided
+----------------------
+
+warp_x_param / warp_y_param
+  - Helpers that map a scalar magnitude to a 2D warp parameter:
+    - warp_x_param(m) -> [m, 0]
+    - warp_y_param(m) -> [0, m]
+
+shear_x
+  - mag_range=(0, 0.3), randomly_negate=True, mag_to_param=warp_x_param
+  - Signature (as invoked through decorator): shear_x(data, magnitude_bin, num_magnitude_bins, fill_value=128, interp_type=None)
+  - Behavior: builds a shear transform along X and applies fn.warp_affine
+  - Defaults: fill_value=128, interp_type=None
+
+shear_y
+  - mag_range=(0, 0.3), randomly_negate=True, mag_to_param=warp_y_param
+  - Signature: shear_y(data, magnitude_bin, num_magnitude_bins, fill_value=128, interp_type=None)
+  - Behavior: builds a shear transform along Y and applies fn.warp_affine
+  - Defaults: fill_value=128, interp_type=None
+
+translate_x
+  - Relative variant:
+    - mag_range=(0.0, 1.0), randomly_negate=True, mag_to_param=warp_x_param
+    - Signature: translate_x(data, magnitude_bin, num_magnitude_bins, shape, fill_value=128, interp_type=None)
+    - Behavior: interprets magnitude as fraction of image width (offset = rel_offset * shape[1]) and applies fn.warp_affine
+  - Absolute variant (registered under the same name "translate_x"):
+    - mag_range=(0, 250), randomly_negate=True, mag_to_param=warp_x_param, name="translate_x"
+    - Signature: translate_x_no_shape(data, magnitude_bin, num_magnitude_bins, fill_value=128, interp_type=None)
+    - Behavior: accepts an absolute pixel offset and applies fn.warp_affine
+  - Defaults: fill_value=128, interp_type=None
+
+translate_y
+  - Relative variant:
+    - mag_range=(0.0, 1.0), randomly_negate=True, mag_to_param=warp_y_param
+    - Signature: translate_y(data, magnitude_bin, num_magnitude_bins, shape, fill_value=128, interp_type=None)
+    - Behavior: interprets magnitude as fraction of image height (offset = rel_offset * shape[0]) and applies fn.warp_affine
+  - Absolute variant (registered under the same name "translate_y"):
+    - mag_range=(0, 250), randomly_negate=True, mag_to_param=warp_y_param, name="translate_y"
+    - Signature: translate_y_no_shape(data, magnitude_bin, num_magnitude_bins, fill_value=128, interp_type=None)
+    - Behavior: accepts an absolute pixel offset and applies fn.warp_affine
+  - Defaults: fill_value=128, interp_type=None
+
+rotate
+  - mag_range=(0, 30), randomly_negate=True
+  - Signature: rotate(data, magnitude_bin, num_magnitude_bins, fill_value=128, interp_type=None, rotate_keep_size=True)
+  - Behavior: rotates the image by the computed angle using fn.rotate
+  - Defaults: fill_value=128, interp_type=None, rotate_keep_size=True
+
+shift_enhance_range
+  - Helper for enhancement operations:
+    - Returns 1 + magnitude
+    - Rationale: enhancement ops (brightness/contrast/color/sharpness) use [0,2] range with neutral at 1.
+      We express magnitudes in [0,1] and shift by +1 so that magnitudes farther from 1 produce stronger effect.
+
+brightness
+  - mag_range=(0, 0.9), randomly_negate=True, mag_to_param=shift_enhance_range
+  - Signature: brightness(data, magnitude_bin, num_magnitude_bins)
+  - Behavior: applies fn.brightness with parameter = 1 +/- magnitude (as computed via shift_enhance_range)
+
+contrast
+  - mag_range=(0, 0.9), randomly_negate=True, mag_to_param=shift_enhance_range
+  - Signature: contrast(data, magnitude_bin, num_magnitude_bins)
+  - Behavior:
+    - Implements a contrast enhancement equivalent to PIL's approach using a channel-weighted mean
+      as the contrast center: weights [0.299, 0.587, 0.114].
+    - Computes the mean over spatial dimensions, forms a per-channel center, and applies:
+      center + (data - center) * parameter
+    - Uses fn.reductions.mean and fn.reductions.sum and fn.cast_like to match input dtype/location.
+
+Usage examples
+--------------
+- Applying an augmentation to a batch (decorator computes parameter):
+  shear_x(batch, magnitude_bin=5, num_magnitude_bins=10)
+- Creating a customized augmentation variant:
+  my_shear_x = shear_x.augmentation(mag_range=(0, 0.5))
+
+Notes
+-----
+- All implementations use DALI operators and are compatible with DALI pipelines.
+- Default fill values are 128 unless otherwise noted.
+- The decorator machinery exposes metadata (mag_range, mag_to_param, etc.) and supports creating adjusted variants
+  through the `.augmentation(...)` helper on each decorated function.
