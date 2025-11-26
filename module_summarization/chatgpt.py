@@ -8,11 +8,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from openai import OpenAI
 from utils.files_utils import load_config
 from utils.api_generation import gpt_generation
-from utils.context_utils import collect_good_context, trim_context
+from utils.context_utils import build_context, trim_context # collect_good_context, trim_context
 from tqdm.auto import tqdm
 
-def prepare_code_context(row, max_context_toks, tokenizer):
-    context = collect_good_context(row)
+def prepare_code_context(row, max_context_toks, tokenizer, context_strategy, context_kwargs):
+    context = build_context(row, strategy=context_strategy, **context_kwargs)
     if max_context_toks is None:
         return context
     return trim_context(context, tokenizer, max_context_toks)
@@ -40,6 +40,9 @@ def generate_all(config, client):
     if not os.path.exists(f"{save_dir}"):
         os.makedirs(f"{save_dir}")
 
+    context_strategy = config.get("context_strategy", "precomputed")
+    context_kwargs = config.get("context_kwargs", {})
+
     # Preparing dataset
     logging.info("Downloading dataset")
     dataset = load_dataset("JetBrains-Research/lca-module-summarization",
@@ -53,7 +56,7 @@ def generate_all(config, client):
     for row_idx, row in tqdm(enumerate(dataset), total=len(dataset), 
                              position=0, leave=True, 
                              desc="Generation"):
-        code_context = prepare_code_context(row, max_context_toks, tokenizer)
+        code_context = prepare_code_context(row, max_context_toks, tokenizer, context_strategy, context_kwargs)
         generate_res = generate_one(row, code_context, client, model_name)
 
         with open(f"{save_dir}/{row_idx}.txt", 'w', encoding='utf-8') as f:
