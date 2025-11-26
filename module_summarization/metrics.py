@@ -8,7 +8,8 @@ from datasets import load_dataset
 from utils.context_utils import collect_good_context, trim_context
 from utils.files_utils import load_config
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from utils.scorer import OptionsScoringModel
+# from utils.scorer import OptionsScoringModel
+from utils.openai_scorer import OptionsScoringModel
 from bert_score import score as bert_score
 
 
@@ -40,7 +41,7 @@ def score_one_model(scorer, dataset, direct, max_cont_len, tokenizer, use_pbar=F
     golds, preds, intents, codes = [], [], [], []
     
     for idx in range(len(dataset)):
-        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8') as f:
+        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8', errors='ignore') as f:
             pred = f.read()
         gld = dataset[idx]['target_text']
         golds.append(gld)
@@ -86,7 +87,7 @@ def get_bert_scores(dataset, direct, model_name):
     golds, preds = [], []
 
     for idx in range(len(dataset)):
-        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8') as f:
+        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8', errors='ignore') as f:
             pred = f.read()
         gld = dataset[idx]['target_text']
         golds.append(gld)
@@ -123,11 +124,13 @@ if __name__ == '__main__':
     hf_tokenizer_checkpoint = config.get("hf_tokenizer_checkpoint")
     max_context_toks = config.get("max_context_toks", None)
     
+    bert_model_name = config.get("bert_model_name", "microsoft/deberta-large-mnli")
+
     tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_checkpoint, 
                                               token=hf_api_key)
     
 
-    scorer = OptionsScoringModel(model_name)
+    scorer = OptionsScoringModel(api_key, model_name)
     dataset = load_dataset("JetBrains-Research/lca-module-summarization",
                                token=hf_api_key)['test']
     
@@ -153,7 +156,7 @@ if __name__ == '__main__':
                 )
                 
                 mean_bert_score = np.mean(
-                    get_bert_scores(dataset, save_dir, model_name)
+                    get_bert_scores(dataset, save_dir, bert_model_name)
                 )
                 
                 path2metric[save_dir] = {"model_score": model_metric, "bert_score": mean_bert_score}
