@@ -1,0 +1,83 @@
+MigrateOperation and Constraint Operations
+=========================================
+
+Overview
+--------
+
+This module defines the core operation objects used to represent and manipulate schema migration actions,
+with a focus on operations related to constraints. It provides a base class for migration operations and
+concrete implementations for adding and dropping constraints, along with support for diff generation and
+operation reversal.
+
+Base class
+----------
+
+MigrateOperation
+- Purpose: Base class for migration command and organization objects used by the autogenerate/migration
+  framework.
+- API:
+  - info (memoized_property): A dictionary for storing arbitrary information associated with the operation.
+  - _mutations: A frozenset of Rewriter objects related to mutation tracking.
+  - reverse(): Return a corresponding inverse operation. Subclasses must implement.
+  - to_diff_tuple(): Produce a tuple representation suitable for diff output. Subclasses must implement.
+
+Constraint-related operations
+-----------------------------
+
+AddConstraintOp
+- Purpose: Represent an operation that adds a constraint.
+- Key attributes:
+  - add_constraint_ops: A dispatcher used to select concrete implementations based on constraint type.
+  - constraint_type (property): Abstract; should return the type of the constraint (e.g., "foreignkey", "unique", etc.).
+- API:
+  - register_add_constraint(type_: str): Decorator to register a concrete AddConstraintOp subclass for a given constraint type.
+  - from_constraint(constraint: Constraint) -> AddConstraintOp: Factory that dispatches based on constraint.__visit_name__ to create the appropriate subclass instance.
+  - to_constraint(migration_context=None) -> Constraint: Abstract method to create the actual Constraint object from the operation.
+  - reverse() -> DropConstraintOp: Return the inverse operation as a DropConstraintOp produced from the constraint.
+  - to_diff_tuple() -> Tuple[str, Constraint]: Diff representation, e.g., ("add_constraint", constraint).
+
+DropConstraintOp
+- Decorators: Registered with:
+  - Operations.register_operation("drop_constraint")
+  - BatchOperations.register_operation("drop_constraint", "batch_drop_constraint")
+- Purpose: Represent an operation that drops a constraint.
+- Initialization:
+  - __init__(constraint_name, table_name, type_=None, *, schema=None, _reverse=None)
+    - constraint_name: Optional name of the constraint (may be None for some cases).
+    - table_name: Name of the table owning the constraint.
+    - type_: Optional constraint type (e.g., "foreignkey", "primary", "unique", "check").
+    - schema: Optional schema name for operation scoping.
+    - _reverse: Optional AddConstraintOp used for reverse construction.
+- API:
+  - reverse() -> AddConstraintOp: Produce the corresponding AddConstraintOp for the constraint.
+  - to_diff_tuple() -> Tuple[str, SchemaItem]: Diff representation; special handling for foreign keys, e.g.:
+    - ("remove_fk", constraint)
+    - ("remove_constraint", constraint)
+  - from_constraint(constraint: Constraint) -> DropConstraintOp: Create a DropConstraintOp that reflects the given Constraint, including a reverse AddConstraintOp.
+    - Maps constraint types (unique, foreign key, primary key, check) to internal type_ strings.
+    - Determines the constraint's table and optional schema for accurate representation.
+  - to_constraint() -> Constraint: Reconstructs the original Constraint from the reverse operation, applying stored names and table/schema information. Raises ValueError if the original constraint is not present.
+- Convenience methods:
+  - drop_constraint(operations, constraint_name, table_name, type_=None, *, schema=None) -> None: Create and invoke a DropConstraintOp.
+  - batch_drop_constraint(operations, constraint_name, type_=None) -> None: Batch form that omits table_name and schema arguments, suitable for batch migration contexts.
+
+Notes
+------
+
+- The module uses a Dispatcher to support multiple constraint subtypes. Concrete AddConstraintOp implementations are registered at runtime via the register_add_constraint decorator.
+- The to_diff_tuple method produces operation tuples suitable for differencing and output in migration scripts.
+- Reverse operations enable straightforward generation of inverse migrations, aiding round-trip migrations.
+
+Usage examples
+--------------
+
+- Dropping a foreign key constraint:
+  - DropConstraintOp.drop_constraint(ops, constraint_name="fk_user_profile", table_name="user_profile", type_="foreignkey")
+
+- Dropping a constraint in batch mode:
+  - DropConstraintOp.batch_drop_constraint(batch_ops, constraint_name="fk_user_profile", type_="foreignkey")
+
+- Creating a new constraint from a constraint object:
+  - AddConstraintOp.from_constraint(constraint)  (the concrete subclass is chosen based on constraint.__visit_name__)
+
+This module forms the core of the constraint-related operation system, enabling clear representation, reversal, and diff generation for migration workflows.

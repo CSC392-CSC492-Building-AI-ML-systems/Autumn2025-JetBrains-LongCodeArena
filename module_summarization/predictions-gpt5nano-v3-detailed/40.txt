@@ -1,0 +1,189 @@
+# How to generate Pydantic Models from Tortoise Models
+
+This module provides utilities to automatically generate Pydantic models from Tortoise ORM models. Generated models can be used for input validation, serialization, and API schemas, while keeping a clean separation between your ORM layer and your API layer.
+
+## Overview
+
+- The primary entry point is `pydantic_model_creator`, which creates a Pydantic model class that mirrors a given Tortoise model.
+- You can customize which fields are included or excluded, add computed fields, and control recursion to prevent infinite expansion in related graphs.
+- A nested configuration class `PydanticMeta` on your Tortoise model lets you declare defaults for inclusion, exclusion, computed fields, and more.
+- There is support for back-referenced relations, recursion limits, and sorting of fields.
+- The module also exposes helpers and types (e.g., `PydanticModel`, `PydanticListModel`) to work with the generated models.
+
+## Key Concepts
+
+- PydanticModel: The base Pydantic model type used for generated schemas.
+- PydanticListModel: A helper to represent a list schema for a given Pydantic model.
+- PydanticMeta: Optional configuration on the Tortoise model to influence Pydantic model generation.
+- pydantic_model_creator(cls, …): Core function that constructs a Pydantic model from a Tortoise model.
+
+## PydanticMeta: Configuration for Model Generation
+
+Declare a nested `PydanticMeta` class on your Tortoise model to customize the generated Pydantic model.
+
+- include: Tuple[str, …]
+  - Only include fields whose names appear in this list. If empty, all non-excluded fields are included.
+- exclude: Tuple[str, …]
+  - Exclude these fields from the Pydantic model.
+- computed: Tuple[str, …]
+  - Names of computed properties/methods on the model to include as read-only fields.
+- backward_relations: bool
+  - Include backward relations (reverse relations) in the schema. Disabled by setting to `False` (may reduce size/complexity).
+- max_recursion: int
+  - Maximum allowed recursion depth for related objects.
+- allow_cycles: bool
+  - Allow cycles in the recursion (can lead to very large graphs; use with care).
+- exclude_raw_fields: bool
+  - Exclude raw fields (often IDs) of related fields unless explicitly included.
+- sort_alphabetically: bool
+  - Sort fields alphabetically in the generated schema. If `False`, preserve declaration order.
+
+Example:
+```python
+class User(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=100)
+    password = fields.CharField(max_length=128)
+    posts: fields.ReverseRelation["Post"]
+
+    class PydanticMeta:
+        exclude = ("password",)
+        computed = ("full_name",)
+        exclude_raw_fields = True
+        sort_alphabetically = False
+```
+
+## Core API
+
+### pydantic_model_creator
+Generates a Pydantic model subclass from a Tortoise model.
+
+Signature (simplified):
+- cls: Type[Model] (the Tortoise model)
+- name: Optional[str] (explicit Pydantic model name)
+- exclude: Tuple[str, ...]
+- include: Tuple[str, ...]
+- computed: Tuple[str, ...]
+- allow_cycles: Optional[bool]
+- sort_alphabetically: Optional[bool]
+- _stack: tuple (internal, used for recursion tracking)
+- exclude_readonly: bool
+
+Behavior:
+- Creates a Pydantic model class that mirrors the Tortoise model according to the provided options.
+- If non-default options are supplied (e.g., non-empty `exclude`, `include`, `computed`, or custom sorting), the generated class name is hashed to ensure uniqueness and avoid collisions.
+- Respects `PydanticMeta` defaults if present on the Tortoise model.
+- Uses internal recursion guards to prevent infinite expansion when models reference themselves or each other.
+
+Return:
+- A Type[PydanticModel]: The generated Pydantic model class.
+
+Example:
+```python
+from tortoise.contrib.pydantic import pydantic_model_creator
+
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=50)
+    password = fields.CharField(max_length=128)
+
+    class PydanticMeta:
+        exclude = ("password",)
+
+UserPydantic = pydantic_model_creator(User, name="UserPydantic")
+```
+
+### _pydantic_recursion_protector
+Internal helper that guards against cyclic recursion when constructing nested Pydantic models.
+
+Parameters:
+- cls: Type[Model]
+- stack: tuple (recursion stack)
+- exclude, include, computed: Tuples for field customization
+- name: Optional[str]
+- allow_cycles: bool
+- sort_alphabetically: Optional[bool]
+
+Return:
+- Optional[Type[PydanticModel]]: The generated Pydantic model type or `None` if recursion limits are exceeded or cycles are not allowed.
+
+Note:
+- This function is intended for internal use; normal users should rely on `pydantic_model_creator`.
+
+## How It Works (High-Level)
+
+- The generator inspects the Tortoise model and builds a corresponding Pydantic model.
+- It applies `PydanticMeta` settings if present on the model.
+- It resolves fields, relations, and any computed attributes.
+- Recursion and cycles are guarded to avoid infinite graphs.
+- The result is a Pydantic model (or models) suitable for serialization, validation, and API schemas.
+
+## Usage Scenarios
+
+- Expose a clean API schema for a REST/GraphQL endpoint that mirrors your ORM models without leaking internal fields.
+- Generate schemas for nested objects while controlling depth with `max_recursion` and `exclude_raw_fields`.
+- Use computed properties in your responses by listing them in `computed`.
+- Generate a versioned or specialized schema by creating multiple variants with different `exclude/include/computed` combinations.
+
+## Edge Cases and Considerations
+
+- Cyclic graphs: By default, cycles are not allowed. If you have self-referential or mutually referential models, use `allow_cycles=True` and/or adjust `max_recursion`.
+- Large relation graphs: Enable `backward_relations=False` or adjust `exclude_raw_fields` to limit the amount of data produced.
+- Field ordering: By default, field order follows declaration order plus reverse-relations order. Use `sort_alphabetically=True` to sort fields alphabetically.
+- Hashing of model names: When non-default options are used, the generated Pydantic model name includes a hash to prevent collisions. This is transparent to the developer.
+
+## Usage Examples
+
+Basic usage:
+```python
+from tortoise.models import Model
+from tortoise import fields
+from tortoise.contrib.pydantic import pydantic_model_creator
+
+class Author(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=100)
+
+# Default: all fields except none
+AuthorPydantic = pydantic_model_creator(Author)
+
+# Exclude sensitive data
+AuthorPublicPydantic = pydantic_model_creator(Author, exclude=("id",))
+
+# Include a computed field (e.g., a property on the model)
+AuthorWithComputed = pydantic_model_creator(
+    Author, computed=("full_name",)
+)
+```
+
+Advanced usage with PydanticMeta:
+```python
+class Post(Model):
+    id = fields.IntField(pk=True)
+    title = fields.CharField(max_length=200)
+    content = fields.TextField()
+    author = fields.ForeignKeyField("models.Author", related_name="posts")
+
+    class PydanticMeta:
+        exclude = ("content",)
+        exclude_raw_fields = True
+        max_recursion = 2
+        sort_alphabetically = True
+
+PostPydantic = pydantic_model_creator(Post)
+```
+
+List wrapper for responses:
+```python
+from tortoise.contrib.pydantic import PydanticListModel
+
+# Create a Pydantic model for a single Post
+PostPydantic = pydantic_model_creator(Post)
+
+# Create a list schema for a list of PostPydantic models
+PostListPydantic = PydanticListModel(PostPydantic)
+```
+
+## Conclusion
+
+The pydantic integration provides a flexible, configurable way to generate Pydantic schemas from Tortoise models. By leveraging `PydanticMeta` and the `pydantic_model_creator` function, you can tailor your API schemas to your needs, manage recursion and cycles, and keep a clean separation between your ORM and API layers.

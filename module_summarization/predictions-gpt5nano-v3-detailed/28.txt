@@ -1,0 +1,145 @@
+# w_multi_west: Multi-Simulation WestPA Combiner with Reweighting
+
+Introduction
+- w_multi_west is a WESTPA tool designed to combine multiple WESTPA simulations while accounting for reweighting.
+- It builds a consolidated output (default multi.h5) from multiple WEST HDF5 runs, handling auxiliary datasets and optional ibstates reweighting.
+
+Overview
+- Core purpose: Merge multiple WESTPA runs into a single composite result set, applying consistent reweighting and data alignment.
+- Built on top of WESTMultiTool/WESTTool, leveraging WESTPA’s HDF5 data management and progress reporting.
+- Key capabilities include:
+  - Opening and inspecting multiple WEST H5 files
+  - Optional reweighting and ibstates handling
+  - Combining auxiliary datasets (selectively or all)
+  - Creating a consolidated output HDF5 with creator metadata
+
+Key Components and Relationships
+- get_bin_mapper(we_h5file, hashval)
+  - Helper that retrieves a bin mapper for a given hash from the we_h5file’s /bin_topologies group.
+  - Unpickles the mapper and returns it, enabling binning information to be reused during processing.
+  - Raises KeyError if the binning data or specific hash is unavailable.
+- create_idtype_array(input_array)
+  - Converts an input array to the istate_dtype while preserving existing fields.
+  - Resets basis_auxref to empty bytes, ensuring consistency for merged data.
+- WMultiWest (class)
+  - Subclass of WESTMultiTool; main entry point for multi-simulation merging.
+  - Core attributes:
+    - prog: command name
+    - description: usage description
+    - west: path to the primary WEST H5 file (per-simulation, within each run)
+    - output_file: name of the consolidated output H5 file
+    - aux / auxall: optional auxiliary datasets to combine
+    - reweight: flag indicating whether to apply reweighting
+    - ibstates: flag indicating whether ibstates should be combined
+    - westH5: mapping of west paths to opened H5 files
+  - Core methods:
+    - add_args(parser)
+      - Defines CLI options:
+        - -o/--output-file: output H5 (default: multi.h5)
+        - -W/--west/--WEST_H5FILE: path/name of the main H5 inside each simulation (default: west.h5)
+        - -a/--aux: names of additional auxiliary datasets to be combined
+        - -aa/--auxall: combine all auxiliary datasets
+        - -nr/--no-reweight: disable reweighting
+        - -ib/--ibstates: attempt to combine ibstates dataset
+    - open_files()
+      - Creates the output WESTPA H5 file and stamps creator data.
+      - Opens the list of input WEST H5 files (self.west) and stores file handles in self.westH5.
+      - Prepares for subsequent data extraction and merging.
+    - process_args(args)
+      - Maps CLI arguments to internal state:
+        - output_file, west path, sims, aux, auxall, reweight, ibstates
+    - total_number_of_walkers()
+      - Computes total walkers across input simulations by summing summary/n_particles datasets.
+      - Handles potential shape/length differences gracefully.
+    - Segment (inner class)
+      - Lightweight container with fields:
+        - weight, iteration, simid, recycled_in
+      - Used to represent per-segment state during processing.
+    - go()
+      - Orchestrates the main processing loop with a progress indicator.
+      - Prepares ISTATES handling and initiates the processing sequence.
+- Relationships
+  - WMultiWest uses get_bin_mapper and create_idtype_array to manage binning and state data.
+  - It interacts with h5io utilities for HDF5 handling and with the progress indicator for user feedback.
+  - The tool combines data from multiple westH5 input files into a single output file.
+
+Parameters and Return Values
+- Command-line options (via add_args):
+  - -o, --output-file: Output HDF5 filename for merged results (default: multi.h5)
+  - -W, --west, --WEST_H5FILE: Name/path of the main H5 file inside each simulation directory (default: west.h5)
+  - -a, --aux: Names of additional auxiliary datasets to be combined
+  - -aa, --auxall: If set, combine all auxiliary datasets
+  - -nr, --no-reweight: If set, disable reweighting (default: reweight)
+  - -ib, --ibstates: Attempt to combine ibstates dataset (default: False)
+- Return values:
+  - The tool writes a consolidated HDF5 file to the specified output file.
+  - No explicit return value; operation is side-effect driven (file creation and data merging).
+
+Usage Notes and Examples
+- Basic usage (merge with default settings, enable reweighting):
+  - Command:
+    - w_multi_west -o multi.h5 -W west.h5
+  - This creates multi.h5 by combining the specified west.h5 runs with reweighting enabled by default.
+
+- Merge with auxiliary datasets:
+  - Command:
+    - w_multi_west -o multi.h5 -W west.h5 -a traj -a density -aa
+  - This combines only the listed auxiliary datasets (traj, density) or all if -aa is provided.
+
+- Disable reweighting:
+  - Command:
+    - w_multi_west -o multi.h5 -W west.h5 -nr
+  - Produces a merged output without reweighting adjustments.
+
+- Combine ibstates:
+  - Command:
+    - w_multi_west -o multi.h5 -W west.h5 -ib
+  - Attempts to merge ibstates data as part of the consolidation.
+
+Code Snippet: Internal helpers (illustrative)
+- Retrieving a bin mapper for a given hash:
+```
+try:
+    mapper = get_bin_mapper(h5file, hashval)
+except KeyError:
+    # Handle missing binning information
+    pass
+```
+
+- Converting an input istate array to the internal format:
+```
+new_array = create_idtype_array(input_array)
+```
+
+Important Considerations and Edge Cases
+- Bin mapping availability:
+  - get_bin_mapper relies on the /bin_topologies group and the presence of index/pickles data. Missing data raises KeyError.
+- Data compatibility:
+  - Merged datasets must be aligned in iteration counts and data shapes. Mismatches may require preprocessing or adjustment.
+- Auxiliary datasets:
+  - If -aa is used, all auxiliary datasets are merged; otherwise, only the explicitly listed ones in -a are included.
+- ibstates handling:
+  - If ibstates are requested with -ib, ensure that the source simulations actually contain ibstates data compatible for merging.
+- Reweighting:
+  - The -nr flag disables reweighting; by default reweighting is applied to merge probabilities/weights across runs.
+- Output file safety:
+  - The tool writes to the output file, potentially overwriting existing data depending on behavior of WESTPA’s HDF5 utilities. Ensure you won’t overwrite important data unless intended.
+
+Notes for Developers
+- The module is designed to be a drop-in tool within the WESTPA CLI ecosystem, relying on WESTMultiTool infrastructure for CLI parsing and data management.
+- The inner Segment class provides a minimal data container; adapt as needed for extended processing steps.
+- The open_files flow relies on generate_file_list to resolve input H5s; ensure input paths (self.west) are valid and accessible.
+
+Usage Summary
+- Typical workflow:
+  - Prepare a set of WESTPA runs to merge.
+  - Run w_multi_west with a desired output filename and options for reweighting and auxiliary data.
+  - Inspect multi.h5 to verify merged data and status of auxiliary datasets.
+
+Code Reference
+- Core class: WMultiWest
+  - Methods: add_args, open_files, process_args, total_number_of_walkers, go
+  - Inner: Segment
+- Helpers: get_bin_mapper, create_idtype_array
+
+End of documentation.

@@ -1,0 +1,124 @@
+# commands.rst – Module Documentation
+
+Overview
+- This module implements high-level command helpers used by the Alembic CLI to manage migration environments.
+- It provides:
+  - Listing available templates
+  - Initializing a new script directory from a template
+  - Creating new revision files (with optional autogeneration or SQL output)
+- The implementation relies on internal components such as ScriptDirectory, util helpers, and autogenerate logic.
+
+Public API
+- Functions:
+  - list_templates(config: Config) -> None
+  - init(config: Config, directory: str, template: str = "generic", package: bool = False) -> None
+  - revision(config: Config, message: Optional[str] = None, autogenerate: bool = False, sql: bool = False, head: str = "head", splice: bool = False, branch_label: Optional[str] = None, version_path: Optional[str] = None, rev_id: Optional[str] = None, depends_on: Optional[str] = None, process_revision_directives: Optional[ProcessRevisionDirectiveFn] = None) -> Union[Optional[Script], List[Optional[Script]]]
+
+Notes on types and dependencies
+- TYPE_CHECKING exports for type hints:
+  - Config
+  - Script
+  - ProcessRevisionDirectiveFn
+- Core collaborators and dependencies:
+  - ScriptDirectory: local abstraction for migration script storage and manipulation
+  - autogenerate (aliased as autogen): provides RevisionContext used to assemble new revision scripts
+  - util: utility helpers for messaging, status reporting, and CommandError
+  - EnvironmentContext: runtime environment context (referenced for typing in TYPE_CHECKING)
+- Config object expectations (provided by the CLI/config layer):
+  - get_template_directory(): path to available migration templates
+  - print_stdout(...): helper to emit messages to stdout
+  - messaging_opts: options dict passed to util.status/util.msg
+  - config_file_name: path to alembic.ini (used when generating templates)
+  - get_main_option("revision_environment"): determines whether revisions run in a specific environment
+
+What each function does
+
+1) list_templates(config: Config) -> None
+- Purpose: Display all available templates found in the configured template directory.
+- How it works:
+  - Prints a header: "Available templates:\n"
+  - Iterates subdirectories under config.get_template_directory()
+  - For each template, reads the first line of its README as a synopsis
+  - Outputs: "<template_name> - <synopsis>"
+  - Concludes with guidance on how to use templates (example: alembic init --template generic ./scripts)
+- Key behavior:
+  - Reads README files to surface a brief description per template
+  - No return value; side-effect is stdout output
+
+2) init(config: Config, directory: str, template: str = "generic", package: bool = False) -> None
+- Purpose: Initialize a new migration environment (script directory) from a template.
+- Preconditions and validation:
+  - If target directory exists and is non-empty, raises util.CommandError
+  - Validates that the requested template directory exists; raises CommandError if not found
+- What it creates:
+  - Creates the target directory (if missing)
+  - Creates a versions/ subdirectory
+  - Instantiates a ScriptDirectory for the target directory
+- Template handling:
+  - Iterates files in the chosen template directory
+  - If a file named alembic.ini.mako exists:
+    - Requires config.config_file_name; if the alembic.ini already exists, it is skipped
+    - Otherwise, generates config file in the target directory using the mako template
+  - For other regular files, copies them into the target directory
+- Package mode (package=True):
+  - Creates __init__.py files in the base directory and in versions/ (__init__.py in both locations)
+- Post-condition:
+  - Requires the user to edit the generated alembic.ini (or the configuration file) before proceeding
+- Return: None
+- Notes:
+  - Uses util.status and messaging options to report progress
+  - On success, guides the user to configure their connection/logging before proceeding
+
+3) revision(config: Config, ..., process_revision_directives: Optional[ProcessRevisionDirectiveFn] = None) -> Union[Optional[Script], List[Optional[Script]]]
+- Purpose: Create a new revision file, with optional autogeneration and/or SQL output.
+- Core steps (as far as the visible implementation shows):
+  - Builds a ScriptDirectory from the provided config (ScriptDirectory.from_config(config))
+  - Assembles command_args for the revision (message, autogenerate, sql, head, splice, branch_label, version_path, rev_id, depends_on)
+  - Creates a RevisionContext (autogen.RevisionContext) using:
+    - config
+    - script_directory
+    - command_args
+    - process_revision_directives (hook for programmatic modification)
+  - Reads the environment setting from config (config.get_main_option("revision_environment"))
+  - If autogenerate is True, forces environment to True
+  - Validates that --sql and --autogenerate are not used together (raises util.CommandError if both are set)
+  - (Truncated in the provided snippet) The function is expected to utilize revision_context to generate the revision script(s) and return Script objects or a list of Script objects depending on how many revisions were produced
+- Return: A Script instance or a list of Script instances, or Optional[Script] values
+- Notes:
+  - process_revision_directives is for advanced programmatic customization of the generated revision structure
+  - The exact behavior after the initial setup is determined by RevisionContext and the underlying autogenerate machinery
+
+Reference and usage examples
+
+- Listing templates
+  - Call: list_templates(config)
+  - Result: Prints a list of available templates and their synopses to stdout
+
+- Initializing a script directory
+  - Call: init(config, directory="/path/to/scripts", template="generic", package=False)
+  - Result: Creates the environment under the specified directory, copies template files, and optionally creates __init__.py stubs
+
+- Creating a revision
+  - Call: revision(config, message="add users table", autogenerate=True, head="head", version_path=None)
+  - Result: Generates a revision script (and possibly a corresponding environment setup) using autogeneration logic
+
+Architectural notes
+- This module acts as an adapter between the higher-level Alembic CLI commands and the internal core components:
+  - ScriptDirectory: File-system abstraction for migration scripts
+  - autogenerate.RevisionContext: Orchestrates revision creation, including autogeneration and directives
+  - util: Centralized utilities for messaging and exceptions
+- It relies on the project’s Config interface for environment-specific customization and template management
+- Typing is guarded by TYPE_CHECKING for external type hints, avoiding runtime import costs
+
+Practical considerations
+- Error handling is explicit through util.CommandError for invalid states (existing non-empty directories, missing templates, invalid config files, incompatible revision options)
+- User-facing messages emphasize the need to customize the generated config file (alembic.ini) after initialization
+- The module’s design supports both interactive CLI usage and programmatic invocation (via process_revision_directives)
+
+See Also
+- autogenerate (aliased as autogen): RevisionContext and autogeneration logic
+- ScriptDirectory: Script/file management for migration scripts
+- util: CommandError, status reporting, and messaging helpers
+- runtime.environment: EnvironmentContext (typing and integration with runtime directives)
+
+If you need, I can convert this into a ready-to-publish commands.rst section with reStructuredText formatting instead of Markdown.

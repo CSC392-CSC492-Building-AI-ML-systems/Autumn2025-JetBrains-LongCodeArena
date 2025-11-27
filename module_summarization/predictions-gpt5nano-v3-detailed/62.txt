@@ -1,0 +1,169 @@
+Visitors and traversal for SQLAlchemy expression trees
+=====================================================
+
+Overview
+--------
+
+This module defines a lightweight, pluggable visitor/traversal framework used by SQLAlchemy to walk, inspect, and transform expression trees and related objects. The key concepts are:
+
+- Visitable: a base mixin for objects that participate in the traversal/compilation process. It uses a dynamic compiler-dispatch mechanism to call visitor methods named visit_<visit_name>.
+- InternalTraversal: an enumeration of symbols used to describe how to traverse internal structures of visitable objects.
+- Public traversal helpers: high-level utilities to iterate, traverse, clone, and replace parts of a visitable graph in a controlled way.
+- anon_map/prefix_anon_map: utilities for managing anonymous/parameter name mappings used during traversals and compilation.
+
+Core concepts
+-------------
+
+Visitable
+---------
+
+- Purpose: Objects deriving from Visitable participate in the visitor dispatch used by the SQL compiler. Each visitable class provides a __visit_name__ that identifies the kind of node for the visitor.
+- Dynamic compiler dispatch: When a subclass defines __visit_name__, the class automatically generates a _compiler_dispatch method (unless one is already provided). This method looks for a visitor method named visit_<visit_name> and invokes it with the current object and any keyword arguments.
+- Fallback behavior: If the visitor does not implement visit_<visit_name>, the dispatch calls visitor.visit_unsupported_compilation(self, err, **kw) to allow graceful handling of unknown node types.
+- Customization: You can override or bypass the automatic dispatch by providing your own _compiler_dispatch implementation in the subclass.
+
+Example (illustrative)
+-----------------------
+
+- Define a visitable node:
+
+```python
+from sqlalchemy.visitors import Visitable
+
+class MyNode(Visitable):
+    __visit_name__ = "my_node"
+
+    def __init__(self, value):
+        self.value = value
+```
+
+- Provide a visitor with a handler:
+
+```python
+class MyVisitor:
+    def visit_my_node(self, node, **kw):
+        return f"visited {node.value}"
+```
+
+- Dispatch happens when the node is visited by the visitor:
+
+```python
+n = MyNode(42)
+v = MyVisitor()
+result = n._compiler_dispatch(v)  # or appropriate traversal entry-point
+# result -> "visited 42"
+```
+
+InternalTraversal
+-----------------
+
+- Purpose: Enumerates the internal signals used by the HasTraverseInternals mechanism. Each symbol corresponds to a way to visit a particular attribute or collection on a visitable object.
+- Examples (names from the enum, not exhaustive):
+  - dp_has_cache_key
+  - dp_has_cache_key_list
+  - dp_clauseelement
+  - dp_fromclause_canonical_column_collection
+  - dp_clauseelement_tuples
+- How it’s used: Subclasses can declare a _traverse_internals list mapping attribute names to InternalTraversal markers. The traversal machinery uses these markers to walk the object graph in a consistent, predictable way.
+- Note: The enum values are designed to be stable integration points for traversal logic across the codebase.
+
+Public traversal helpers
+------------------------
+
+- iterate
+  - Purpose: Produce an iterator over a visitable structure as it is traversed.
+  - Return: An iterator yielding visitable nodes (and/or their state) according to the traversal rules.
+- traverse_using
+  - Purpose: Create a traversal function bound to a specific visitor, enabling repeated traversals without re-specifying the visitor.
+  - Return: A callable that, when given a root visitable, performs a traversal using the bound visitor.
+- traverse
+  - Purpose: Traverse a visitable graph with a given visitor, returning a transformed or inspected graph as defined by the visitor’s visit_<visit_name> methods.
+  - Return: The result of applying the visitor across the graph.
+- cloned_traverse
+  - Purpose: Traverse and clone the structure, producing a deep copy where leaves and sub-graphs are re-instantiated as needed.
+  - Return: A new graph mirroring the original structure, with new object instances where appropriate.
+- replacement_traverse
+  - Purpose: Traverse and replace elements according to a mapping or a rule set, producing a modified graph.
+  - Return: The transformed graph with specified replacements applied.
+- anon_map
+  - Purpose: A cache/mapping for anonymous identifiers used during traversal (e.g., parameter placeholders).
+  - Return: A mapping object that can be used to retrieve or assign canonical anonymous names.
+- prefix_anon_map
+  - Purpose: A helper to create or access a prefixed alias for anonymous names, ensuring consistent naming across a traversal.
+  - Return: A mapping helper configured for prefix-based anonymous identifiers.
+
+Usage considerations and edge cases
+-----------------------------------
+
+- __visit_name__ must be a string defined at the class level. Non-string values raise an InvalidRequestError to indicate a misconfiguration.
+- If a visitor does not implement visit_<visit_name>, the traversal will gracefully fall back to visitor.visit_unsupported_compilation(self, err, **kw), allowing the visitor to handle or report the missing method.
+- The internal traversal machinery relies on _traverse_internals definitions. If a class uses InternalTraversal markers without providing a corresponding _traverse_internals structure, traversal behavior may be incomplete or undefined.
+- Anonymous name mappings (anon_map/prefix_anon_map) are internal concerns of the traversal system. They should generally be left to the framework unless you are implementing custom traversal logic.
+
+API surface at a glance
+-----------------------
+
+- Visitable: base class for visitable objects with automatic compiler dispatch based on __visit_name__.
+- InternalTraversal: enum of traversal markers used to annotate how internals are walked.
+- iterate, traverse_using, traverse, cloned_traverse, replacement_traverse: high-level traversal utilities.
+- anon_map, prefix_anon_map: helpers for anonymous parameter naming during traversal.
+- ExternalTraversal: (referenced in API) related concept for external traversal strategies.
+- The module exports: iterate, traverse_using, traverse, cloned_traverse, replacement_traverse, Visitable, ExternalTraversal, InternalTraversal, anon_map, prefix_anon_map.
+
+Code organization notes
+-----------------------
+
+- The core mechanism centers on dynamic method lookup: visit_<visit_name> on the visitor is invoked if present.
+- The _generate_compiler_dispatch logic ensures that subclasses automatically wire the compiler dispatch unless explicitly overridden.
+- The InternalTraversal symbols provide a stable protocol for describing internal data structures during traversal.
+
+Notes for plugin authors
+------------------------
+
+- To add a new visitable node type, create a subclass of Visitable, define a unique __visit_name__, and (optionally) provide a _traverse_internals structure to guide traversal of attributes.
+- Implement a visitor with a visit_<visit_name> method to perform the desired operation on that node.
+- Use the traversal helpers to apply the operation to a graph of visitable objects, optionally cloning or replacing parts as needed.
+
+References
+----------
+
+- The public API surface includes: iterate, traverse_using, traverse, cloned_traverse, replacement_traverse, anon_map, prefix_anon_map, Visitable, InternalTraversal, ExternalTraversal.
+- The internal traversal mechanics rely on _traverse_internals and InternalTraversal markers to drive safe and predictable walking of the graph.
+
+Usage example (illustrative)
+----------------------------
+
+```python
+from sqlalchemy.visitors import Visitable, InternalTraversal, traverse
+
+class MyNode(Visitable):
+    __visit_name__ = "my_node"
+
+    def __init__(self, value, children=None):
+        self.value = value
+        self.children = children or []
+
+    _traverse_internals = [
+        ("value", InternalTraversal.dp_clauseelement),
+        ("children", InternalTraversal.dp_has_cache_key_list),
+    ]
+
+class MyVisitor:
+    def visit_my_node(self, node, **kw):
+        # Example: visit a node and its children
+        results = []
+        for child in getattr(node, "children", []):
+            if isinstance(child, MyNode):
+                results.append(self.visit_my_node(child, **kw))
+        return {"value": node.value, "children": results}
+
+root = MyNode(1, [MyNode(2), MyNode(3, [MyNode(4)])])
+visitor = MyVisitor()
+# Traverse from the root using the visitor
+# This would typically be: traverse(root, visitor) or a similar entry point
+```
+
+End note
+--------
+
+This documentation provides an overview of the module's purpose, core components, and typical usage. For concrete API signatures and behavior, refer to the module's source and corresponding docstrings within the codebase.

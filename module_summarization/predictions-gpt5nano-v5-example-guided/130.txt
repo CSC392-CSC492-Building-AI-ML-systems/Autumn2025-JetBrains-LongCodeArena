@@ -1,0 +1,154 @@
+# Less Frequently Used FITS Data Structures
+
+## Overview
+This document covers internal, seldom-used data structures within the FITS handling code as exemplified by unfamiliar.rst. It focuses on the verification framework for data integrity and the nested error reporting utilities, as well as the internal notifier pattern used for decoupled communication between components.
+
+The items described here are not part of the public FITS data model, but provide useful helpers for validating data, representing complex error hierarchies, and enabling internal event-driven updates.
+
+## Key Components
+
+- VerifyError
+  - Exception raised for verification failures.
+- VerifyWarning
+  - Warning emitted for verification issues (uses Astropy’s warning system).
+- VERIFY_OPTIONS
+  - A list of supported verification modes, including simple modes and combinations with fix/report variants.
+- _Verify
+  - Mixin providing the verification workflow used by classes that implement the actual validation (_verify). Includes:
+    - run_option: executes verification with a selected option and optionally applies a fix.
+    - verify: validates all values per the chosen option and reports or raises issues according to the option.
+- _ErrList
+  - Nested list structure for organizing verification error messages. Supports:
+    - __init__(val=(), unit="Element")
+    - __str__
+    - iter_lines(filter=None, shift=0)
+- NotifierMixin
+  - Mixin providing a lightweight publish/subscribe mechanism for internal components. Listeners can be registered and notified of changes via a weak-reference-based system, enabling decoupled communication.
+
+---
+
+## Details
+
+### Verify infrastructure (_Verify, VerifyError, VerifyWarning, VERIFY_OPTIONS)
+
+- VERIFY_OPTIONS
+  - A list of valid options for verification:
+    - "ignore", "warn", "exception", "fix", "silentfix", and combinations like "fix+warn", "silentfix+ignore", etc.
+  - This enables fine-grained control over how verification results are reported and how fixable issues are handled.
+
+Code reference:
+- VERIFY_OPTIONS = [
+    "ignore", "warn", "exception", "fix", "silentfix",
+    "fix+ignore", "fix+warn", "fix+exception",
+    "silentfix+ignore", "silentfix+warn", "silentfix+exception",
+  ]
+
+- _Verify.run_option(...)
+  - Purpose: Run a single verification check with a specified option, optionally applying a fix.
+  - Parameters:
+    - option: one of the verification options (default "warn").
+    - err_text: text describing the error.
+    - fix_text: text describing the fix (default "Fixed.").
+    - fix: a callable to apply the fix (if applicable).
+    - fixable: whether the error is fixable (default True).
+  - Behavior:
+    - If option is "warn" or "exception", fixable is set to False.
+    - If not fixable, the error text is prefixed with “Unfixable error:”.
+    - If a fix is provided and the error is fixable, the fix is invoked and the fix_text is appended to the message.
+  - Returns: a tuple (fixable, text).
+
+Example usage (illustrative):
+- ver = _Verify()
+- fixable, text = ver.run_option(option="warn", err_text="Invalid value")
+  - Result: (False, "Invalid value")
+- fixable, text = ver.run_option(
+    option="fix",
+    err_text="Invalid value",
+    fix_text="Applied automatic fix.",
+    fix=lambda: print(" fixing... "),
+  )
+  - Result: (True, "Invalid value  Applied automatic fix.")
+
+- _Verify.verify(...)
+  - Purpose: Run verification across all values of the instance.
+  - The method delegates actual checks to a subclass via _verify(opt).
+  - Important: The class using this mixin must implement _verify, which returns an object providing an iter_lines(filter=...) interface.
+  - Options supported: see VERIFICATION_OPTIONS. They can be simple (e.g., "warn") or combined with "+ignore", "+warn", or "+exception".
+
+Note: The verify method includes reporting logic and zero-based indexing reminder:
+- Note: astropy.io.fits uses zero-based indexing.
+
+> Important: _Verify is a mixin. It relies on the concrete class providing the _verify implementation. The behavior of verify() depends on that implementation.
+
+Code reference (snippets):
+- run_option(...) signature and behavior as described above.
+- verify(self, option="warn") with its detailed documentation and option parsing:
+  - It splits combined options into fix_opt and report_opt when "+" is present.
+  - It handles silentfix, and various reporting strategies (warn or exception), including handling of unfixable errors.
+
+### Nested error reporting: _ErrList
+
+- _ErrList is a specialized list designed to hold verification errors in a hierarchical structure.
+- Purpose: Represent errors in a nested, readable way, suitable for complex validation scenarios.
+
+Key methods:
+- __init__(self, val=(), unit="Element")
+  - Creates the error list with an optional unit label (default "Element").
+
+- __str__(self)
+  - Returns a string representation by joining lines produced by iter_lines().
+
+- iter_lines(self, filter=None, shift=0)
+  - Iterates the nested error structure and yields lines with indentation appropriate to the hierarchy.
+  - Behavior:
+    - The top level yields (fixable, message) tuples for non-list items, applying an optional filter.
+    - For nested _ErrList items, it emits a header line like "<unit> <index>:" followed by the child lines, preserving hierarchy.
+  - The structure allows consumers to print or log a structured summary of verification issues, including which items are fixable and which are not, with clear indentation.
+
+Usage example (illustrative):
+- inner = _ErrList([(True, "Minor issue"), (False, "Critical failure")], unit="Suberr")
+- outer = _ErrList([(False, "Top-level error"), inner], unit="Element")
+
+- Demonstrating iteration:
+  for fixable, line in outer.iter_lines():
+      if line is not None:
+          status = "FIXABLE" if fixable else "UNFIXABLE"
+          print(f"{status}: {line}")
+
+Note: The exact formatting of lines depends on the filter and shift parameters, as well as the hierarchical content provided to _ErrList.
+
+### NotifierMixin
+
+- NotifierMixin provides a structured mechanism for objects to register listeners and notify them of changes.
+- Intended for internal communication between components in a decoupled fashion.
+- Key ideas (from the docstring):
+  - _add_listener: register a listener with a weak reference so it can be garbage-collected when no longer in use.
+  - _notify('change_type', *args, **kwargs): call listener methods named _update_change_type(*args, **kwargs) on all listeners.
+  - If a listener lacks the appropriate update method, it is ignored.
+- Example (adapted from the class docstring), illustrating a minimal usage pattern:
+  - class Widget(NotifierMixin):
+      state = 1
+      def __init__(self, name):
+          self.name = name
+      def update_state(self):
+          self.state += 1
+  - Listeners can subscribe to changes and react via a matching update method.
+
+Note: The NotifierMixin is designed for internal usage within the package and is not intended as part of the public FITS data model.
+
+---
+
+## Usage Guidance
+
+- To leverage the verification framework in your own classes, inherit from _Verify and implement a _verify method that returns an object compatible with iter_lines(filter=...). Use verify() to report issues according to the desired option (e.g., "warn", "exception", "fix+warn").
+- Use _ErrList to assemble and display complex, hierarchical verification messages in a readable form.
+- If your components need internal event signaling, consider extending NotifierMixin to register and notify listeners with weak references, ensuring automatic cleanup when listeners are no longer in use.
+
+Code references (highlights):
+- VERIFY_OPTIONS
+- _Verify.run_option(...)
+- _Verify.verify(...)
+- _ErrList, __init__, __str__, iter_lines
+- NotifierMixin (description and example in its docstring)
+
+These constructs represent less frequently used but useful internal data structures for verification, error reporting, and internal event handling within the FITS-related codebase.

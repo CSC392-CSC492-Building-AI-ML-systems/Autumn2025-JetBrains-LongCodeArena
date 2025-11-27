@@ -1,0 +1,148 @@
+Running backwards migrations (running.rst)
+
+Overview
+- This module provides functionality to undo previously run migrations for one or more apps.
+- It defines a BackwardsMigrationManager that orchestrates reversing migrations, as well as helper functions to perform batch reversals across apps.
+- It interacts with the migration tracking table, migration modules discovered in each app, and the Migration model to manage state and cleanup.
+
+Public API
+- BackwardsMigrationManager
+- run_backwards
+- backwards
+- CheckMigrationManager (partial implementation)
+
+BackwardsMigrationManager
+Purpose
+- Encapsulates the logic to reverse migrations for a single app.
+- Handles selecting the range of migrations to reverse, prompting for confirmation, executing reversal, and optional cleanup.
+
+Initialization
+- __init__(app_name: str, migration_id: str, auto_agree: bool = False, clean: bool = False, preview: bool = False)
+  - app_name: Name of the app to operate on.
+  - migration_id: Target migration id to reverse up to (or special values "all" or "1").
+  - auto_agree: If True, skips prompts.
+  - clean: If True, deletes the migration file from disk after reversal.
+  - preview: If True, prints the queries instead of executing them.
+
+Key methods
+- run(self) -> MigrationResult
+  - Ensures the migration tracking table exists, resolves app config, and delegates to run_migrations_backwards.
+- run_migrations_backwards(self, app_config: AppConfig)
+  - Core logic:
+    - Loads migration modules from the app’s migrations folder.
+    - Retrieves the list of migrations that have already run for the app.
+    - If none have run, returns success with a message: "🏁 No migrations to reverse!".
+    - Determines the earliest migration to reverse based on migration_id:
+      - "all" -> earliest is the first ran migration
+      - "1" -> earliest is the most recent ran migration
+      - otherwise, earliest is the specified migration_id
+    - Validates that the earliest migration id exists among ran migrations; otherwise returns a failure.
+    - Computes the reverse range from earliest to the latest ran migration, builds the reversed sequence.
+    - Prompts for continuation (or uses auto_agree).
+    - For each migration_id in the reversed sequence:
+      - Loads the corresponding migration module.
+      - Calls forwards() on the module to get a response.
+      - If the response is a MigrationManager:
+        - If preview is enabled, marks the response as preview.
+        - Calls response.run(backwards=True) to perform the reversal.
+      - If not in preview mode:
+        - Deletes the Migration record for that migration_id.
+        - If clean is enabled and the module has a __file__, deletes the module file from disk.
+      - Prints "ok! ✔️" after successful reversal of each migration.
+    - Returns MigrationResult(success=True) upon completion.
+  - Notes:
+    - Uses Migration.get_migrations_which_ran(app_name=...) to determine which migrations have run.
+    - Uses Migration.delete().where(Migration.name == migration_id).run() to prune the tracking table.
+    - Uses os.unlink(...) to optionally remove migration modules from disk when clean is requested.
+
+Usage example
+- Reverse the most recent migration for a single app:
+  - from running import BackwardsMigrationManager
+  - manager = BackwardsMigrationManager(app_name="myapp", migration_id="1", auto_agree=True)
+  - result = await manager.run()
+- Reverse all migrations for all apps:
+  - from running import run_backwards
+  - result = await run_backwards(app_name="all", auto_agree=True)
+
+run_backwards (function)
+Purpose
+- Entry point to reverse migrations either for a single app or for all apps.
+
+Signature
+- async def run_backwards(app_name: str, migration_id: str = "1", auto_agree: bool = False, clean: bool = False, preview: bool = False) -> MigrationResult
+
+Behavior
+- If app_name == "all":
+  - Retrieves and sorts all app names, then reverses the order.
+  - Prompts for confirmation listing the apps to be processed (unless auto_agree is True).
+  - If confirmed, iterates apps in order:
+    - Prints the app name as a heading.
+    - Creates a BackwardsMigrationManager with migration_id="all" and runs it.
+  - Returns MigrationResult(success=True) after processing all apps.
+- If app_name is a single app:
+  - Creates a BackwardsMigrationManager with the provided parameters and runs it.
+  - Returns the resulting MigrationResult.
+
+backwards (function)
+Purpose
+- Provides a user-facing function to undo migrations up to a specific migration.
+- Wraps run_backwards and handles non-success by exiting with a non-zero status.
+
+Signature
+- async def backwards(app_name: str, migration_id: str = "1", auto_agree: bool = False, clean: bool = False, preview: bool = False)
+
+Behavior
+- Calls run_backwards with the provided parameters.
+- If the returned MigrationResult is not successful, exits with status code 1.
+
+Example
+- Undo up to a specific migration for a single app with auto confirmation:
+  - await backwards(app_name="myapp", migration_id="all", auto_agree=True)
+
+CheckMigrationManager (partial)
+- A dataclass MigrationStatus(app_name: str, migration_id: str, description: str, has_ran: bool) is defined for status reporting.
+- CheckMigrationManager(BaseMigrationManager) is initialized with an app_name.
+- async def get_migration_statuses(self) -> t.List[MigrationStatus] is declared but not implemented in the provided snippet.
+- Note: This part is a skeletal implementation and may be extended to report current migration status for an app.
+
+Code references and behavior notes
+- MigrationManager is imported from piccolo.apps.migrations.auto.migration_manager and is used to determine how to run migration modules when a module’s forwards() method returns a MigrationManager.
+- The module relies on:
+  - Migration.get_migrations_which_ran(app_name)
+  - Migration.delete().where(Migration.name == migration_id).run()
+  - MigrationModule from piccolo.conf.apps (used for typing and module handling)
+  - print_heading (for console output when processing all apps)
+- When running in preview mode, the system sets response.preview = True and does not delete migration records or files.
+- When clean is enabled, migration modules may be deleted from disk after reversal if the module file exists.
+
+Practical considerations
+- The system prints status messages to the console at key steps (e.g., “🏁 No migrations to reverse!”, “ok! ✔️”, errors to stderr).
+- The reversal order is determined by choosing the subset of ran migrations from the earliest to the latest, then reversing that subset to apply backward reversals one by one.
+- The code is designed to be used programmatically (via Python code) or integrated into a CLI that imports and calls run_backwards/backwards.
+
+Code examples
+- Reversing all migrations for all apps with automatic confirmation:
+  .. code-block:: python
+
+     from running import run_backwards
+
+     result = await run_backwards(app_name="all", migration_id="all", auto_agree=True)
+
+     if not result.success:
+         print(result.message)
+
+- Reversing the most recent migration for a single app in preview mode (no changes are applied):
+  .. code-block:: python
+
+     from running import BackwardsMigrationManager
+
+     manager = BackwardsMigrationManager(app_name="myapp", migration_id="1", preview=True)
+     result = await manager.run()
+
+     print(result)
+
+Notes
+- The backward migration flow depends on the presence of a properly structured migrations folder per app and a Migration table that tracks which migrations have run.
+- The CheckMigrationManager class is present but its status retrieval logic is not implemented in the provided snippet; extending it requires implementing get_migration_statuses to query the Migration table and correlate with migration modules.
+
+This documentation covers the public API and the core control flow for reversing migrations using this module.

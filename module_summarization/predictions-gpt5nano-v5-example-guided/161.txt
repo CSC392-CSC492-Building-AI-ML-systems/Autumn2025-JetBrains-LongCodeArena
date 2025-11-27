@@ -1,0 +1,146 @@
+# Internal organization of NumPy arrays
+
+## Overview
+This section documents the internal configuration and system information exposed by the build-time introspection contained in the internals.code-explanations.rst module. It captures how NumPy was built, including compilers, machine information, build dependencies, Python details, and SIMD extensions. The information is exposed via a CONFIG structure and a show() utility.
+
+Key components of this module include a DisplayModes enum, a CONFIG dictionary generated at build time (with placeholders filled during the build), and a show(mode) function that renders the configuration either as human-friendly YAML output or as a Python dictionary.
+
+## Key Components
+
+- DisplayModes
+  - An enum with two modes:
+    - stdout: print a YAML representation to stdout
+    - dicts: return the configuration as a Python dict
+  - Example:
+    - DisplayModes.stdout.value -> "stdout"
+
+- _cleanup(d)
+  - Helper function that recursively removes empty values from a dict. Ensures Meson-provided values that are not present are pruned from the final CONFIG.
+
+- CONFIG
+  - A build-time generated dictionary describing:
+    - Compilers:
+      - c, cython, c++
+      - name, linker, version, commands, args, linker args
+    - Machine Information:
+      - host: cpu, family, endian, system
+      - build: cpu, family, endian, system
+      - cross-compiled (bool)
+    - Build Dependencies:
+      - blas, lapack
+      - name, found, version, detection method, include/lib directories, openblas config, pc file directory
+    - Python Information:
+      - path, version
+    - SIMD Extensions:
+      - baseline
+      - found (list of features)
+      - not found (list of features)
+  - Note: CONFIG is constructed with build-time placeholders (e.g., "@C_COMP@") that are substituted during the build, then cleaned by _cleanup.
+
+- _check_pyyaml()
+  - Local helper that imports and returns the PyYAML module when needed.
+
+- show(mode)
+  - Public API to display or retrieve the configuration.
+  - Behavior:
+    - mode == "stdout": attempt to print YAML via PyYAML; if PyYAML is unavailable, fall back to JSON with a warning.
+    - mode == "dicts": return CONFIG as a Python dict.
+    - Otherwise: raise AttributeError with valid mode options.
+  - Example usage:
+    - show(mode=DisplayModes.stdout.value)
+    - show(mode=DisplayModes.dicts.value)
+
+  - Notes:
+    - If PyYAML is installed, output is YAML for readability.
+    - If PyYAML is not installed, a JSON representation is printed and a warning is issued:
+      "Install `pyyaml` for better output"
+
+- Built-in note
+  - A NOTE explains that Numpy’s mypy plugin is used for importing the correct platform-specific `ctypes._SimpleCData[int]` sub-type, reflecting type-level considerations in the build environment.
+
+## Usage
+
+- Print human-readable build/system information
+  - show(mode=DisplayModes.stdout.value)
+
+- Retrieve the configuration as a dictionary
+  - cfg = show(mode=DisplayModes.dicts.value)
+
+- Example (pseudo):
+  - If PyYAML is available, the YAML representation of CONFIG will be printed.
+  - If PyYAML is unavailable, a JSON dump of CONFIG will be printed with a deprecation warning suggesting to install PyYAML.
+
+Code references (from the source):
+
+- DisplayModes enum
+  - class DisplayModes(Enum):
+      stdout = "stdout"
+      dicts = "dicts"
+
+- _cleanup and CONFIG construction
+  - def _cleanup(d):
+      """
+      Removes empty values in a `dict` recursively
+      This ensures we remove values that Meson could not provide to CONFIG
+      """
+      if isinstance(d, dict):
+          return {k: _cleanup(v) for k, v in d.items() if v and _cleanup(v)}
+      else:
+          return d
+
+  - CONFIG = _cleanup(
+      {
+          "Compilers": { ... },
+          "Machine Information": { ... },
+          "Build Dependencies": { ... },
+          "Python Information": { ... },
+          "SIMD Extensions": {
+              "baseline": __cpu_baseline__,
+              "found": [
+                  feature for feature in __cpu_dispatch__ if __cpu_features__[feature]
+              ],
+              "not found": [
+                  feature for feature in __cpu_dispatch__ if not __cpu_features__[feature]
+              ],
+          },
+      }
+  )
+
+- show() behavior
+  - if mode == DisplayModes.stdout.value:
+      try:
+          yaml = _check_pyyaml()
+          print(yaml.dump(CONFIG))
+      except ModuleNotFoundError:
+          import warnings
+          import json
+          warnings.warn("Install `pyyaml` for better output", stacklevel=1)
+          print(json.dumps(CONFIG, indent=2))
+  - elif mode == DisplayModes.dicts.value:
+      return CONFIG
+  - else:
+      raise AttributeError("Invalid `mode`, use one of: ...")
+
+- Note about ctypes and mypy
+  - # NOTE: Numpy's mypy plugin is used for importing the correct
+  - # platform-specific `ctypes._SimpleCData[int]` sub-type
+
+## Details
+
+- CONFIG contents:
+  - The CONFIG dictionary reflects the exact environment and build-time decisions made when NumPy was built. It includes:
+    - Which compilers were used (C, Cython, C++), their versions, and the commands/arguments used.
+    - The host vs build machine characteristics (CPU, family, endianness, system) and whether the build was cross-compiled.
+    - Build dependencies such as BLAS and LAPACK with their detection method and directories.
+    - The Python interpreter path and version used to build NumPy.
+    - SIMD-related information, including the baseline and which features were found or not found.
+
+- Build-time nature:
+  - CONFIG is produced by the build system and then cleaned with _cleanup to remove any empty or unavailable values, ensuring a concise and accurate view of the build state.
+
+- Output formats:
+  - YAML (preferred for readability) when PyYAML is present.
+  - JSON fallback when PyYAML is not available, with a warning directing users to install PyYAML for nicer formatting.
+
+- Practical use:
+  - Useful for debugging build issues, ensuring compatibility across environments, and documenting the exact build-time configuration of a NumPy installation.

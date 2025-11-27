@@ -1,0 +1,118 @@
+Asynchronous queues for coroutines: a producer/consumer pattern
+
+Overview
+The asynchronous Queue implementation provides a simple pattern for coordinating producers and consumers inside coroutine-based code. It functions similarly to the asyncio.Queue API, but is designed for Tornado-style coroutines and IOLoop integration. The queue is not thread-safe; to use it from other threads, transfer control to the IOLoop thread first.
+
+Key ideas
+- Producers put items into the queue; consumers retrieve items asynchronously.
+- A consumer can process items as they become available using async iteration (async for) over the queue.
+- The queue supports backpressure via maxsize and can be waited on with timeouts.
+- A join mechanism lets you wait until all items have been processed (each item retrieved from the queue must be paired with a task_done call by the consumer).
+
+Basic usage (async/await, Python 3.5+)
+
+Code example
+.. code-block:: python
+
+    import asyncio
+    from tornado.ioloop import IOLoop
+    from tornado.queues import Queue
+
+    q = Queue(maxsize=2)
+
+    async def consumer():
+        async for item in q:
+            try:
+                print('Doing work on %s' % item)
+                await asyncio.sleep(0.01)
+            finally:
+                q.task_done()
+
+    async def producer():
+        for item in range(5):
+            await q.put(item)
+            print('Put %s' % item)
+
+    async def main():
+        # Start consumer without awaiting (it runs until the queue is exhausted)
+        IOLoop.current().spawn_callback(consumer)
+        await producer()     # Wait for producer to put all tasks.
+        await q.join()       # Wait for consumer to finish all tasks.
+        print('Done')
+
+    asyncio.run(main())
+
+Expected output
+.. code-block:: text
+
+    Put 0
+    Put 1
+    Doing work on 0
+    Put 2
+    Doing work on 1
+    Put 3
+    Doing work on 2
+    Put 4
+    Doing work on 3
+    Doing work on 4
+    Done
+
+Notes
+- The consumer uses an asynchronous iterator over the queue: async for item in q.
+- If the queue becomes full, producers will await until space becomes available.
+- The join() method blocks until all items placed in the queue have been processed (each item requires a corresponding task_done call by the consumer).
+- The queue is not safe to use from multiple threads without transferring control to the IOLoop thread (e.g., via IOLoop.add_callback).
+
+Alternative: pre-3.5 (generator-based coroutines)
+
+For environments without native async/await, the same pattern can be expressed with generator-based coroutines (e.g., @gen.coroutine), as shown in the code base’s documentation:
+.. code-block:: python
+
+    @gen.coroutine
+    def consumer():
+        while True:
+            item = yield q.get()
+            try:
+                print('Doing work on %s' % item)
+                yield gen.sleep(0.01)
+            finally:
+                q.task_done()
+
+    @gen.coroutine
+    def producer():
+        for item in range(5):
+            yield q.put(item)
+            print('Put %s' % item)
+
+    def main():
+        IOLoop.current().spawn_callback(consumer)
+        yield producer()
+        yield q.join()
+        print('Done')
+
+API at a glance
+- Queue
+  - maxsize: maximum number of items allowed in the queue (0 means unbounded).
+  - put(item, timeout=None) / put_nowait(item)
+  - get(timeout=None) / get_nowait()
+  - qsize(), empty(), full()
+  - async iteration: async for item in queue yields items via get()
+  - join() / task_done() support (to wait for all items to be processed)
+
+- Exceptions
+  - QueueFull: raised by put_nowait when the queue is full.
+  - QueueEmpty: raised by get_nowait when the queue is empty.
+
+Related queues
+- PriorityQueue: a queue that returns items in priority order.
+- LifoQueue: a Last-In-First-Out queue.
+
+Implementation notes
+- The implementation uses Futures to suspend producers when the queue is full and to resume consumers when items arrive.
+- Timeout support is provided for put/get via an optional timeout parameter.
+- The design emphasizes coroutines within a single IOLoop thread; use add_callback or spawn_callback to integrate with other tasks.
+
+See also
+- asyncio.queues (for a standard library reference)
+- Tornado IOLoop integration and Future utilities
+- QueueFull, QueueEmpty exceptions for control flow in producer/consumer scenarios

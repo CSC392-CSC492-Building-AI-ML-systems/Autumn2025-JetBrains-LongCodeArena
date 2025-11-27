@@ -1,0 +1,161 @@
+Azure Storage Library Provider
+==============================
+
+This module implements an Azure Storage library provider for the library framework. It reads items from an Microsoft Azure Storage container and exposes them as library items. It supports both public containers and containers secured with SAS tokens, and can optionally cache downloaded blobs locally.
+
+Overview
+--------
+
+- Provider class: AzureStorageLibraryProvider
+- Purpose: Read and expose blobs contained in an Azure Blob Storage container as a hierarchical library structure.
+- Transport: HTTP/HTTPS via aiohttp
+- XML parsing: xml.dom.minidom
+- Caching: Optional local cache controlled by configuration
+
+Configuration
+-------------
+
+Configure the Azure storage container URL and optional local cache:
+
+- Path format (required): azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER
+- If the container is not publicly readable, you can attach a Shared Access Signature (SAS) via the URL, e.g.
+  azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER?sv=2020-10-02&si=XXXX&sr=c&sig=XXXXXXXXXXXXXX
+- Cache directory (optional): controlled by the library configuration option "library.azure_cache"
+  - 'false' => disable cache
+  - 'true'  => enable cache in a temp location, unique per path
+  - any other value => treated as a filesystem path to use for caching
+
+Example:
+
+- azure.azure_cache = true
+- azure.azure_cache = /var/cache/asab.azure
+- azure.azure_cache = false
+
+Usage
+-----
+
+The provider is instantiated by the library framework with:
+- library: the parent library object
+- path: the azure+ URL described above
+- layer: the layer context
+
+Once instantiated, the provider automatically starts loading the model and becomes ready when the model is loaded.
+
+Key Concepts
+------------
+
+- Model: A hierarchical structure built from the container’s blob listing. The root is an AzureDirectory, and each blob is represented as an AzureItem. The model is constructed by listing the container with restype=container&comp=list and parsing the resulting XML.
+- AzureDirectory: Internal node type representing a directory-like level in the container hierarchy.
+- AzureItem: Internal node representing a blob (file) in the container.
+- read(path): Returns a file-like object (IO) containing the blob’s content. If local caching is enabled and an ETag is available, the provider may serve a cached copy when appropriate.
+
+Public API
+----------
+
+Class: AzureStorageLibraryProvider
+----------------------------------
+
+- __init__(self, library, path, layer)
+  - Validates the path begins with "azure+"
+  - Parses the URL to self.URL
+  - Initializes the in-memory model (self.Model)
+  - Sets up an optional cache directory (self.CacheDir) based on configuration
+  - Ensures cache directory exists if enabled
+  - Schedules the asynchronous startup task to load the model
+
+- _start(self)
+  - Async entry point scheduled at initialization
+  - Calls _load_model and marks the provider as ready if a model is loaded
+
+- _load_model(self)
+  - Asynchronously requests the container’s blob listing via the REST API
+  - Uses: restype=container&comp=list
+  - Parses the XML response and builds the in-memory model (AzureDirectory and AzureItem)
+  - Logs success or warning on failure
+  - Sets self.Model to the constructed model
+
+- list(self, path) -> list[LibraryItem]
+  - path must be an absolute path starting with '/' and not containing '//'
+  - '/' corresponds to the root; deeper paths access subdirectories
+  - Returns a list of LibraryItem objects for the immediate children under the given path
+  - If the path does not exist or is not a directory, raises KeyError
+  - All LibraryItem entries reference this provider in their layer and include the provider in their providers list
+
+- read(self, path) -> typing.IO
+  - path must be an absolute path starting with '/' and not containing '//'
+  - Builds the blob URL by appending the path to the container URL
+  - If caching is enabled and an ETag is available, uses If-None-Match
+  - On HTTP 200, may cache the response content and store the ETag
+  - Returns a file-like object for reading the blob contents (as a stream)
+
+Code Snippet: Typical Usage
+----------------------------
+
+The following example illustrates how a library might use this provider. Actual usage depends on the surrounding framework.
+
+.. code-block:: python
+
+    from asab.library.azure_storage import AzureStorageLibraryProvider
+    from asab import Config
+    from asab.library import Library, Layer
+
+    # Example configuration (simplified)
+    # Config.set("library", "azure_cache", "true")                # enable cache
+    # Config.set("library", "azure_cache", "/tmp/azure-cache")    # custom cache dir
+
+    library = Library()
+    layer = Layer("default")
+
+    # Create provider for an Azure Blob container
+    provider = AzureStorageLibraryProvider(library, "azure+https://ACCOUNT.blob.core.windows.net/CONTAINER", layer)
+
+    # List root directory
+    items = await provider.list("/")
+    for it in items:
+        print(it.name, it.type)
+
+    # Read a blob
+    with provider.read("/path/to/blob.txt") as blob_stream:
+        data = blob_stream.read()
+        # process data
+
+Notes
+-----
+
+- The provider uses aiohttp for asynchronous HTTP requests and xml.dom.minidom for XML parsing.
+- The build of the in-memory model relies on a helper get_xml_text to extract text content from XML nodes (not defined in this snippet; expected to be available in the module’s broader context).
+- The list() method validates paths to ensure a well-formed navigation experience.
+- The read() method returns an IO object; the concrete implementation may choose to cache the response and/or stream data as it is downloaded.
+
+Error Handling
+--------------
+
+- If the container listing request fails (non-200 status), a warning is logged and the model loading aborts.
+- If list() is called before the model is loaded, a RuntimeError("Not ready") is raised.
+- If the requested path does not exist or is not a directory, KeyError is raised.
+
+See Also
+--------
+
+- Azure Blob Storage REST API (List Blobs: restype=container&comp=list)
+- Python asyncio and aiohttp for asynchronous HTTP requests
+- XML parsing with xml.dom.minidom
+
+Example Configuration Snippet
+-----------------------------
+
+.. code-block:: ini
+
+    [library]
+    azure_cache = true  ; or a path like /var/cache/asab.azure
+
+Example URL
+-----------
+
+Azure container with SAS token for private access:
+
+.. code-block:: text
+
+    azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER?sv=2020-10-02&si=XXXX&sr=c&sig=XXXXXXXXXXXXXX
+
+This document describes the AzureStorageLibraryProvider class and its behavior within the library framework, outlining its configuration, operations, and usage patterns.

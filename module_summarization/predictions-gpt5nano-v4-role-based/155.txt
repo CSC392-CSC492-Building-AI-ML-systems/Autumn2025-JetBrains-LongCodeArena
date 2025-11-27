@@ -1,0 +1,120 @@
+Getting Started
+================
+
+Overview
+--------
+This module defines functionality common to master and parent processes in Mitogen. It is intended to be sent to any child context that is about to become a parent (due to recursive connection). It provides utilities for logging, executable discovery, core source handling, and low-level platform details (PTYs, signals, and compatibility shims). Understanding these components helps you reason about how Mitogen starts and manages child contexts, and how to troubleshoot common startup issues.
+
+Key ideas
+- Shared, pre-execution utilities used by master/parent processes when establishing child contexts.
+- Safe, cross-Python compatibility and platform-aware behavior (e.g., PTY handling, SELinux considerations).
+- Lazy or deferred work to avoid contention (e.g., core source minification and prefetching).
+
+Quick Start
+-----------
+
+Install and import
+- No special setup beyond having Mitogen installed. This module is part of Mitogen’s core.
+
+Basic utilities
+- Determine the interpreter to run in child contexts:
+  .. code-block:: python
+
+     from mitogen.core import get_sys_executable
+     print(get_sys_executable())
+
+- Retrieve a compressed copy of mitogen.core source for use by child contexts. This is useful to avoid expensive source retrieval in multi-threaded scenarios:
+  .. code-block:: python
+
+     from mitogen.core import get_core_source_partial
+     get_core_source_partial()
+
+- Check the effective log level used by Mitogen:
+  .. code-block:: python
+
+     from mitogen.core import get_log_level
+     print(get_log_level())
+
+Notes
+- If sys.executable is unset, get_sys_executable logs a warning and returns a default of "/usr/bin/python". This behavior is documented by SYS_EXECUTABLE_MSG.
+- get_core_source_partial() caches a partial/minified version of mitogen.core to reduce contention when multiple threads try to access the core source simultaneously.
+
+What to expect in this module
+-----------------------------
+- Core responsibilities
+  - get_log_level(): Return the effective log level used by Mitogen.
+  - get_sys_executable(): Return sys.executable if set; otherwise fall back to a sensible default and emit a warning once.
+  - _get_core_source(): Internal helper to fetch the original mitogen.core source code (or a minified variant, depending on context).
+  - get_core_source_partial(): Public wrapper to lazily initialize and cache a compressed/core source representation to minimize startup contention.
+- Global and platform constants
+  - SELINUX_ENABLED: Indicates whether SELinux is enforcing. This affects the use of PTY-related operations.
+  - SC_OPEN_MAX: Maximum number of open file descriptors, derived from system configuration or a safe default (1024).
+  - BROKER_SHUTDOWN_MSG, OPENPTY_MSG, SYS_EXECUTABLE_MSG: User-facing messages for common startup or runtime issues.
+  - LINUX_TIOCGPTN, LINUX_TIOCSPTLCK: IOCTL constants for PTY management (required for PTY operations on Linux).
+  - SIGNAL_BY_NUM: Mapping from numeric signal values to names for debugging/logging.
+  - _preexec_hook: Optional hook that runs before exec() of any new child process (used to adjust process affinity or environment prior to forking).
+
+Security and compatibility notes
+- The module contains a pre-exec hook mechanism (_preexec_hook) to allow the child process to be scheduled freely before execution, aiding performance in certain setups.
+- It includes compatibility shims for Python 2/3, such as:
+  - xrange alias for range in Python 3
+  - IM_SELF_ATTR and closure_attr to access bound methods uniformly across Python versions
+- SELINUX_ENABLED is detected by probing /sys/fs/selinux/enforce and influences how Mitogen uses PTYs on SELinux-enabled systems.
+- The code uses internal/private helpers (e.g., _get_core_source, _preexec_hook) intended for internal use or advanced customization.
+
+Architecture notes
+- This module serves as a shared foundation for master and parent processes:
+  - Masters may minify or prefetch core sources to optimize downstream context creation.
+  - Child contexts (when promoted to parents) rely on the utilities to determine the correct Python interpreter and to obtain core source efficiently.
+- Core source handling is designed to avoid contention in multi-threaded startup paths by caching a minified version of mitogen.core’s source and by deferring expensive work via get_core_source_partial.
+
+Details on important components
+---------------------------------
+
+get_log_level
+- Purpose: Return the effective logging level for Mitogen.
+- Usage: Simple read of the configured log level, defaults to INFO if none is set.
+
+get_sys_executable
+- Purpose: Return the Python interpreter path to use for child contexts.
+- Behavior:
+  - If sys.executable is set, return it.
+  - Otherwise, log SYS_EXECUTABLE_MSG once and return "/usr/bin/python".
+- Rationale: Ensures child contexts start with a usable Python interpreter even when the parent’s environment is incomplete.
+
+_get_core_source and get_core_source_partial
+- _get_core_source:
+  - Internal hook to fetch the mitogen.core source code, used as the basis for minification or transmission to child contexts.
+  - In non-master contexts, this fetch is straightforward; in masters, the function is replaced to perform minification directly.
+- get_core_source_partial:
+  - Helps avoid contention when multiple threads try to fetch/core-source concurrently.
+  - It initializes a cached, compressed version of mitogen.core via PartialZlib (thread-safe lazy initialization).
+  - Call pattern:
+    .. code-block:: python
+
+       from mitogen.core import get_core_source_partial
+       get_core_source_partial()
+       # The partial core source is now cached for later use.
+
+PTY and platform-specific details
+- SELINUX_ENABLED: If SELinux is enforcing, Mitogen avoids using socketpairs/PTY-related heavy operations to prevent security policy conflicts.
+- OPENPTY_MSG: Guidance when PTY creation fails due to system limits (e.g., maximum PTYs reached). Advises OS-level tuning.
+- LINUX_TIOCGPTN and LINUX_TIOCSPTLCK: Linux-specific IOCTL constants used for PTY management.
+- SC_OPEN_MAX: System-open-file descriptor limit used as a safety bound to avoid exhausting resources.
+
+Common messages
+- BROKER_SHUTDOWN_MSG: Message indicating a broker has begun shutdown, used to gracefully handle connection cancellation.
+- OPENPTY_MSG: Provided to help diagnose and resolve PTY exhaustion issues.
+- SYS_EXECUTABLE_MSG: Warns when Python’s sys.executable is not set and explains the fallback behavior.
+
+Python compatibility and helpers
+- The module checks mitogen.core.PY3 to apply appropriate aliases and attribute names for cross-version compatibility.
+  - xrange alias to range on Py3
+  - closure_attr and IM_SELF_ATTR for accessing function closures and bound instances consistently across Py2/3.
+
+Contribution and further reading
+- This Getting Started guide covers the essentials required to begin working with the core startup and context-management features of Mitogen.
+- For advanced customization, you may interact with _preexec_hook to tailor process affinity or environment before child execution.
+- Explore how get_core_source_partial integrates with master behavior to minimize startup contention in multi-threaded scenarios.
+
+If you need deeper explanations of any function or a guided walkthrough for a concrete startup scenario (e.g., starting a child context from a master, handling PTY constraints, or diagnosing SELinux-related PTY issues), I can provide targeted walkthroughs or examples.

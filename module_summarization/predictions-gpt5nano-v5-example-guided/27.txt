@@ -1,0 +1,156 @@
+# w_kinetics
+
+## Overview
+w_kinetics is a deprecated wrapper for performing state-to-state kinetics analysis by tracing trajectories. It delegates to the w_direct tool (specifically the trace subcommand) and outputs to kintrace.h5 by default. This shim preserves backward compatibility while guiding users to the newer interface (w_direct).
+
+The wrapped implementation computes:
+- state-to-state fluxes and arrivals along trajectories
+- event durations for transitions between macrostates
+
+The output is intended as input for the w_kinavg tool, which converts flux data into average rates with confidence intervals.
+
+Key note: this command is deprecated. See the code excerpt and deprecation warning in the Key Components section.
+
+## Key Components
+
+- WKinetics (subcommand wrapper)
+  - Subcommand: trace
+  - Help text: averages and CIs for path-tracing kinetics analysis
+  - Default output file: kintrace.h5
+
+  Code excerpt:
+  ```
+  class WKinetics(DKinetics):
+      subcommand = 'trace'
+      help_text = 'averages and CIs for path-tracing kinetics analysis'
+      default_output_file = 'kintrace.h5'
+  ```
+
+- WDirect (shim that delegates to w_direct)
+  - Program: w_kinetics
+  - Subcommands: [WKinetics]
+  - Subparsers title: calculate state-to-state kinetics by tracing trajectories
+  - Description: lengthy explanation of what is calculated, required inputs, and the relationship to w_kinavg
+  - Note: This class acts as a backward-compatibility shim to the newer w_direct interface.
+
+  Code excerpt:
+  ```
+  class WDirect(WESTMasterCommand, WESTParallelTool):
+      prog = 'w_kinetics'
+      subcommands = [WKinetics]
+      subparsers_title = 'calculate state-to-state kinetics by tracing trajectories'
+      description = '''\
+      Calculate state-to-state rates and transition event durations by tracing
+      trajectories.
+
+      A bin assignment file (usually "assign.h5") including trajectory labeling
+      is required (see "w_assign --help" for information on generating this file).
+
+      ...
+      '''
+  ```
+
+- entry_point (deprecation shim)
+  - Emits a deprecation warning
+  - Ensures the subcommand is set to trace if not provided
+  - Delegates to WDirect().main()
+
+  Code excerpt:
+  ```
+  def entry_point():
+      warn('{} is being deprecated.  Please use w_direct instead.'.format(WDirect.prog))
+      import sys
+
+      try:
+          if sys.argv[1]!= 'trace':
+              sys.argv.insert(1, 'trace')
+      except Exception:
+          sys.argv.insert(1, 'trace')
+      WDirect().main()
+  ```
+
+## Usage
+
+- Command
+  - w_kinetics trace [options]
+  - By default, output is kintrace.h5 unless overridden with -o/--output.
+
+- Deprecation and redirection
+  - When invoked, a deprecation warning is printed:
+    - "w_kinetics is being deprecated. Please use w_direct instead."
+  - The tool forwards to w_direct's trace subcommand, inserting the trace subcommand if not provided.
+
+- Output dependencies
+  - A bin assignment file (commonly assign.h5) is required. See w_assign --help for generation details.
+
+- Output file
+  - Default: kintrace.h5
+  - This file is used as input to w_kinavg for normalization and statistical analysis.
+
+- Examples
+  - Basic trace run (explicit subcommand):
+    - w_kinetics trace -i assign.h5 -o kintrace.h5 [other options from w_direct trace]
+  - Convenience run (no subcommand provided):
+    - w_kinetics
+    - This will internally behave as if you ran: w_kinetics trace ...
+
+- Inheritance of options
+  - Options are inherited from the wrapped w_direct trace subcommand (via the DKinetics/WESTMasterCommand interface).
+
+## Details
+
+Output format
+The output file (-o/--output, by default "kintrace.h5") contains the following datasets:
+
+- /conditional_fluxes [iteration][state][state]
+  - Floating-point
+  - Macrostate-to-macrostate fluxes. These are not normalized by the population of the initial macrostate.
+
+- /conditional_arrivals [iteration][stateA][stateB]
+  - Integer
+  - Number of trajectories arriving at state stateB in a given iteration, given that they departed from stateA.
+
+- /total_fluxes [iteration][state]
+  - Floating-point
+  - Total flux into a given macrostate.
+
+- /arrivals [iteration][state]
+  - Integer
+  - Number of trajectories arriving at a given state in a given iteration, regardless of origin.
+
+- /duration_count [iteration]
+  - Integer
+  - The number of event durations recorded in each iteration.
+
+- /durations [iteration][event duration]
+  - Structured (see below)
+  - Event durations for transition events ending during a given iteration. Stored as:
+    - istate
+      - Integer
+      - Initial state of transition event
+    - fstate
+      - Integer
+      - Final state of transition event
+    - duration
+      - Floating-point
+      - Duration of transition, in units of tau
+    - weight
+      - Floating-point
+      - Weight of trajectory at end of transition, not normalized by initial state population
+
+Normalization note
+- Fluxes stored in this file are not normalized by initial macrostate population, so they cannot be used directly as rates without further processing.
+- Use w_kinavg (e.g., w_kinavg trace) to perform normalization while accounting for statistical fluctuations and correlations.
+- Target fluxes (total flux into a given state) do not require such normalization.
+
+Deprecation and migration
+- This command is a backward-compatible shim intended to ease migration to the w_direct interface.
+- Users should transition to using w_direct (and w_direct trace) for future workflows.
+
+Code references (for quick lookup)
+- WKinetics and WDirect definitions
+  - See the class definitions and descriptions provided in the Key Components section above.
+- Deprecation behavior
+  - See entry_point function excerpt above.
+
+---

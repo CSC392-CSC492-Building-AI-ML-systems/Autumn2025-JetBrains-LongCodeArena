@@ -1,0 +1,191 @@
+Async Planning Helpers
+======================
+
+This document describes the asynchronous planning helpers implemented in the async.rst module. The module provides three plan builders used with Bluesky RunEngine to acquire data from detectors and to drive motor scans.
+
+Overview
+--------
+
+- count(detectors, num=1, delay=None, *, per_shot=None, md=None)
+  - Take a series of readings from one or more detectors.
+  - Builds a plan that repeatedly invokes a per-shot hook (defaulting to a simple one-shot behavior) with optional delays between readings.
+  - Produces a metadata dictionary describing the plan (points, detectors, and plan details).
+
+- list_scan(detectors, *args, per_step=None, md=None)
+  - Scan over one or more motors in a multi-dimensional inner product (cartesian) of point lists.
+  - Validates input lengths, constructs an internal plan representation, and delegates execution to the Bluesky scan_nd helper with an inner_list_product cycler.
+  - Automatically propagates motor hints (fields) into the plan’s metadata hints when available.
+
+- rel_list_scan(detectors, *args, per_step=None, md=None)
+  - Placeholder for a relative-list-scan plan (relative to current position).
+  - Not yet implemented in this version (TODO stub).
+
+API Reference
+-------------
+
+count(detectors, num=1, delay=None, *, per_shot=None, md=None)
+- Purpose
+  - Take a sequence of readings from provided detectors.
+
+- Parameters
+  - detectors: list
+    - Readable objects (e.g., detectors/ophyd devices) to read at each step.
+  - num: int or None, optional
+    - Number of readings to take. If None, continue until canceled.
+  - delay: iterable or scalar, optional
+    - Delay in seconds between successive readings. If an iterable, it must provide at least num-1 values.
+  - per_shot: callable, optional
+    - Hook that customizes the action of the inner loop. Signature:
+      def f(detectors: Iterable[OphydObj]) -> Generator[Msg, None, None]
+  - md: dict, optional
+    - Metadata to augment the generated plan.
+
+- Returns
+  - A generator-based Bluesky plan that yields steps to perform the readings.
+
+- Notes
+  - num_intervals is num - 1 when num is not None; if num is None, num_intervals is None.
+  - The plan uses a stage decorator and a run decorator to set up the context and metadata.
+  - If per_shot is not provided, a default one_shot plan stub from bps is used.
+
+- Example
+  - Basic usage inside a plan:
+    code-block:: python
+
+      detectors = [det1, det2]
+      yield from count(detectors, num=5, delay=0.2)
+
+  - Custom per-shot hook:
+    code-block:: python
+
+      def my_per_shot(detectors):
+          # Custom per-shot behavior (e.g., messaging)
+          yield Msg('per_shot', detectors=[d.name for d in detectors])
+
+      detectors = [det1, det2]
+      yield from count(detectors, num=3, per_shot=my_per_shot)
+
+  - Metadata customization:
+    code-block:: python
+
+      detectors = [det1, det2]
+      md = {'plan_name': 'custom_count', 'hints': {'dimensions': [(('time',), 'primary')]}}
+      yield from count(detectors, num=4, md=md)
+
+list_scan(detectors, *args, per_step=None, md=None)
+- Purpose
+  - Scan over one or more motors in an inner-product (cartesian) fashion, advancing all motors in lockstep through their respective point lists.
+
+- Parameters
+  - detectors: list
+    - Readable detector objects to capture data during the scan.
+  - *args:
+    - Pairs of (motor, [points]) for each dimension. Example:
+      motor1, [p1, p2, ...],
+      motor2, [q1, q2, ...],
+      ...
+  - per_step: callable, optional
+    - Hook for customizing actions per step. Signature:
+      f(detectors, motor, step) -> plan (generator)
+  - md: dict, optional
+    - Metadata to augment the generated plan.
+
+- Returns
+  - A Bluesky plan that executes a multivariate list scan via scan_nd with an inner_list_product cycler.
+
+- Details
+  - All point lists must have the same length; otherwise a ValueError is raised.
+  - The plan args include a serialized representation of detectors and motors, and per_step if provided.
+  - The plan exports plan_name 'list_scan', plan_pattern 'inner_list_product', and plan_pattern_module plan_patterns.__name__.
+  - Motor hints (fields) are gathered to populate default_dimensions in hints when present.
+
+- Example
+  - Simple two-motor list scan:
+    code-block:: python
+
+      dets = [det1]
+      motor_a = motor1
+      motor_b = motor2
+      yield from list_scan(dets, motor_a, [0, 1, 2], motor_b, [10, 20, 30])
+
+  - With a per_step hook:
+    code-block:: python
+
+      def log_step(detectors, motor, step):
+          yield Msg('step', motor=motor.name, step=step)
+
+      yield from list_scan(dets, motor_a, [0, 1, 2], motor_b, [10, 20, 30], per_step=log_step)
+
+rel_list_scan(detectors, *args, per_step=None, md=None)
+- Purpose
+  - Intended to implement scans where each step is defined relative to the current position.
+
+- Status
+  - Not implemented in this version (TODO). The function currently contains a placeholder.
+
+- Notes
+  - Once implemented, this will mirror the interface of list_scan but compute target positions as relative offsets from the current motor locations.
+
+- Example
+  - Not available yet due to lack of implementation.
+
+Implementation Details
+----------------------
+
+- Metadata (md)
+  - Each plan constructs a metadata dictionary (_md) that includes:
+    - detectors: list of detector names
+    - num_points: number of steps (for count) or length of the scan
+    - num_intervals: num_points - 1 (when applicable)
+    - plan_args: serialized representation of inputs
+    - plan_name: the plan function name (e.g., 'count', 'list_scan')
+    - plan_pattern and plan_pattern_args: describe the inner pattern (e.g., inner_list_product)
+    - hints: default hints (e.g., dimensions) derived from motor hints if available
+
+- Decorators
+  - count uses:
+    - @bpp.stage_decorator(detectors)
+    - @bpp.run_decorator(md=_md)
+  - This ensures detectors are staged/un-staged and that metadata is attached to the RunEngine event stream.
+
+- Dependencies
+  - partition (from cytools if available, otherwise from toolz)
+  - plan_patterns (for generating the inner scan product)
+  - bluesky plan stubs and pre/post processing (bps, bpp)
+  - scan_nd (Bluesky utility for multi-dimensional scans)
+
+Notes for Integrators and Developers
+------------------------------------
+
+- The rel_list_scan function is a placeholder and should be implemented to provide relative-position scanning semantics.
+- The count plan supports both scalar and iterable delays; ensure the iterable has enough entries when num > 1.
+- The list_scan plan automatically propagates motor hints into the plan’s metadata hints, enabling downstream consumers to render appropriate axes titles or dimensions.
+
+Examples (Composite)
+----------------------
+
+- A minimal count plan
+  code-block:: python
+
+    detectors = [det1, det2]
+    yield from count(detectors, num=5, delay=0.2)
+
+- A multi-motor list scan
+  code-block:: python
+
+    detectors = [det1]
+    motor1 = motorA
+    motor2 = motorB
+    yield from list_scan(detectors,
+                         motor1, [0, 1, 2],
+                         motor2, [10, 20, 30])
+
+- A count plan with metadata customization
+  code-block:: python
+
+    detectors = [det1]
+    md = {'plan_name': 'custom_count', 'hints': {'dimensions': [[('time',), 'primary']]}}
+    yield from count(detectors, num=3, md=md)
+
+End of Async Planning Helpers
+------------------------------

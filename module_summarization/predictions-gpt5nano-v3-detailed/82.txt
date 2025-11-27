@@ -1,0 +1,149 @@
+BaseUser
+=========
+
+Overview
+--------
+
+The BaseUser model provides a basic, secure user representation for authentication
+within the Piccolo ORM ecosystem. It stores user credentials and related
+metadata, and includes password hashing using PBKDF2-HMAC-SHA256 with a strong
+iteration count. The class exposes both synchronous and asynchronous utilities for
+creating users, updating passwords, and authenticating login attempts.
+
+Model and Table
+---------------
+
+- Inherits from: Piccolo's Table
+- Table name: piccolo_user
+
+Key fields
+---------
+
+- id: Serial
+- username: Varchar(length=100, unique=True)
+- password: Secret(length=255)
+- first_name: Varchar(null=True)
+- last_name: Varchar(null=True)
+- email: Varchar(length=255, unique=True)
+- active: Boolean(default=False)
+- admin: Boolean(default=False, help_text="An admin can log into the Piccolo admin GUI.")
+- superuser: Boolean(default=False, help_text="If True, this user can manage other users' passwords in the Piccolo admin GUI.")
+- last_login: Timestamp(null=True, default=None, required=False, help_text="When this user last logged in.")
+
+Internal constants
+------------------
+
+- _min_password_length: minimum allowed password length (default 6)
+- _max_password_length: maximum allowed password length (default 128)
+- _pbkdf2_iteration_count: default PBKDF2 iteration count (default 600_000)
+
+Initialization and password handling
+-----------------------------------
+
+- __init__(self, **kwargs)
+  - If a plaintext password is provided, it is hashed automatically unless it already starts with pbkdf2_sha256.
+- get_salt(cls)
+  - Returns a new random salt (hex).
+- get_readable(cls) -> Readable
+  - Returns a Readable representation for a table row (uses username).
+
+Password validation and hashing
+------------------------------
+
+- _validate_password(cls, password: str)
+  - Validates a raw (plaintext) password.
+  - Rules:
+    - Must be provided
+    - Length within [_min_password_length, _max_password_length]
+    - Must not start with "pbkdf2_sha256" (disallows passing an already-hashed password)
+- hash_password(cls, password: str, salt: str = "", iterations: Optional[int] = None) -> str
+  - Returns a string in the format: pbkdf2_sha256$<iterations>$<salt>$<hash>
+  - Uses PBKDF2-HMAC-SHA256 with the specified iterations and salt.
+  - Enforces maximum password length; raises ValueError if exceeded.
+- __setattr__(self, name: str, value: Any)
+  - If setting password and the value is not already hashed, hashes it automatically.
+- split_stored_password(cls, password: str) -> List[str]
+  - Splits a stored hashed password into [algorithm, iterations, salt, hash].
+  - Validates the expected four components.
+
+Authentication and password updates
+-----------------------------------
+
+- update_password_sync(cls, user: Union[str, int], password: str)
+  - Sync wrapper for update_password.
+- update_password(cls, user: Union[str, int], password: str)
+  - Asynchronous method to update a user's password.
+  - user may be a username (str) or user id (int).
+  - Validates the new plaintext password, hashes it, and stores it.
+- login_sync(cls, username: str, password: str)
+  - Sync wrapper for login.
+- login(cls, username: str, password: str) -> Optional[int]
+  - Asynchronously authenticates a user.
+  - Validates input lengths (username and password).
+  - Fetches the stored hashed password for the given username.
+  - Splits stored password, rehashes the provided plaintext with the stored salt and iterations,
+    and compares against the stored hash.
+  - If successful, updates last_login and returns the user id; otherwise returns None.
+  - If the password was hashed with a previous iteration count, updates it to the current standard.
+
+Important notes and edge cases
+------------------------------
+
+- Do not pass an already hashed password to creation or update; the code will reject this
+  in _validate_password and during __setattr__ if it detects a non-plaintext string.
+- Extremely long passwords raise a ValueError during hashing.
+- The login method performs basic input length checks and gracefully returns None if no match is found.
+- The stored password format is "pbkdf2_sha256$<iterations>$<salt>$<hash>", enabling migration
+  to newer iteration counts without losing compatibility.
+
+Usage examples
+--------------
+
+Creating a new user (password is stored hashed automatically)
+::
+
+    from piccolo.table import insert  # or use BaseUser.create if synchronous API is available
+    from baseuser import BaseUser
+
+    # Async example
+    user = await BaseUser.create(
+        username="alice",
+        password="password123",
+        email="alice@example.com",
+        first_name="Alice",
+        last_name="Example",
+    )
+
+    # Synchronous helper example (if available in your setup)
+    # user = BaseUser.create(...)
+
+Authenticating a user
+::
+
+    user_id = await BaseUser.login("alice", "password123")
+    if user_id is not None:
+        print(f"User authenticated, id={user_id}")
+    else:
+        print("Authentication failed")
+
+Updating a password
+::
+
+    # Async
+    await BaseUser.update_password(user_id or "alice", "newpassword456")
+
+    # Ssync wrapper
+    # BaseUser.update_password_sync(user_id or "alice", "newpassword456")
+
+Notes on readability and representation
+---------------------------------------
+
+- The get_readable() method returns a Readable representation focusing on the username for concise display.
+
+See Also
+--------
+
+- Piccolo ORM Table and field types for context on type objects (Serial, Varchar, Secret, Boolean, Timestamp).
+- Piccolo utilities for async/sync execution patterns (run_sync).
+
+End of Documentation

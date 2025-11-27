@@ -1,0 +1,142 @@
+Parallel Random Number Generation
+===============================
+
+Overview
+--------
+This document describes the parallel RNG components exposed by the numpy.random integration built with the npyrandom C core. The build produces:
+
+- A static core library npyrandom implementing distributions and related utilities
+  (logfactorial, general distributions, MVHG counts and marginals, hypergeometric, etc.).
+- A set of Cython/C extensions that expose multiple bit generators and a common
+  Python API under numpy.random.
+
+The result is a collection of independent random-number streams based on different bit generators that can be used in parallel across threads or processes. Each bit generator yields an independent sequence when seeded separately, enabling parallel reproducibility.
+
+Core components
+---------------
+- npyrandom static library
+  - Sources:
+    - src/distributions/logfactorial.c
+    - src/distributions/distributions.c
+    - src/distributions/random_mvhg_count.c
+    - src/distributions/random_mvhg_marginals.c
+    - src/distributions/random_hypergeometric.c
+  - Purpose: provides fast, reusable RNG-related distributions and utilities used by the Python extensions.
+  - Build/install: built as a static library and installed to np_dir/random/lib.
+
+- Python/Cython extensions for numpy.random
+  - Shared build artifacts:
+    - _bounded_integers.pxd (generated from _bounded_integers.pxd.in)
+    - _bounded_integers.pyx (generated from _bounded_integers.pyx.in)
+    - __init__.py, __init__.pxd, _common.pxd, bit_generator.pxd, c_distributions.pxd
+  - Per-generation modules:
+    - _bounded_integers
+    - _common
+    - _mt19937
+    - _philox
+    - _pcg64
+    - _sfc64
+    - bit_generator
+    - _generator
+    - mtrand (legacy interface, includes distributions and legacy code paths)
+  - Build details:
+    - Each module compiles with a shared set of cython tree files and the bit-generator specific sources.
+    - Link with: the npyrandom_lib (static library) and, where applicable, npymath_lib or other dependencies.
+  - Installation: all Python extension modules install under numpy/random.
+
+Supported bit generators
+------------------------
+The build exposes multiple RNG backends as separate Python extension modules, enabling parallel and independent streams:
+
+- MT19937 (Mersenne Twister)
+- Philox
+- PCG64
+- SFC64
+- Shared infrastructure via bit_generator and _generator
+
+Each backend is exposed as a dedicated module (e.g., _mt19937, _philox, _pcg64, _sfc64) and can be used to construct a numpy.random.Generator with an independent seed.
+
+Python API surface
+------------------
+Installed modules under numpy/random include:
+
+- _bounded_integers
+- _common
+- _mt19937
+- _philox
+- _pcg64
+- _sfc64
+- bit_generator
+- _generator
+- mtrand
+
+High-level usage patterns
+-------------------------
+- Create independent streams for parallel work:
+  - Use different bit generators (or different seeds per generator) to avoid correlation.
+  - Each Generator wraps a single bit generator instance.
+
+- Example: basic usage with PCG64
+  .. code-block:: python
+
+     import numpy as np
+
+     rng1 = np.random.Generator(np.random.PCG64(12345))
+     a = rng1.random((2, 3))
+
+     rng2 = np.random.Generator(np.random.Philox(67890))
+     b = rng2.integers(0, 10, size=(4,))
+
+- Example: parallel usage across threads
+  .. code-block:: python
+
+     import numpy as np
+     import threading
+
+     seeds = [111, 222, 333, 444]
+     gens = [np.random.Generator(getattr(np.random, 'PCG64')(s)) for s in seeds]
+
+     results = []
+     def worker(g):
+         results.append(g.random(5))
+
+     threads = [threading.Thread(target=worker, args=(g,)) for g in gens]
+     for t in threads:
+         t.start()
+     for t in threads:
+         t.join()
+
+- Note: For best parallel reproducibility, assign a distinct bit generator instance (or distinct seed sequences) per thread or per process.
+
+Build and integration
+---------------------
+- Build system: Meson
+- Core library: npyrandom (static) built from the C sources listed above
+- Python extensions: generated from a combination of:
+  - _bounded_integers.pxd/.pyx (with a template-generated _bounded_integers.pxd)
+  - Core bit generator C sources (mt19937.c, philox.c, pcg64.c, sfc64.c)
+  - Common Python/Cython glue in _common, bit_generator, _generator
+- Installation layout:
+  - npyrandom library installs to np_dir/random/lib
+  - Python extension modules install under numpy/random
+  - Tests, data, and examples install under numpy/random/tests and related subdirectories
+
+Extending parallel RNG
+---------------------
+- To add a new bit generator:
+  - Implement the C source for the new algorithm (analogous to _mt19937, _philox, _pcg64, _sfc64).
+  - Add a new entry to random_pyx_sources with:
+    - Name and Pyx/C sources
+    - Any special compile args
+    - Optional link dependencies
+  - Ensure the new generator links with npyrandom_lib.
+  - Rebuild; the new generator becomes available as numpy.random.<NewGeneratorName>.
+
+Licensing
+---------
+This software is dual-licensed under the The University of Illinois/NCSA Open Source License (NCSA). See the repository for full license text and terms.
+
+Notes
+-----
+- The build process embeds several distribution-related pieces (logfactorial, MVHG, hypergeometric) into the npyrandom core to support fast statistical routines used by the Python extensions.
+- The architecture emphasizes independent streams to support parallel workflows, with multiple backend options to suit different performance and reproducibility needs.

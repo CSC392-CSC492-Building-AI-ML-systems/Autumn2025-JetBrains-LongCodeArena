@@ -1,0 +1,150 @@
+Handling large datasets
+
+Introduction
+This section documents the utilities for computing moment maps from large spectral cubes. The module provides several strategies to balance memory usage and performance when deriving zeroth, first, or higher-order moments along a specified axis. It supports per-slice, per-ray, and full-cube computations, plus an auto-dispatcher that selects the most suitable strategy based on the data characteristics.
+
+Overview of the API
+Key functions (and their roles)
+- _moment_shp(cube, axis)
+  - Purpose: Determine the shape of the moment map produced when collapsing along axis.
+  - Parameters:
+    - cube: SpectralCube-like object
+    - axis: int, axis to collapse along (numpy convention)
+  - Returns: tuple describing the output shape (ny, nx) with the collapsed axis removed
+- _slice0(cube, axis)
+  - Purpose: Compute the 0th moment (integrated intensity) along axis, slice-by-slice.
+  - Behavior: Accumulates finite data per-slice, weighting by pixel size; masks non-finite regions as NaN.
+  - Returns: numpy array with shape given by _moment_shp(cube, axis)
+- _slice1(cube, axis)
+  - Purpose: Compute the 1st moment (intensity-weighted centroid) along axis, slice-by-slice.
+  - Behavior: Uses pixel centers and pixel sizes to compute a weighted centroid; returns centroid map
+  - Returns: numpy array with shape given by _moment_shp(cube, axis)
+- moment_slicewise(cube, order, axis)
+  - Purpose: General slice-wise moment computation (supports order 0, 1, and higher).
+  - Behavior:
+    - order == 0: delegates to _slice0
+    - order == 1: delegates to _slice1
+    - order > 1: computes using per-slice contributions and a precomputed moment1 with a final normalization by weights
+  - Returns: moment map for given order
+- moment_raywise(cube, order, axis)
+  - Purpose: Compute moments by processing one ray at a time (along the non-collapsed dimensions).
+  - Behavior: Iterates over (x, y) positions along the chosen axis, selecting data via the mask, and computing the moment for each ray
+  - Returns: 2D map (shape given by _moment_shp(cube, axis))
+- moment_cubewise(cube, order, axis)
+  - Purpose: Compute moments using the entire filled data at once
+  - Behavior: Uses the full cube data with appropriate weighting by pixel sizes and centers
+  - Special handling:
+    - order == 0 uses allbadtonan(np.nansum)(data, axis=axis) to handle all-bad cases
+    - order >= 1 uses a nan-aware weighted sum with centroids
+  - Returns: moment map
+- moment_auto(cube, order, axis)
+  - Purpose: Build a moment map using an automated strategy that balances speed and memory
+  - Behavior: Selects a strategy via iterator_strategy(cube, axis) and dispatches to moment_cubewise, moment_raywise, or moment_slicewise
+  - Returns: moment map
+
+Strategy selection and relationships
+- The module relies on an external helper: iterator_strategy(cube, axis) (from .cube_utils). This function inspects cube characteristics (size, mask, etc.) and returns a key such as 'cube', 'ray', or 'slice'.
+- moment_auto maps the strategy key to the corresponding implementation:
+  - 'cube' -> moment_cubewise
+  - 'ray'  -> moment_raywise
+  - 'slice'-> moment_slicewise
+
+Data model and requirements
+- The computations assume a SpectralCube-like object that provides:
+  - shape: tuple describing the cube dimensions, with the axis to collapse along included
+  - _pix_size_slice(axis): scalar or 1D array representing the pixel size along the collapsed axis
+  - _pix_cen(): array of pixel centers; indexed as pix_cen[axis]
+  - _get_filled_data(fill, view): returns a filled data plane for a given 3D view, filling missing data with the specified value
+  - _iter_rays(axis): yields (x, y, slc) tuples for each ray along the collapsed axis
+  - _mask.include(data, wcs, view, wcs_tolerance): boolean mask indicating valid data for a given view
+  - flatten() / flattened(view): accessors to obtain flattened data arrays for a given view
+  - _wcs and _wcs_tolerance: WCS information used by masking
+- Output shapes follow _moment_shp(cube, axis) and are typically 2D maps (ny, nx) when collapsing along the spectral axis (or analogous spatial-axes for other axis choices).
+
+Important considerations and edge cases
+- NaN propagation and masking
+  - 0th moment uses NaNs for invalid regions (NaN weighting for non-finite data, then NaN where no valid data exists)
+  - Higher-order moments rely on finite weights; per-slice and per-ray methods account for missing data, but you should verify that the weight sum is non-zero to avoid division-by-zero
+- Memory vs. speed
+  - cubewise is memory-intensive but fast for moderate-sized cubes
+  - raywise and slicewise are more memory-friendly, suitable for very large cubes or limited RAM
+  - moment_auto helps select an appropriate strategy automatically
+- Mask handling
+  - Ordering and masking must be consistent across methods. The per-ray approach uses the cube’s mask to determine included voxels for each ray
+- Edge cases
+  - All data along an axis could be masked or NaN; results should be NaN for such locations
+  - Zero-weight slices can lead to NaN or Inf in the final results depending on implementation; users should check outputs in edge regions
+
+Usage examples
+
+Example 1: basic moments with auto strategy
+- Compute moment-0 and moment-1 along the spectral axis (axis index may vary by convention; here we assume axis=2 is spectral)
+.. code-block:: python
+
+   # moment along the spectral axis using the auto strategy
+   m0 = moment_auto(cube, order=0, axis=2)
+   m1 = moment_auto(cube, order=1, axis=2)
+
+   # m0 and m1 are arrays with shape given by _moment_shp(cube, 2)
+
+Example 2: force a specific strategy (raywise)
+.. code-block:: python
+
+   # Force ray-wise computation for higher-order moments
+   m2_ray = moment_raywise(cube, order=2, axis=2)
+
+Example 3: compare strategies for a small cube
+.. code-block:: python
+
+   m0_cube = moment_cubewise(cube, order=0, axis=2)
+   m0_slice = moment_slicewise(cube, order=0, axis=2)
+   m0_ray = moment_raywise(cube, order=0, axis=2)
+
+Notes
+- The axis parameter follows numpy axis conventions: 0 and 1 are spatial axes, 2 (or the last axis) is typically the spectral axis in standard 3D cube shapes.
+- The moment computation assumes the cube object can provide pixel size and centroid information, and supports masked data access as described above.
+- The auto strategy is practical for typical workflows, but you should validate results on representative subsets when working with very large datasets or unusual data distributions.
+
+API reference (quick summary)
+
+- moment_auto(cube, order, axis):
+  - Returns: numpy.ndarray with shape given by _moment_shp(cube, axis)
+  - Strategy-selected by iterator_strategy(cube, axis)
+
+- moment_cubewise(cube, order, axis):
+  - Returns: moment map computed over the entire filled data
+
+- moment_raywise(cube, order, axis):
+  - Returns: moment map computed per-ray
+
+- moment_slicewise(cube, order, axis):
+  - Returns: moment map computed slice-by-slice (plane-by-plane)
+
+- _slice0(cube, axis):
+  - Zeroth moment (integrated intensity) along axis
+
+- _slice1(cube, axis):
+  - First moment (centroid) along axis
+
+- _moment_shp(cube, axis):
+  - Output shape for the moment map
+
+Edge cases and troubleshooting
+- If the weight sums are zero for a given position, the corresponding output will be NaN or raise a warning depending on the implementation path
+- If the input cube contains extensive NaNs or masked regions, moment_auto may select a slower but more robust path; verify results with smaller tests
+- Ensure consistent masking across all methods when combining results from multiple approaches
+
+See also
+- cube_utils.iterator_strategy: determines the recommended computation strategy based on cube characteristics
+- numpy nanmean / nansum utilities used to handle NaNs during summations
+
+Code references (for quick lookup)
+- moment_auto(cube, order, axis)
+- moment_cubewise(cube, order, axis)
+- moment_raywise(cube, order, axis)
+- moment_slicewise(cube, order, axis)
+- _slice0(cube, axis)
+- _slice1(cube, axis)
+- _moment_shp(cube, axis)
+
+These components enable scalable moment map computation across very large datasets while balancing memory footprint and performance.

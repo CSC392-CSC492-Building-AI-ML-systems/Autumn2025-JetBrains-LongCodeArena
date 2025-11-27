@@ -1,0 +1,165 @@
+A quick dive into using the API
+===============================
+
+This section provides a concise, practical introduction to creating and using a Session with the ftrack_api. It highlights the most commonly used options, how authentication is applied, and how to enable optional features such as caching, schema caching, event hub connectivity, and plugin discovery.
+
+Overview
+--------
+The core entry point for interacting with an ftrack server is the Session class. A Session encapsulates server URL, authentication, and various optional features that tailor how you interact with the API (auto-populated entities, caching, plugins, and event handling).
+
+Key concepts:
+- Authentication is attached to outgoing requests automatically.
+- Sessions can automatically populate entity data on access (auto_populate).
+- Caching can be customized and layered on top of a default memory cache.
+- Plugins can be discovered from configured paths and can receive custom arguments.
+- Schema caching can improve startup performance.
+- An embedded event hub can be auto-connected for non-local events.
+
+Minimal quick start
+-------------------
+Below is the minimal code to create a session. Values can be provided directly or sourced from environment variables.
+
+.. code-block:: python
+
+    from ftrack_api import Session
+
+    session = Session(
+        server_url='https://ftrack.example.com',
+        api_key='YOUR_API_KEY',
+        api_user='YOUR_USERNAME'
+    )
+
+Notes:
+- If server_url, api_key, or api_user are not provided, the session will attempt to read them from environment variables:
+  - FTRACK_SERVER for server_url
+  - FTRACK_API_KEY (or FTRACK_APIKEY for backwards compatibility) for api_key
+  - FTRACK_API_USER for api_user (or fall back to Python's getpass.getuser())
+
+- By default, accessing entity attributes will auto-populate data from the server (auto_populate=True).
+
+Authentication and request handling
+-----------------------------------
+The session uses a dedicated authentication helper to attach credentials to HTTP requests:
+
+.. code-block:: python
+
+    class SessionAuthentication(requests.auth.AuthBase):
+        def __init__(self, api_key, api_user):
+            self.api_key = api_key
+            self.api_user = api_user
+
+        def __call__(self, request):
+            request.headers.update({
+                'ftrack-api-key': self.api_key,
+                'ftrack-user': self.api_user
+            })
+            return request
+
+In normal usage, you do not manually instantiate this class; the Session handles authentication transparently by applying the appropriate headers to requests sent to the server.
+
+Configuration options (constructor parameters)
+---------------------------------------------
+Session.__init__ accepts several parameters to tailor behavior. The most commonly used are:
+
+- server_url (str): URL of the ftrack server (including port if needed). If omitted, the environment variable FTRACK_SERVER is used.
+- api_key (str): API key for authentication. If omitted, FTRACK_API_KEY or FTRACK_APIKEY is used.
+- api_user (str): Username for API operations. If omitted, FTRACK_API_USER is used or the system user name is used as a fallback.
+- auto_populate (bool): If True (default), entity attributes are automatically fetched from the server on access.
+- plugin_paths (list of str): Paths to search for plugins. If omitted, FTRACK_EVENT_PLUGIN_PATH may be consulted.
+- cache (object or callable): A cache implementing the ftrack_api.cache.Cache interface, or a callable that returns a cache (or None). The session will add your specified cache to a layered, top-level memory cache automatically.
+- cache_key_maker (object): An object implementing the KeyMaker interface to generate cache keys. Defaults to a StringKeyMaker.
+- auto_connect_event_hub (bool): If True, an embedded event hub is automatically connected to the event server (non-local events). If False, only local events are available until you manually connect the hub.
+- schema_cache_path (str or False): Path to enable schema caching. If a path is provided, schema metadata is cached there. If False, schema caching is disabled. If None, FTRACK_API_SCHEMA_CACHE_PATH is consulted, otherwise a temporary directory may be used.
+- plugin_arguments (dict): Optional mapping of keyword arguments passed to discovered plugins. The discovery mechanism will adapt arguments to the plugin’s accepted signature, logging a warning if some arguments are dropped.
+
+Common usage patterns
+---------------------
+1) Enable schema caching to improve startup performance:
+
+.. code-block:: python
+
+    session = Session(
+        server_url='https://ftrack.example.com',
+        api_key='YOUR_API_KEY',
+        api_user='YOUR_USERNAME',
+        schema_cache_path='/path/to/schema/cache'
+    )
+
+2) Customize plugin discovery (paths and arguments):
+
+.. code-block:: python
+
+    session = Session(
+        server_url='https://ftrack.example.com',
+        api_key='YOUR_API_KEY',
+        api_user='YOUR_USERNAME',
+        plugin_paths=['/path/to/plugins', '/another/path'],
+        plugin_arguments={'option_a': 'value', 'option_b': 42}
+    )
+
+3) Use a custom cache (or a factory) with a layered cache:
+   The session expects a cache that fulfils the ftrack_api.cache.Cache interface, or a factory returning one.
+
+.. code-block:: python
+
+    from ftrack_api.cache import MemoryCache
+
+    # Simple direct cache usage
+    session = Session(
+        server_url='https://ftrack.example.com',
+        api_key='YOUR_API_KEY',
+        api_user='YOUR_USERNAME',
+        cache=MemoryCache()
+    )
+
+    # Or supply a callable (factory) that returns None if no suitable cache
+    def make_cache(sess):
+        # Return a cache instance or None
+        return MemoryCache()
+
+    session = Session(
+        server_url='https://ftrack.example.com',
+        api_key='YOUR_API_KEY',
+        api_user='YOUR_USERNAME',
+        cache=make_cache
+    )
+
+4) Enable automatic non-local event hub connections:
+
+.. code-block:: python
+
+    session = Session(
+        server_url='https://ftrack.example.com',
+        api_key='YOUR_API_KEY',
+        api_user='YOUR_USERNAME',
+        auto_connect_event_hub=True
+    )
+
+   With auto_connect_event_hub=True, the embedded event hub will connect to the event server in the background. Subscribing to non-local events requires the hub to be connected; local events are available regardless.
+
+5) Disable or customize auto-population:
+
+.. code-block:: python
+
+    session = Session(
+        server_url='https://ftrack.example.com',
+        api_key='YOUR_API_KEY',
+        api_user='YOUR_USERNAME',
+        auto_populate=False
+    )
+
+Notes and best practices
+------------------------
+- Environment variables provide convenient fallbacks for production scripts and CLIs. Be mindful of security when handling API keys.
+- Schema caching is helpful for large schemas or frequent sessions; ensure the cache path is writable and has appropriate permissions.
+- If a plugin signature does not accept a provided argument, the discovery mechanism will attempt to reduce the arguments to those that the plugin accepts (and log a warning). This improves compatibility when integrating third-party plugins.
+- The top-level cache is a MemoryCache by default, ensuring a consistent caching layer. Supplying a custom cache allows advanced caching strategies while preserving the default behavior.
+
+See also
+--------
+- ftrack_api.session.Session: Core entry point for creating a session and configuring its behavior.
+- ftrack_api.session.SessionAuthentication: Internal helper that injects authentication headers into requests.
+- ftrack_api.cache: Cache infrastructure (MemoryCache and other cache implementations).
+- ftrack_api.event.hub: Embedded event hub options and lifecycle.
+
+This quick guide should help you start using the API efficiently, while offering options to customize authentication, caching, plugin loading, and event handling as your needs evolve.

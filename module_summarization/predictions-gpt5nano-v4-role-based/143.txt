@@ -1,0 +1,155 @@
+Managing Memory
+================
+
+Overview
+--------
+
+Memory management in this distributed system is driven by a combination of:
+
+- Estimating and tracking the memory footprint of data across the cluster.
+- Tracking data locality (which worker holds which data) to inform placement and eviction decisions.
+- Managing the lifecycle of remote computations (Futures) and their associated data on the client side.
+- Using serialization and data transfer strategies to minimize memory usage during communication.
+- Avoiding memory leaks by using weak references for global client state and by explicit lifecycle hooks.
+
+Key ideas are embodied in the core concepts below and demonstrated by how Futures, data location tracking, and client lifecycle interact.
+
+Core concepts
+-------------
+
+- Object size estimation
+  - Memory pressure decisions rely on estimating the size of Python objects.
+  - The module exposes a size helper (imported as sizeof) to quantify memory footprints of data items you work with.
+
+- Data location tracking
+  - Information about who has which data is captured in HasWhat and WhoHas structures.
+  - This enables memory-aware scheduling and judicious data movement or eviction, reducing peak memory usage.
+
+- Futures as memory proxies
+  - A Future is a local proxy to a remote computation or data result.
+  - When a Future is bound to a client, the client increments a reference count for the associated key, tying the data’s lifetime to active usage.
+  - The scheduler can be informed about the keys a client needs so it can keep or move data accordingly.
+
+- Client lifecycle and memory safety
+  - Global client state is kept in a weak reference dictionary.
+  - This ensures that dead clients do not get kept alive by global data structures, helping prevent memory leaks.
+  - Helpers exist to set, delete, or fetch the “default” client context without forcibly holding onto objects.
+
+- Serialization and data transfer
+  - Data destined for transfer is filtered through a mechanism that ensures dumpability and encodes data efficiently.
+  - The to_serialize path and pickle-based serialization help control memory usage during inter-worker communication.
+
+- Cleanup and garbage collection
+  - When references to data or futures are dropped, memory can be reclaimed by normal Python GC, assisted by the managed lifecycle hooks in the client and futures.
+
+How memory is tracked and managed in code
+----------------------------------------
+
+- Size estimation
+  - A memory footprint helper (sizeof) is used to estimate the size of Python objects, enabling memory-aware decision making at the scheduler and worker levels.
+
+- Data location and HasWhat/WhoHas
+  - HasWhat and WhoHas help track which worker holds which keys. This visibility informs both memory management and task placement decisions.
+
+- Futures and client binding
+  - Future objects carry a key, client, and state.
+  - When a Future is bound (via _bind_late), the client:
+    - Increments the reference count for the key.
+    - Tracks the Future’s state in the client’s futures dictionary.
+    - Optionally informs the scheduler that specific keys are desired or needed.
+  - This creates a clear ownership and lifetime model for data held in the cluster.
+
+- Global client registry
+  - _global_clients is a weak-value dictionary, so entries disappear automatically when clients are garbage collected.
+  - _set_global_client and _del_global_client help manage the lifecycle without forcing strong references that could keep memory longer than necessary.
+
+- Serialization filtering
+  - Only serializable payloads are prepared for transfer, reducing the risk of oversized or untransferable objects consuming memory during communication.
+
+Practical guidance
+------------------
+
+- Monitoring memory
+  - Use HasWhat/WhoHas to inspect data locality and understand where large objects reside.
+  - Leverage sizeof to estimate the footprint of large data structures before shipping them across the cluster.
+
+- Managing futures and memory
+  - Create Futures with clear ownership (via a specific Client) and release references when results are no longer needed.
+  - After a Future completes and you no longer need its data, drop references to allow memory to be reclaimed.
+
+- Lifecycle hygiene
+  - Avoid creating strong global references to Client objects that outlive their usefulness.
+  - Rely on weak references for global client state to minimize accidental memory retention.
+
+- Serialization discipline
+  - When constructing payloads for transfer, ensure they are serializable and kept as small as possible.
+  - Prefer streaming or chunked transfers for large payloads when available.
+
+Code-derived examples
+---------------------
+
+Example 1: Estimating memory usage of a dataset
+- Purpose: understand a dataset’s footprint before redistribution or eviction.
+
+  - Pseudo usage (conceptual):
+    - from distributed.sizeof import sizeof
+    - size = sizeof(large_dataset)
+    - print("Dataset size (bytes):", size)
+
+Example 2: Creating a Future and memory tracking
+- Purpose: illustrate how a Future participates in memory accounting across a client.
+
+  - Pseudo usage (conceptual):
+    - future = client.submit(some_heavy_function, arg)
+    - # Internally, the Future binds to the client and increments key reference counts
+    - print("Future key:", future.key)
+    - # Optional: force a scheduler update about needed keys
+    - future._inform = True
+    - if future.done():
+    -     result = future.result()
+    -     # After usage, drop references when no longer needed to free memory
+
+Example 3: Releasing memory by removing references
+- Purpose: illustrate cleanup to allow GC to reclaim memory.
+
+  - Pseudo usage (conceptual):
+    - del future
+    - import gc
+    - gc.collect()
+
+API notes and references
+------------------------
+
+- Future
+  - Acts as a local proxy to remote computations and their data.
+  - Lifetime management is tied to the client’s knowledge of which keys are in use.
+  - Key methods and attributes of interest for memory behavior:
+    - key: the remote data key this Future represents
+    - _bind_late(): lazy binding that increments client-side reference counts and informs the scheduler
+    - _inform: whether to notify the scheduler about needed keys
+
+- Client lifecycle helpers
+  - _get_global_client, _set_global_client, _del_global_client
+  - Use of a weak-value dictionary ensures memory safety and avoids leaks from long-lived global references.
+
+- Data localization and tracking
+  - HasWhat, WhoHas: structures used by the system to understand data placement and to guide memory-aware scheduling decisions.
+
+- Serialization and payload safety
+  - to_serialize and related dumps/loads paths govern how data is prepared for transport, influencing memory usage during communication.
+
+Further reading
+--------------
+
+- Class: Future
+  - Memory-related behavior is localized to how the Future binds to a client and how the key’s reference count is managed.
+
+- Components: HasWhat, WhoHas
+  - Look for memory-placement and eviction semantics driven by data locality.
+
+- Utilities: sizeof
+  - Used to estimate object sizes for informed memory decisions.
+
+- Global client management
+  - _global_clients, _set_global_client, _del_global_client
+  - Demonstrates a memory-safe approach to maintaining a registry of active clients without enforcing strong references.

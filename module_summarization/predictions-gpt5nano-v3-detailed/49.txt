@@ -1,0 +1,173 @@
+duration.rst
+
+Introduction
+------------
+This module provides core numerical routines for estimating survival functions and cumulative incidence functions in the presence of right-censoring and competing risks. It also defines a high-level interface (CumIncidenceRight) that encapsulates estimation and inference for cumulative incidence under these settings. The implementation supports optional frequency weights and left-truncated data (entry times).
+
+Overview
+--------
+Key functionality
+
+- _calc_survfunc_right(time, status, weights=None, entry=None, compress=True, retall=True)
+  - Computes the survival function (S(t)) and its standard error (SE) for a single group with right-censored data.
+  - Supports optional frequency weights and left-truncation (entry times).
+  - Returns survival probabilities, standard errors, and timing/risk information.
+  - Parameters:
+    - time: array_like of times (censoring or event times)
+    - status: array_like, 0 indicates censoring; >=1 indicates event type
+    - weights: optional array_like of weights
+    - entry: optional left-truncation times
+    - compress: if True, retain only times with events
+    - retall: if True, return additional diagnostic arrays
+  - Returns: sp, se, utime, rtime, n, d (survival probabilities, standard errors, time arrays, risk counts, event counts)
+
+- _calc_incidence_right(time, status, weights=None)
+  - Calculates the cumulative incidence function (CIF) across competing causes and its standard error.
+  - Uses the all-cause survival function as a building block.
+  - Parameters:
+    - time, status, weights (as above)
+  - Returns: ip, se, utime (list of CIF arrays per cause, standard errors, unique event times)
+
+- _checkargs(time, status, entry, freq_weights, exog)
+  - Validates input arrays and shapes.
+  - Checks include length consistency, entry-time constraints, and exogenous design alignment.
+
+- CumIncidenceRight (class)
+  - A high-level estimator for cumulative incidence under right-censoring with optional competing risks.
+  - Intended to be instantiated with time and status data, with optional arguments for title, weights, exog, and other controls.
+  - The class provides an object-oriented interface for estimation and inference (usage shown in examples).
+
+Public API and usage
+--------------------
+Public items of interest for developers:
+
+- _calc_survfunc_right(time, status, weights=None, entry=None, compress=True, retall=True)
+  - See details above. Useful for low-level survival function estimation.
+
+- _calc_incidence_right(time, status, weights=None)
+  - See details above. Useful for low-level CIF estimation.
+
+- _checkargs(time, status, entry, freq_weights, exog)
+  - See details above. Used internally to validate inputs.
+
+- CumIncidenceRight
+  - Primary high-level interface for CIF estimation with right-censoring and competing risks.
+  - Constructor signature (typical usage pattern):
+    - CumIncidenceRight(time, status, title=None, freq_weights=None, exog=None, bw_factor=None, dimred=None)
+  - The class is designed to work with the outlined data structures and may expose methods for retrieving CIF estimates, standard errors, and related diagnostics (exact method names depend on the fuller implementation).
+
+Important parameters and return values
+---------------------------------------
+- time: 1-D array-like of times (events or censoring times).
+- status: 1-D array-like; 0=censored, >=1=event type.
+- weights / freq_weights: optional array-like of frequency weights for each observation. If provided, SE calculations differ.
+- entry: optional 1-D array-like of entry times (left truncation). Must satisfy entry < time for all observations.
+- compress: boolean; if True, retain only times where at least one event occurred.
+- retall: boolean; if True, return full diagnostic output (including time grids and risk sets). If False, return the core CIF/SE outputs only.
+
+Return values:
+
+- _calc_survfunc_right:
+  - sp: survival probabilities
+  - se: standard errors of the survival probabilities
+  - utime: unique event/censoring times
+  - rtime: rank-encoded times used internally
+  - n: size of risk set just prior to each event time
+  - d: number of events at each unique time
+
+- _calc_incidence_right:
+  - ip: list of CIF arrays for each cause (one per event type)
+  - se: list (or None if weights provided) of standard errors for CIFs
+  - utime: unique event times
+
+- _checkargs:
+  - No direct return; raises ValueError on invalid input configurations.
+
+Usage examples
+--------------
+Example 1: Compute the all-cause survival function for a simple dataset (no weights)
+
+```python
+import numpy as np
+from duration import _calc_survfunc_right
+
+time = np.array([5, 6, 6, 2, 3, 7])
+status = np.array([1, 0, 1, 0, 1, 0])  # 0=censored, 1=event (single-type)
+sp, se, utime, rtime, n, d = _calc_survfunc_right(time, status)
+
+print("Survival at unique times:", sp)
+print("Standard errors:", se)
+```
+
+Example 2: Compute cumulative incidence for competing risks (no weights)
+
+```python
+from duration import _calc_incidence_right
+
+time = np.array([5, 6, 6, 2, 3, 7])
+status = np.array([1, 0, 2, 0, 2, 0])  # 0=censored, 1 and 2 are event types
+ip, se, utime = _calc_incidence_right(time, status)
+
+print("CIF for each cause:", ip)
+print("Standard errors (per CIF):", se)
+```
+
+Example 3: Left-truncation (entry) handling
+
+```python
+import numpy as np
+from duration import _calc_survfunc_right
+
+time = np.array([5, 6, 6, 2, 3, 7])
+status = np.array([1, 0, 1, 0, 1, 0])
+entry = np.array([0, 1, 0, 0, 2, 0])  # left-truncation times
+
+sp, se, utime, rtime, n, d = _calc_survfunc_right(time, status, entry=entry, compress=True)
+print("Survival with entry times:", sp)
+```
+
+Example 4: Using the high-levelCumIncidenceRight interface (conceptual)
+
+```python
+from duration import CumIncidenceRight
+import numpy as np
+
+time = np.array([5, 6, 6, 2, 3, 7])
+status = np.array([1, 0, 2, 0, 2, 0])
+
+# Construct estimator
+ci = CumIncidenceRight(time, status, title="Example CIF")
+
+# The exact API for retrieval depends on the full implementation.
+# Typical usage would involve methods to compute CIFs and SEs, e.g.:
+# cif_vals, cif_se = ci.compute_incidence()
+```
+
+Important considerations and edge cases
+---------------------------------------
+- Weights:
+  - If frequency weights are provided, the standard error formula changes (the code uses a different SE computation for weighted data).
+  - When weights are provided, CIF SEs may be unavailable (returned as None) depending on the implementation path.
+
+- Entry times (left truncation):
+  - Entry times must be strictly smaller than event times; otherwise, a ValueError is raised.
+  - Left truncation alters the risk set calculation by excluding individuals who enter after certain times.
+
+- compress parameter:
+  - When compress is True, only times with observed events are retained in the internal outputs. This affects the length of the returned arrays and the interpretation of risk sets.
+
+- Numerical stability:
+  - Survival probabilities are clipped to a minimum of 1e-16 to avoid log(0) issues during the cumulative product.
+  - SE calculations handle degenerate cases (e.g., n == d or n == 0) by setting SE to NaN in those entries.
+
+- Dependencies:
+  - Requires NumPy, SciPy (for distributions in related usage), and related statistical utilities. The module imports are self-contained for the core computations shown.
+
+Implementation notes
+--------------------
+- The module provides both low-level numerical building blocks (_calc_survfunc_right, _calc_incidence_right) and a higher-level interface (CumIncidenceRight) intended for practical usage.
+- The internal computations are designed to support right-censoring and competing risks, including handling of weights and left-truncation.
+- The code uses Greenwood’s formula for unweighted SE and an alternative formula (Tsiatis’ 1981) for weighted SE.
+
+End of documentation
+---------------------

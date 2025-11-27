@@ -1,0 +1,221 @@
+Internal organization of NumPy arrays
+=====================================
+
+
+Overview
+--------
+
+NumPy arrays (ndarrays) provide a multidimensional, homogeneous, fixed-size data buffer plus metadata that describes how that buffer should be interpreted as elements of a given dtype. The ndarray object is designed for efficient numerical computation by:
+- separating memory storage (the data buffer) from interpretation (dtype) and layout (shape/strides),
+- enabling views into the same memory without copying data,
+- supporting both C-contiguous and Fortran-contiguous memory layouts and a broad set of advanced features (structured dtypes, broadcasting, slicing, etc.).
+
+This document describes the core internal concepts developers need to understand when working on NumPy’s array internals, its C-API, or performance-sensitive features.
+
+
+Core concepts
+
+- Data buffer
+  - The underlying memory region that stores element data.
+  - Accessed via a pointer stored in the ndarray object.
+  - All elements occupy itemsize = dtype.itemsize bytes.
+
+- dtype (descriptor)
+  - Defines how to interpret each element in the data buffer (type, endianness, shape for structured dtypes, etc.).
+  - A dtype may be a simple primitive (int32, float64) or a structured dtype with named fields.
+  - The dtype is shared among all views of an array and is a key part of the array’s identity.
+
+- Shape
+  - A tuple specifying the extent of the array along each axis (e.g., (3, 4) for 3 rows and 4 columns).
+  - Stored in the ndarray as a per-dimension size; used by indexing and broadcasting.
+
+- Strides
+  - The number of bytes to skip to advance one element along each axis.
+  - Strides enable views into non-contiguous data and define the layout in memory.
+  - For a C-contiguous (row-major) array, the last axis has a stride equal to itemsize, and earlier axes have larger strides.
+
+- Flags
+  - Indicate properties such as contiguity (C/F), writability, alignment, and ownership of data.
+  - Important for performance decisions and correctness of in-place operations.
+
+- Base and lifetime
+  - A ndarray can be a view over another ndarray (base) or own its own data.
+  - The base chain tracks the origin of the memory; copying memory can duplicate buffers, whereas views share the same memory.
+  - Reference counting ensures proper lifetime management of the memory buffer and any views.
+
+
+Memory layout and contiguity
+
+- Contiguity
+  - C-contiguous: memory laid out with the last axis contiguous in memory; typical of NumPy’s default when creating from a row-major layout.
+  - Fortran-contiguous: memory laid out with the first axis contiguous in memory.
+  - Any (A) mode: the array can be either C- or F-contiguous or a non-contiguous view.
+
+- Strides in practice
+  - For a 2D C-contiguous array a with shape (M, N) and itemsize s:
+    - strides = (N * s, s)
+  - Transposing or slicing can yield non-contiguous views with modified strides, avoiding data copies.
+
+- Example: 2D array strides
+  - a = np.arange(12, dtype=np.int32).reshape((3, 4))
+  - shape: (3, 4)
+  - strides: (16, 4)  # 4 elements per row, each int32 is 4 bytes
+  - a.T strides: (4, 16)  # transposed view, not memory-mapped row-major
+
+- Non-contiguous views
+  - Slicing with steps, striding, or transposition often yields a view with a non-default strides.
+  - Views share data with the base array; modifying via a view affects the base.
+
+- Contiguity checks
+  - array.flags provides indicators like C_CONTIGUOUS, F_CONTIGUOUS, OWNDATA, WRITEABLE, etc.
+
+
+Data types and structured dtypes
+
+- Primitive dtypes
+  - Simple numeric types (int8, int16, int32, int64, float32, float64, etc.).
+  - Each dtype has kind (e.g., 'i', 'f') and itemsize.
+
+- Endianness
+  - Dtypes can specify byte order (little, big) and may be swapped if necessary.
+
+- Structured dtypes
+  - Multicolumn records with named fields, potentially of varying types and subarrays.
+  - Memory layout includes field offsets and itemsize reflecting the composite structure.
+  - Useful for representing heterogeneous records in a single array.
+
+- dtype identity
+  - Dtypes are objects shared across arrays/views; changing a dtype in one place does not mutate another array’s dtype unless explicitly changed.
+
+- Example: structured dtype
+  - dt = np.dtype([('year', 'i4'), ('month', 'i1'), ('value', 'f8')])
+  - Each element contains multiple named fields, with a fixed total itemsize.
+
+
+The ndarray object: structure and internal API (C-side perspective)
+
+- Core fields (high level)
+  - data: pointer to the memory buffer holding element data
+  - ndim: number of axes
+  - shape: tuple of sizes per axis
+  - strides: tuple of per-axis strides in bytes
+  - descr (dtype): the element data type descriptor
+  - base: optional pointer to a base ndarray (for views)
+  - flags: bitflags describing ownership, contiguity, and other properties
+
+- Allocation and ownership
+  - Owning data is tracked via flags (OWNDATA); non-owning views rely on the base object for lifetime management.
+  - Views cannot outlive the base memory; Python’s reference counting ensures lifetime safety.
+
+- PyArrayObject (C API)
+  - The internal C struct representing an ndarray (exposed to the C-API and used by NumPy’s core).
+  - Fields include data, dimensions (shape), strides, descr (dtype), base, flags, and other metadata.
+  - This struct is the primary interface for implementing operations like arithmetic, indexing, and broadcasting at the C level.
+
+- Memory access patterns
+  - Element access is computed as: data + sum(dim[i] * strides[i])
+  - This enables arbitrary slicing and fancy indexing without copying unless required by the operation.
+
+- Zero-copy views and broadcasting
+  - Slicing, strides, and broadcasting enable many operations to avoid unnecessary data copies.
+  - Broadcasting expands smaller shapes conceptually to larger ones by adjusting strides and shape semantics.
+
+- NumPy’s internal typing and API surface
+  - The codebase uses internal typing aliases (e.g., _DType, _DTypeLike) to model dtype behavior and to enforce type constraints in the Python/C boundary.
+  - The internal machinery supports a wide range of dtypes, including user-defined or custom structured types.
+
+
+Practical examples
+
+1) Basic 2D array: shape, strides, and contiguity
+- Code:
+  import numpy as np
+  a = np.arange(12, dtype=np.int32).reshape((3, 4))
+- Inspect:
+  - shape: (3, 4)
+  - strides: (16, 4)  # 4 elements per row, 4 bytes per int
+  - flags: C_CONTIGUOUS = True, F_CONTIGUOUS = False, OWNDATA = True, WRITEABLE = True
+
+2) Transpose and non-contiguous view
+- Code:
+  b = a.T
+- Properties:
+  - shape: (4, 3)
+  - strides: (4, 16)
+  - C_CONTIGUOUS: False, F_CONTIGUOUS: False (non-contiguous view)
+
+3) Slicing and views
+- Code:
+  c = a[::2, 1:3]
+- Properties:
+  - c is a view; shares memory with a via a base reference
+  - strides reflect the slicing (likely non-contiguous)
+  - modifying c affects a
+
+4) Broadcasting example
+- Code:
+  x = np.arange(3).reshape((3, 1))
+  y = np.array([1, 2, 3])
+  z = x + y  # broadcasting
+- Result:
+  - z shape: (3, 3)
+  - Memory: data not copied for the broadcast; the operation creates a new array with computed values
+
+
+Performance and correctness considerations
+
+- Contiguity and performance
+  - Operations on C-contiguous arrays are typically faster due to linear memory access.
+  - Fortran-contiguous or non-contiguous arrays may require internal copying or optimized traversal.
+
+- Alignment and portability
+  - Data alignment requirements depend on the dtype and platform.
+  - Misaligned accesses may incur penalties or be disallowed on some architectures.
+
+- Memory ownership and lifetime
+  - Views share data with their base; ensuring the base remains alive is essential to prevent dangling references.
+  - Owndata flag determines whether NumPy is responsible for freeing the memory.
+
+- Endianness and dtype compatibility
+  - Operations across platforms with different endianness can require byte-swap semantics; dtypes carry endianness information to support this.
+
+- Debugging and introspection
+  - Tools: array.flags, array.strides, array.shape, array.dtype (descr), array.base
+  - The internal C-API and PyArrayObject expose these details for debugging and extension development.
+
+
+Advanced topics for contributors
+
+- Structured dtypes and memory layout
+  - Understand field offsets, alignment, and how a structured dtype maps to a single ndarray item.
+  - Be mindful of field order and padding when interfacing with external memory.
+
+- Custom memory layouts
+  - Complex views or views of views can yield intricate stride patterns.
+  - Extensions should carefully manage the base chain to avoid memory leaks or orphaned buffers.
+
+- The C-API boundary
+  - Developers contributing to NumPy’s core often implement new ufuncs, indexing schemes, or memory-format improvements by interfacing with PyArrayObject fields and related helper APIs.
+  - Familiarize with PyArrayObject, descriptors, and the internal typing utilities used to reason about arrays at the C/Python boundary.
+
+
+Notes for maintainers
+
+- The internal representation (data, shape, strides, descr) aims to be minimal yet expressive enough to model any array-like view.
+- Changes to dtype behavior, memory layout, or flags must preserve compatibility with existing views and ensure correct broadcasting semantics.
+- Documentation and comments should reflect the distinction between data ownership, views, and copies to reduce unexpected behavior in user code.
+
+
+Appendix: terminology cheat sheet
+
+- ndarray: NumPy’s core array object.
+- dtype / descr: type descriptor for each element, including primitive and structured dtypes.
+- shape: per-axis lengths.
+- strides: per-axis byte steps to move between elements along that axis.
+- base: underlying array for views.
+- flags: metadata about contiguity, ownership, writeability, etc.
+- PyArrayObject: the C struct representing an ndarray (internal API).
+- itemsize: size in bytes of a single element (dtype.itemsize).
+
+
+End of documentation.

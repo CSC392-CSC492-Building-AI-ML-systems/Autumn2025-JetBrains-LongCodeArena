@@ -1,0 +1,100 @@
+# mixed_linear.rst
+
+## Overview
+This module provides linear mixed effects models for dependent data using the MixedLM class. It supports partitioning data into independent groups and modeling both fixed effects and random effects (including variance components). The typical model for group i is
+
+Y = X*beta + Z*gamma + epsilon
+
+where Y is the observed response, X is the fixed-effects design matrix, Z is the random-effects design matrix, beta are fixed-effect parameters, gamma are random effects with mean zero, and epsilon are iid errors. The implementation supports ML and REML estimation, with GLS-based optimization and profiling over certain parameters. It also includes internal utilities to handle dense and sparse matrix operations efficiently.
+
+Key equations and notation from the implementation:
+
+- Y (endog), X (exog), Z (exog_re)
+- beta: fixed effects parameters (fe_params)
+- cov_re (Psi): covariance of the standard random effects
+- scale: scalar error variance
+- vcomp: vector of variance parameters for variance components
+- The marginal covariance for a group is scale*I + Z*cov_re*Z'
+- Parameterizations include user, profile, and square-root forms
+
+The module emphasizes a group-based approach, while also supporting some crossed-effects models via a single-group specification.
+
+Internal references: The implementation follows established methods for linear mixed effects models, with core foundations in the Lindstrom & Bates (1988) framework and related literature.
+
+## Key Components
+- MixedLM class
+  - Fits linear mixed effects models to data with group-based structure.
+  - Supports post-estimation tasks and various estimation options (ML/REML).
+  - Handles fixed effects (beta), random effects (gamma), and variance components.
+  - Exposes results such as fe_params, cov_re, scale, and related statistics.
+- Parameterizations
+  - User parameterization: cov(endog) = scale*I + Z*cov_re*Z'
+  - Profile parameterization: cov(endog) = I + Z*cov_re1*Z' (cov_re relates to the profile form via scale)
+  - Square-root parameterization: uses the Cholesky factor of cov_re1 (hidden from the user)
+  - Packing/unpacking: parameter vectors may concatenate fe_params, a lower-triangular or Cholesky factor of the random-effects dependence structure, and the variance components (with square roots when using a Cholesky factor)
+- Random effects
+  - Standard random effects: identical number k_re across groups with a common joint distribution
+  - Variance components: uncorrelated with standard random effects; group-specific realizations
+- Estimation and optimization
+  - Uses GLS to profile over scale and fixed effects
+  - Profiling leads to improved numerical stability for likelihood-based estimation
+  - Hessian of the profiled log-likelihood is not computed; Newton-Raphson requiring the Hessian cannot be used
+- Internal utilities
+  - _dot: robust dot-product operation for dense and sparse arrays
+  - _multi_dot_three: optimized multiplication ordering for three arrays to improve performance
+
+## Usage
+- Using the formula interface
+  - Example:
+    - Create and fit a model with a formula, grouping, and optional random-effects structure
+    - md = MixedLM.from_formula("Y ~ X1 + X2", data=df, groups="Group", re_formula="~ X3")
+    - mdf = md.fit()
+- Using explicit matrices
+  - Example:
+    - endog = df["Y"].values
+    - exog = df[["X1","X2"]].values
+    - groups = df["Group"].values
+    - exog_re = df[["X3"]].values
+    - model = MixedLM(endog, exog, groups, exog_re)
+    - result = model.fit()
+
+Notes:
+- The model requires endog, exog, and exog_re (if provided) to be observed; beta, Psi (cov_re), and sigma^2 (scale) are estimated.
+- The data are assumed to be partitioned into disjoint groups, with independent realizations of gamma across groups.
+
+## Details
+- Parameterizations and parameter packing
+  - Three parameterizations are used in different parts of the implementation:
+    - User parameterization: cov(endog) = scale*I + Z*cov_re*Z'
+    - Profile parameterization: cov(endog) = I + Z*cov_re1*Z'
+    - Square-root parameterization: uses the Cholesky factor of cov_re1
+  - The fixed-effects parameters (fe_params) have identical values across all parameterizations; variance parameters differ.
+  - Parameters can be packed into a single vector by concatenating fe_params, the lower-triangular (or Cholesky) form of the dependence structure, and the variance components.
+  - When unpacking, square or reflect the dependence structure according to the chosen parameterization.
+- Score methods
+  - Two score methods exist:
+    - Score with respect to the random-effects covariance matrix elements (for inference after ML/REML)
+    - Score with respect to the Cholesky square root of the random-effects covariance matrix (used during optimization)
+- Estimation approach
+  - The numerical optimization uses GLS to avoid directly optimizing over fixed effects.
+  - The likelihood maximized is profiled over the scale (sigma^2) and fixed effects (beta); thus, Hessian of the profiled log-likelihood is not computed, and Hessian-based methods (e.g., Newton-Raphson) are not applicable.
+- Model structure
+  - The data model is designed for independent groups, with Z potentially varying by group to accommodate different random-effects structures.
+  - Two types of random effects are supported:
+    - Standard random effects: correlated random effects with a common covariance structure across groups
+    - Variance components: uncorrelated random effects with group-specific variance parameters
+- Notation (mapping to implementation)
+  - cov_re corresponds to the random-effects covariance matrix (Psi)
+  - scale corresponds to the scalar error variance
+  - vcomp is a vector of variance parameters for the variance components
+  - Y, X, Z correspond to endog, fixed-effects design, and random-effects design per group
+- References
+  - MJ Lindstrom, DM Bates (1988). Newton Raphson and EM algorithms for linear mixed effects models for repeated measures data. Journal of the American Statistical Association.
+  - Follow-up and related documents discuss broader contexts and practical implementations of mixed-effects models.
+  - Additional resources provide user-oriented perspectives on longitudinal mixed models.
+
+Internal helpers and performance
+- _dot(x, y): Computes the dot product for dense and sparse inputs, handling various combinations efficiently.
+- _multi_dot_three(A, B, C): Optimizes the multiplication order for three arrays to improve performance over straightforward multiplication.
+
+This documentation reflects the module's purpose, core concepts, and usage patterns for working with linear mixed effects models via MixedLM, including the parameterizations, estimation approach, and internal utilities that support efficient numerical computation.

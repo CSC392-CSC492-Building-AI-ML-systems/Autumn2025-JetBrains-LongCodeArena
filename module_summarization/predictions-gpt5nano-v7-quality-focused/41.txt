@@ -1,0 +1,99 @@
+# QuerySet: Building queries
+
+This section explains how to use QuerySet to build asynchronous queries. You start from a Model and chain filters, joins, annotations, and ordering to shape the SQL that will be executed.
+
+Overview of the core ideas
+- QuerySet is built around an awaitable QueryBuilder. It accumulates filters, joins, and modifiers and executes when awaited.
+- Filtering uses Q objects and supports filtering on related fields. When you filter by a related field, the system creates the necessary LEFT OUTER JOINs.
+- Annotations allow you to compute values (e.g., counts) and include them in the result. If you perform aggregates on a query with joins or having clauses, a GROUP BY is added when needed.
+- Ordering can reference normal fields, related fields, and annotated values. Nested relations use a double-underscore (__), and a leading - indicates descending order.
+- You can fetch related data efficiently with prefetch_related, and you can return results as dictionaries or lists with values and values_list.
+- Unknown fields raise FieldError to help you catch typos or invalid references early.
+
+Key concepts and components
+- AwaitableQuery: The main builder for async queries. Holds the model, the PyPika-based query, and bookkeeping for joined tables and annotations.
+- QuerySetSingle: Protocol for single-result querysets. Provides methods such as prefetch_related, annotate, only, values_list, and values.
+- Q objects: Used to express complex filters in a composable way. You can combine multiple Q objects to build the final WHERE clause.
+- Prefetch: Mechanism to load related data efficiently.
+- Annotate and Count: You can annotate fields using aggregate functions (e.g., Count) and reference these annotations in ordering or selection.
+- Ordering: Implemented through resolve_ordering, supporting simple, nested, and annotated orderings.
+
+Common usage patterns
+- Filtering
+  - Filters are expressed with Q objects and/or field lookups. When filtering on related fields, the ORM automatically joins the related table.
+  - Example (conceptual):
+    - q = Q(age__gte=18) & Q(status="active")
+    - user = await User.filter(q)
+
+- Filtering on related fields
+  - You can filter on related models using the standard "__" traversal for relations. The system issues the necessary LEFT OUTER JOINs.
+  - Example:
+    - user = await User.filter(posts__title__icontains="python")
+
+- Prefetching related data
+  - Use prefetch_related to fetch related objects in the same query plan.
+  - Example:
+    - user = await User.prefetch_related("posts").get(id=123)
+
+- Annotations and aggregation
+  - Annotate lets you compute values (e.g., counts) and reference them in further filtering, ordering, or selection.
+  - Example:
+    - from tortoise.functions import Count
+    - user = await User.annotate(post_count=Count("posts")).order_by(("post_count", "desc")).first()
+
+- Ordering
+  - Ordering supports simple field orders and nested fields via __. A leading - indicates descending order.
+  - Example:
+    - user = await User.order_by("name")          # ASC by name
+    - user = await User.order_by("-created_at")    # DESC by created_at
+  - Annotations can also be used for ordering:
+    - user = await User.annotate(post_count=Count("posts")).order_by(("post_count", "desc"))
+
+- Selecting values
+  - values_list returns a list-like result (possibly flattened if a single field is requested with flat=True).
+  - values returns dictionaries (or appropriate mapping) for the requested fields.
+  - Examples:
+    - ids = await User.values_list("id", flat=True)
+    - details = await User.values("id", "name", "email")
+
+- Handling unknown fields
+  - If you reference a field that does not exist on the model (or its relations), a FieldError is raised to indicate the problem.
+
+Notes on internal behavior (how QuerySet builds queries)
+- Filtering
+  - resolve_filters builds common filters from Q objects and custom filters, applies necessary joins for related fields, and sets where/having clauses.
+  - When aggregates are involved with joins or having clauses, a group-by is added on the model’s primary key as needed.
+
+- Joins
+  - _join_table_by_field and _get_joins_for_related_field determine the required joins for related fields and ensure each join is added only once.
+
+- Ordering
+  - resolve_ordering handles default model ordering (unless there are annotations) and processes both simple and nested field orderings, including annotation-based ordering.
+
+- Field validation
+  - If an unknown field is requested in a filter, order, or selection, a FieldError is raised to help catch mistakes early.
+
+Example: advanced query combining filtering, annotation, and ordering
+- This demonstrates a realistic scenario using built-in capabilities:
+  - from tortoise.functions import Count
+  - user = await (
+  -     User
+  -     .filter(Q(age__gte=18), Q(is_active=True))
+  -     .annotate(post_count=Count("posts"))
+  -     .order_by(("post_count", "desc"), ("name", "asc"))
+  - )
+  - If you want only a single top result, you can await the QuerySet directly:
+  - top_user = await (
+  -     User
+  -     .filter(Q(age__gte=18))
+  -     .annotate(post_count=Count("posts"))
+  -     .order_by(("post_count", "desc"))
+  - )
+
+Practical tips
+- Start simple: build a basic filter, then progressively add annotations, ordering, and prefetching.
+- Use nested field lookups (relation__field) to filter or order by related data; the framework handles the necessary joins.
+- Leverage Count (and other aggregate functions) in annotate to compute derived values you can sort by or return with results.
+- Use values or values_list when you only need specific fields, not full model instances.
+
+This documentation reflects the QuerySet capabilities exposed in the provided implementation, emphasizing how to build, refine, and execute queries using filters, joins, annotations, and selections.

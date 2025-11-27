@@ -1,0 +1,139 @@
+Miscellaneous features of astropy.io.fits
+=========================================
+
+Overview
+--------
+This section documents the miscellaneous utility features provided by
+astropy.io.fits, including the verification framework (VerifyError, VerifyWarning,
+_VERIFY options) and the nested verification message container (_ErrList), as well
+as the lightweight notifier mixin (NotifierMixin) used by objects to publish
+changes to registered listeners.
+
+Key Components
+--------------
+
+- Verification framework
+  - VerifyError and VerifyWarning: exception and warning types used by the
+    verification machinery.
+  - VERIFY_OPTIONS: allowed verification option strings (e.g., "warn", "fix",
+    "ignore", and combinations like "fix+warn", "silentfix+ignore", etc.).
+  - _Verify: base mixin providing shared verification utilities, including:
+    - run_option(option, err_text, fix_text, fix, fixable): executes a single
+      verification item, potentially applying a fix and returning a (fixable,
+      message) pair.
+    - verify(option): runs verification for all values provided by a subclass
+      via the _verify method and handles reporting or fixing depending on the
+      option. The option may combine fixability with reporting (e.g., "fix+warn",
+      "silentfix+ignore").
+  - _ErrList: a specialized nested list structure for verification messages.
+    - Stores messages as a tree where the leaf items are (fixable_bool, message)
+      pairs, and intermediate nodes group related messages.
+    - iter_lines(filter=None, shift=0): yields lines of messages with proper
+      indentation; printing is designed to be user-friendly, with the unit labeled
+      in the helpers (e.g., "Element 0:", "Data 1:", etc.).
+    - __str__(): returns all messages as a single string, line by line.
+
+  Note: The verify mechanism emphasizes zero-based indexing in messages (as noted
+  in the output of verifications).
+
+- Notifier mixin
+  - NotifierMixin: a mixin class that enables objects to register listeners and
+    notify them of changes. Key behaviors documented in the class docstring include:
+    - _add_listener(listener): register a listener via a weak reference.
+    - _notify(change_type, ...): notify all registered listeners by calling
+      listener._update_change_type(...), when such a method exists on the listener.
+  - The mixin is intended for internal use to communicate changes between classes
+    and is not exposed as user-facing API.
+
+Usage
+-----
+
+1) Using the verification framework
+
+- Subclass _Verify and implement _verify to return an _ErrList describing
+  verifiable issues. Use run_option to handle per-issue fixes and messaging.
+
+Example (conceptual):
+
+from astropy.io.fits import _Verify, _ErrList
+
+class MySubject(_Verify):
+    def __init__(self, data):
+        self.data = data
+
+    def _verify(self, option):
+        errs = _ErrList(unit="Data")
+        if self.data is None:
+            # create a fixable issue with a fix function
+            def fix():
+                self.data = 0
+            fixable, text = self.run_option("fix", "Data is None", "Fixed to 0.", fix=fix)
+            errs.append((fixable, text))
+        if not isinstance(self.data, int):
+            errs.append((False, "Data is not an integer"))
+        return errs
+
+# Example usage
+obj = MySubject(None)
+# This will process issues according to the option (warn, fix, ignore, etc.)
+obj.verify("warn")
+obj.verify("fix+warn")
+
+Notes:
+- The verify option may be a combination like "fix+warn" or "silentfix+ignore".
+- Verification messages include a header and a note about zero-based indexing.
+
+2) NotifierMixin usage
+
+- To enable simple event/listener patterns within fits-related objects:
+
+class MyListener:
+    def _update_change_type(self, change_type, *args, **kwargs):
+        print("Received change:", change_type, args, kwargs)
+
+class Publisher(NotifierMixin):
+    def __init__(self):
+        super().__init__()
+
+    def change_something(self, value):
+        # notify listeners about a change
+        self._notify("change_something", value)
+
+# Register and use
+p = Publisher()
+l = MyListener()
+p._add_listener(l)
+p.change_something(42)
+
+This demonstrates how objects can broadcast changes to interested listeners
+without strong coupling.
+
+Details
+-------
+
+- Verification flow
+  - verify(option) accepts a string option and validates it against VERIFY_OPTIONS.
+  - The option is decomposed into fix-related and reporting-related components when
+    it contains a "+" (e.g., "fix+warn"). If the option is purely "fix" or "silentfix",
+    the default reporting behavior is to raise an exception on unfixable errors.
+  - Messages are collected from _verify via its returned _ErrList, then filtered
+    and presented according to the chosen reporting/fixing mode. Warnings are issued
+    with VerifyWarning, and errors raise VerifyError.
+
+- _ErrList structure
+  - Used to accumulate and pretty-print verification results in a hierarchical form.
+  - Supports nested groups; only leaf items carry the (fixable, message) pair.
+  - The unit attribute (default "Element") helps label top-level sections of the report.
+
+- NotifierMixin semantics
+  - Listeners are registered with weak references to prevent reference cycles.
+  - Changes are propagated by calling _notify(change_type, *args, **kwargs) on the notifier.
+  - Listeners implement methods named _update_change_type corresponding to the
+    change types they are interested in.
+
+References
+----------
+- See astropy.io.fits verification utilities for class and option semantics
+  (VerifyError, VerifyWarning, VERIFY_OPTIONS, _Verify, _ErrList).
+- For object change notifications, see NotifierMixin usage examples and
+  the _notify/_add_listener pattern described in the class docstring.

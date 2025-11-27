@@ -1,0 +1,86 @@
+# Dataset loading utilities
+
+## Overview
+This section documents the dataset loading utilities used for fetching and caching datasets, notably from OpenML. The utilities provide robust data retrieval with local caching, network retry logic, and proper handling of gzip-encoded payloads to support reliable, repeatable dataset loading for machine learning workflows. The public API includes fetch_openml, which allows loading datasets by name or data_id and returning data in convenient formats.
+
+## Key Components
+- fetch_openml (public API)
+  - Entry point for loading OpenML datasets. Supports identifying datasets by data_id or name, optional caching, and returning data in a convenient form (e.g., X, y or a Bunch-like object). The public surface is defined by __all__ = ["fetch_openml"].
+
+- _get_local_path(openml_path: str, data_home: str) -> str
+  - Determines the local cache path for an OpenML resource. Example:
+    - Returns a path like: data_home/openml.org/{openml_path}.gz
+
+- _retry_with_clean_cache(openml_path: str, data_home: Optional[str], no_retry_exception: Optional[Exception] = None) -> Callable
+  - Decorator that, on failure, removes the local cached file and retries (unless a specific exception is configured). If data_home is None, the function is called once without retrying.
+
+- _retry_on_network_error(n_retries: int = 3, delay: float = 1.0, url: str = "") -> Callable
+  - Decorator to retry a function call on network-related errors (URLError, TimeoutError) with a delay between attempts. 412 HTTP errors (OpenML generic errors) are not retried. Used to provide robust network resilience during data download.
+
+  - Example (high level):
+    - Retries up to n_retries times, pausing delay seconds between attempts, and informs the user via a warning when a retry occurs.
+
+- _open_openml_url(openml_path: str, data_home: Optional[str], n_retries: int = 3, delay: float = 1.0)
+  - Core function to retrieve a resource from OpenML. Supports optional local caching:
+    - If data_home is None, fetches directly from the network with retry logic and returns a file-like stream. If the content is gzip-encoded, it is wrapped with gzip.GzipFile for decompression.
+    - If data_home is provided, caches the resource under data_home/openml.org/openml_path.gz using an atomic write pattern (TemporaryDirectory) to ensure thread-safe caching. Decompression is handled transparently as needed.
+  - This function highlights the caching strategy, gzip handling, and atomic cache updates.
+
+- OpenMLError
+  - Custom exception used to represent OpenML HTTP 412 errors (a generic OpenML failure).
+
+- _get_json_content_from_openml_api(url: str, error_message: Optional[str], data_home: Optional[str], n_retries: int = 3, delay: float = 1.0) -> Dict
+  - Helper to load JSON data from an OpenML API endpoint. Handles retries and error messaging. (Details are implemented in the function body.)
+
+## Usage
+- Basic usage (high level):
+  - from sklearn.datasets import fetch_openml
+  - X, y = fetch_openml(data_id=31, return_X_y=True, as_frame=True)
+
+- With custom cache directory:
+  - X, y = fetch_openml(data_id=31, return_X_y=True, as_frame=True, data_home="/path/to/data_home")
+
+- Network resiliency:
+  - The loader automatically retries on network errors and clears the local cache if a failure occurs in the caching path, ensuring robust data retrieval.
+
+Code references (illustrative excerpts):
+- Local cache path:
+  def _get_local_path(openml_path: str, data_home: str) -> str:
+      return os.path.join(data_home, "openml.org", openml_path + ".gz")
+
+- Atomic cache write and gzip handling (simplified view):
+  with TemporaryDirectory(dir=dir_name) as tmpdir:
+      with closing(_retry_on_network_error(n_retries, delay, req.full_url)(urlopen)(req)) as fsrc:
+          opener = open if is_gzip_encoded(fsrc) else gzip.GzipFile
+          with opener(os.path.join(tmpdir, file_name), "wb") as fdst:
+              shutil.copyfileobj(fsrc, fdst)
+      shutil.move(fdst.name, local_path)
+
+- Network retry decorator (conceptual):
+  def _retry_on_network_error(n_retries: int = 3, delay: float = 1.0, url: str = "") -> Callable:
+      """If the function call results in a network error, call the function again ..."""
+
+## Details
+- Caching semantics
+  - Cached files are stored under data_home/openml.org/{openml_path}.gz.
+  - Writes to the cache are performed atomically to avoid race conditions in multi-process environments.
+
+- Robust network behavior
+  - Network calls are wrapped with retry logic. 412 OpenML errors are treated as non-retriable.
+  - Warnings are emitted to inform users about retries and cache refreshes.
+
+- gzip handling
+  - The loader requests gzip-encoded content when supported and decompresses transparently using gzip.GzipFile if needed.
+
+- JSON API integration
+  - JSON data from OpenML API endpoints can be retrieved and parsed with _get_json_content_from_openml_api, with appropriate error handling.
+
+- Error handling
+  - OpenMLError is raised for specific OpenML HTTP 412 conditions.
+  - URLError and TimeoutError are handled with controlled retry behavior.
+
+See Also
+- fetch_openml: Public API for loading OpenML datasets (as exposed in the module’s __all__).
+
+Notes
+- The utilities are designed to provide reliable, repeatable dataset loading for machine learning tasks, including transparent caching, robust retry strategies, and seamless handling of gzipped payloads.

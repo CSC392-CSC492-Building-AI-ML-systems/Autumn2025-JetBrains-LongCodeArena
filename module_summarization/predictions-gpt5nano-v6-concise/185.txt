@@ -1,0 +1,189 @@
+# Tuning the hyper-parameters of an estimator
+
+This section describes how to perform hyper-parameter tuning using grid search to optimize an estimator’s performance. It covers concepts, usage, and practical examples for developers integrating GridSearchCV (and related tools) into their workflows.
+
+## Overview
+
+- Grid search exhaustively evaluates a predefined set of hyper-parameter combinations to find the best performing estimator according to a chosen scoring metric.
+- The main API is GridSearchCV (and variants like RandomizedSearchCV). You supply:
+  - An estimator (or a Pipeline of steps)
+  - A param_grid describing the hyper-parameters to explore
+  - A cross-validation strategy (cv)
+  - A scoring metric (scoring)
+  - Optional refit behavior and parallelization (n_jobs)
+- After fitting, you can access:
+  - best_params_ and best_score_
+  - best_estimator_ (the estimator refitted on the full training data with the best parameters)
+  - cv_results_ (detailed results of each parameter combination)
+
+## Key concepts
+
+- param_grid
+  - A dict mapping parameter names (as used by the estimator or pipeline steps) to a list of values to try.
+  - For pipelines, use the step name followed by two underscores and the parameter name, e.g., {'svc__C': [0.1, 1, 10]}.
+  - You can provide a list of dicts to explore different parameter subsets and to exclude invalid or mutually exclusive parameter combinations.
+- cv
+  - Cross-validation strategy (e.g., 5-fold) used to evaluate each parameter combination.
+  - Nested cross-validation is recommended when you want an unbiased assessment of generalization performance.
+- scoring
+  - Metric to optimize (e.g., 'accuracy', 'f1', 'roc_auc', or a callable via make_scorer).
+- refit
+  - If True (default), GridSearchCV refits the best_params_ on the full training data after the search.
+- n_jobs
+  - Number of jobs to run in parallel. Use -1 to use all available cores.
+
+## Quickstart examples
+
+### Example 1: SVC with RBF kernel on a pipeline (scaling + SVC)
+
+- Goal: Tune C and gamma for an SVC with RBF kernel, using a pipeline that scales features.
+
+Code:
+
+```python
+from sklearn.datasets import load_iris
+from sklearn.model_selection import GridSearchCV
+from sklearn.svm import SVC
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+# Load data
+X, y = load_iris(return_X_y=True)
+
+# Pipeline with a StandardScaler and an SVC
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('svc', SVC())
+])
+
+# Parameter grid: note the 'svc__' prefix for the pipeline step named 'svc'
+param_grid = {
+    'svc__C': [0.1, 1.0, 10.0],
+    'svc__gamma': [0.01, 0.1, 1.0],
+    'svc__kernel': ['rbf']
+}
+
+grid = GridSearchCV(
+    estimator=pipe,
+    param_grid=param_grid,
+    cv=5,
+    scoring='accuracy',
+    n_jobs=-1,
+    refit=True
+)
+
+grid.fit(X, y)
+
+print("Best params:", grid.best_params_)
+print("Best cross-validated score:", grid.best_score_)
+print("Test-set performance (via best estimator):",
+      grid.best_estimator_.score(X, y))
+```
+
+Notes:
+- The best_estimator_ is the pipeline refitted on the full training data using the best parameters.
+- You can inspect grid.cv_results_ for per-parameter statistics.
+
+### Example 2: RandomForestClassifier
+
+- Goal: Tune common tree-based hyper-parameters for a RandomForest.
+
+Code:
+
+```python
+from sklearn.datasets import load_breast_cantom
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import train_test_split
+
+# Load dataset (example; replace with your data)
+X, y = load_breast_cancer(return_X_y=True)
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+model = RandomForestClassifier(random_state=42, n_jobs=-1)
+
+param_grid = {
+    'n_estimators': [100, 200],
+    'max_depth': [None, 10, 20],
+    'max_features': ['auto', 'sqrt']
+}
+
+grid = GridSearchCV(
+    estimator=model,
+    param_grid=param_grid,
+    cv=5,
+    scoring='accuracy',
+    n_jobs=-1,
+    refit=True
+)
+
+grid.fit(X_train, y_train)
+
+print("Best params:", grid.best_params_)
+print("Best score:", grid.best_score_)
+print("Test accuracy (best estimator):",
+      grid.score(X_val, y_val))
+```
+
+Notes:
+- The param_grid can be expanded to include other hyper-parameters such as min_samples_split, min_samples_leaf, bootstrap, etc.
+- Since tree ensembles can be expensive to train, consider starting with a smaller grid or using RandomizedSearchCV for larger spaces.
+
+### Example 3: Multiple parameter grids (mutually exclusive)
+
+- Goal: Demonstrate how to search across different parameter subsets by providing a list of dictionaries.
+
+Code:
+
+```python
+param_grid = [
+    {'svc__kernel': ['linear'], 'svc__C': [0.1, 1, 10]},
+    {'svc__kernel': ['rbf'], 'svc__C': [0.1, 1, 10], 'svc__gamma': [0.01, 0.1, 1]}
+]
+
+grid = GridSearchCV(
+    estimator=pipe,
+    param_grid=param_grid,
+    cv=5,
+    scoring='accuracy',
+    n_jobs=-1
+)
+
+grid.fit(X, y)
+```
+
+Notes:
+- This structure allows exploring different hyper-parameter subsets that may not be valid across all combinations (e.g., gamma is only relevant for the RBF kernel).
+
+## API details and behavior
+
+- param_grid can be:
+  - A dict of parameter names to a list of values.
+  - A list of dicts (to explore different parameter subsets).
+- For pipelines, use the step name and two underscores to specify parameters of that step (e.g., 'scaler__with_mean': [True, False], 'svc__C': [0.1, 1, 10]).
+- The best_estimator_ is refitted on the entire training data using the best parameters unless refit is set to False.
+- The cv_results_ attribute contains a rich table of mean/test scores and runtimes for each parameter setting, enabling deep analysis of the tuning process.
+
+## Practical tips
+
+- Use a reasonable cross-validation strategy (cv) to obtain stable estimates. For imbalanced data, consider stratified CV.
+- Choose a scoring metric aligned with your business objective. For imbalanced data, use metrics like f1_score, precision_recall, or roc_auc as appropriate.
+- Be mindful of compute time. Grid search scales with the number of parameter combinations. Start with a small grid, then widen as needed, or use RandomizedSearchCV for large spaces.
+- Reproducibility: fix random_state in estimators and, if applicable, in cross-validation strategies.
+- Validation of tuning results: for an unbiased performance estimate, consider nested cross-validation on the entire workflow.
+
+## Best practices for developers
+
+- Ensure estimators implement get_params and set_params to be compatible with GridSearchCV.
+- When integrating with Pipelines, name steps clearly and consistently to avoid confusion in param_grid keys.
+- Provide meaningful scoring metrics and, if needed, custom scorers via make_scorer to capture domain-specific objectives.
+- Document typical hyper-parameter ranges and rationale for chosen grids to assist users in making informed search choices.
+- Consider exposing utilities or helper functions to construct common grids for standard estimators (e.g., a grid builder for classifiers).
+
+## Reference
+
+- GridSearchCV: exhaustive search over parameter values for an estimator
+- RandomizedSearchCV: sampling hyper-parameter combinations when the search space is large
+- make_scorer: create custom scoring functions if default metrics do not fit the problem
+
+If you need a minimal reproduction dataset or a starter grid for a specific estimator, tell me the estimator and your objective, and I can tailor a grid and example accordingly.

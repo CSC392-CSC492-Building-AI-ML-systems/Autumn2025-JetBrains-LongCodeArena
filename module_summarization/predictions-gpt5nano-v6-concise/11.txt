@@ -1,0 +1,207 @@
+Working with Entities
+===================== 
+
+This document describes how to work with entities using the ftrack_api. Entities are the primary data model in the API. They represent objects such as Projects, Tasks, Assets, People, etc., and expose their attributes and relationships in a lazy-loading, cached manner. This guide covers core concepts, common workflows, and practical example code.
+
+Overview
+--------
+
+- An entity is an instance of a particular type (e.g. Project, Task) and is retrieved, inspected, and manipulated through a Session.
+- Attributes on entities may be loaded lazily. If auto_populate is enabled (default), accessing an attribute will fetch it from the server if not already loaded.
+- Relationships between entities (e.g. a Project and its Tasks) are exposed as attributes or collections.
+- Changes to entities are recorded on the Session and can be persisted to the server via commit/flush operations on the session's operation queue.
+
+Key concepts
+------------
+
+- Session: The entry point for interacting with an ftrack server. It manages authentication, caching, and the operation queue used for creating, updating, and deleting entities.
+- Entity: The base object representing a record on the server. Examples include Project, Task, User, etc.
+- Lazy loading / auto_populate: Accessing an attribute may trigger a fetch to populate the attribute if it hasn’t been loaded yet.
+- Collections: Relationships that return an iterable collection of related entities (e.g. a Project’s Tasks).
+- Caching: The session uses a layered cache (including a MemoryCache at the top) to reduce round-trips and improve performance.
+- Operations: Changes to entities are recorded as operations on the session (pending operations) and can be committed to the server.
+
+Getting started
+---------------
+
+- Create and configure a Session with server URL, API key, and API user.
+- Use the session to query entities and navigate their attributes and relationships.
+
+Example: Creating a session
+---------------------------
+
+.. code-block:: python
+
+   import ftrack_api
+
+   session = ftrack_api.Session(
+       server_url='https://your.ftrack.server',
+       api_key='your_api_key',
+       api_user='your_user'
+   )
+
+Querying and loading entities
+-----------------------------
+
+- Use session.query to retrieve entities via a query string.
+- Accessing attributes will load them if needed (auto_populate is enabled by default).
+
+Example: Load a Project and access its name
+-------------------------------------------
+
+.. code-block:: python
+
+   # Retrieve a project by some criterion (e.g., id or unique name)
+   project = session.query('Project where id is "project_id_here"').first()
+   # Access an attribute (will auto-populate if needed)
+   print(project.name)
+
+Example: Iterate over a project's tasks
+--------------------------------------
+
+.. code-block:: python
+
+   # Access the related collection (tasks) for the project
+   for task in project.tasks:
+       print(task.name)
+
+Creating and updating entities
+------------------------------
+
+Creating a new entity
+^^^^^^^^^^^^^^^^^^^^^
+
+- Entities are created through the session, and changes are recorded as pending operations until committed.
+
+.. code-block:: python
+
+   # Create a new Task (for example under a given project)
+   new_task = session.create('Task', {
+       'name': 'Design database schema',
+       'project': project  # associate with an existing project
+   })
+   # Persist changes to the server
+   session.commit()  # or the appropriate commit/flush operation for your version
+
+Updating an entity
+^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: python
+
+   # Modify attributes on an existing entity
+   new_task.due_date = '2025-01-31'
+   new_task.status = 'In Progress'
+   session.commit()
+
+Deleting an entity
+^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: python
+
+   # Delete an entity
+   new_task.delete()
+   session.commit()
+
+Notes on transactions and persistence
+-------------------------------------
+
+- The session maintains an operation queue (pending operations). Changes are not sent to the server until you commit/flush.
+- The exact mechanism for committing changes can vary by version; typically you would call a session-level commit or flush function to push the recorded operations to the server.
+- If you need to revert changes before they are committed, you can discard or reset the pending operations depending on the API.
+
+Working with entities in practice
+---------------------------------
+
+- Prefer querying with the session rather than constructing entities manually, to ensure correct server-side state and relationships.
+- Rely on lazy-loading for attributes you do not immediately need; this keeps initial fetches light.
+- When working with relationships, prefer iterating over collections (e.g., project.tasks) rather than constructing related entities by hand.
+- Use the session cache to minimize server round-trips; repeated access to the same entity or attribute will be served from cache when possible.
+
+Examples: Common workflows
+--------------------------
+
+Example A – Load a Project and list its Tasks
+--------------------------------------------
+
+.. code-block:: python
+
+   project = session.query('Project where id is "1234"').first()
+   print('Project:', project.name)
+   print('Tasks:')
+   for task in project.tasks:
+       print(' -', task.name)
+
+Example B – Create a new Task and associate with a Project
+---------------------------------------------------------
+
+.. code-block:: python
+
+   new_task = session.create('Task', {
+       'name': 'Implement authentication',
+       'project': project
+   })
+   session.commit()
+
+Example C – Update a Task attribute
+-----------------------------------
+
+.. code-block:: python
+
+   task = session.query('Task where id is "task_5678"').first()
+   task.status = 'Done'
+   session.commit()
+
+Example D – Query tasks updated recently
+----------------------------------------
+
+.. code-block:: python
+
+   recent_tasks = session.query(
+       'Task where updated_at is within last 7 days'
+   )
+   for t in recent_tasks:
+       print(t.name, t.updated_at)
+
+API surface and related modules
+-------------------------------
+
+- Core session and authentication
+  - ftrack_api.Session: Manages server connection, caching, and operation recording.
+  - SessionAuthentication: Helpers for attaching authentication headers to requests.
+- Entities and related helpers
+  - ftrack_api.entity.base: Core base class for all entities.
+  - ftrack_api.entity.factory: Factory helpers for creating entity instances.
+  - ftrack_api.entity.location: Location-related entity handling.
+  - ftrack_api.collection: Collection utilities for related entity sets.
+  - ftrack_api.attribute: Attribute management for entities.
+- Query support
+  - ftrack_api.query: Query language and helpers to retrieve entities.
+- Caching
+  - ftrack_api.cache: Cache interfaces and implementations used by Session.
+- Event and plugins (optional)
+  - ftrack_api.event.hub: Event hub integration for non-local events.
+  - ftrack_api.plugin: Plugin system for extending the session behavior.
+
+Best practices
+--------------
+
+- Rely on auto_populate for attributes you don’t need immediately to minimize data transfer.
+- Use collections to traverse relationships; prefer iterating over them rather than constructing related entities manually.
+- When creating or updating, group related changes and commit together to reduce server round-trips.
+- Take advantage of the session cache to minimize repeated server lookups for the same entities.
+
+Troubleshooting tips
+--------------------
+
+- If an attribute access triggers a fetch, ensure the session has a valid connection to the server and the user has permission to read that attribute.
+- If you encounter stale data after an update, force a refresh by re-fetching the entity from the server (or invalidate the cache for that entity, depending on your caching strategy).
+- Check the session’s operation queue if changes are not appearing on the server after commit.
+
+Further reading
+--------------
+
+- The ftrack_api package documentation for detailed API references and version-specific notes.
+- The entity model documentation for explanations of available entity types and their attributes.
+- The caching and session management sections for performance considerations in large-scale usage.
+
+This guide focuses on practical usage of working with entities through the Session and the entity model. For advanced use cases (custom entity types, plugins, and event handling), refer to the broader API documentation and source modules under ftrack_api.

@@ -1,0 +1,132 @@
+# rand_augment
+
+## Overview
+rand_augment applies the RandAugment augmentation scheme to a batch of samples. It supports images (HWC) and videos (FHWC) with uint8 data. The transformation strength is controlled by two parameters, n and m, where n is the number of random augmentations applied to each sample and m selects the magnitude for those augmentations. The implementation follows the RandAugment approach described in:
+- RandAugment: Learning the Augmentation Suite for Efficient Image Classification (arXiv:1909.13719)
+
+Key aspects:
+- Works on DataNode batches within a NVIDIA DALI pipeline.
+- Allows shaping the magnitude range via num_magnitude_bins and shape.
+- Supports translation-related augmentations with configurable padding and interpolation.
+- Optional seeding for reproducible randomness.
+- Monotonic vs non-monotonic magnitude behavior (monotonic_mag).
+
+## Key Components
+- rand_augment(data, n, m, num_magnitude_bins=31, shape=None, fill_value=128, interp_type=None, max_translate_abs=None, max_translate_rel=None, seed=None, monotonic_mag=True, excluded=None) -> DataNode
+  - Applies RandAugment to the input batch.
+  - Internally selects an augmentation suite depending on monotonic_mag, handles shape and translation magnitude, and excludes user-specified augmentations.
+  - Returns a transformed DataNode.
+
+- apply_rand_augment(augmentations: List[_Augmentation], data: _DataNode, n: int, m: int, num_magnitude_bins: int, seed: Optional[int] = None, **kwargs) -> _DataNode
+  - Applies a selected subset of augmentations to the data.
+  - Delegates to a pipeline that picks n random augmentations from the provided list, scales magnitudes by m and num_magnitude_bins, and uses additional kwargs (e.g., fill_value, interp_type, shape).
+
+- Internal utilities (referenced but not shown here)
+  - get_rand_augment_suite(use_shape, max_translate_abs, max_translate_rel)
+  - get_rand_augment_non_monotonic_suite(use_shape, max_translate_abs, max_translate_rel)
+  - These return sequences of augmentation objects used by rand_augment.
+  - Excluded augmentations are validated against the selected suite.
+
+- Data types
+  - _DataNode: DALI DataNode wrapper for batch data.
+  - _Augmentation: augmentation descriptor with a name attribute used for exclusion logic.
+
+## Usage
+- Import and apply RandAugment to a data batch in a DALI pipeline.
+
+Example:
+- Basic usage (default monotonic magnitude behavior):
+  from nvidia.dali.auto_aug.rand_augment import rand_augment
+
+  # data is a DataNode representing a batch of images or videos
+  transformed = rand_augment(data, n=2, m=9)
+
+- With shape-aware magnitudes and a specific translation limit:
+  transformed = rand_augment(
+      data, n=2, m=9,
+      shape=(224, 224), max_translate_abs=None, max_translate_rel=0.45
+  )
+
+- Excluding specific augmentations:
+  transformed = rand_augment(data, n=2, m=9, excluded=["ShearX", "Rotate"])
+
+- Seeding for reproducibility:
+  transformed = rand_augment(data, n=2, m=9, seed=42)
+
+Code path illustration (from source):
+- aug_kwargs = {"fill_value": fill_value, "interp_type": interp_type}
+- use_shape = shape is not None
+- if use_shape: aug_kwargs["shape"] = shape
+- if monotonic_mag:
+  augmentations = get_rand_augment_suite(use_shape, max_translate_abs, max_translate_rel)
+  else:
+  augmentations = get_rand_augment_non_monotonic_suite(use_shape, max_translate_abs, max_translate_rel)
+- augmentation_names = set(aug.name for aug in augmentations)
+- excluded = excluded or []
+- for name in excluded:
+    if name not in augmentation_names:
+        raise Exception(...)
+- selected_augments = [ aug for aug in augmentations if aug.name not in excluded ]
+- return apply_rand_augment(selected_augments, data, n, m, num_magnitude_bins=num_magnitude_bins, seed=seed, **aug_kwargs)
+
+Code reference (excerpts):
+- Defining augmentation kwargs and shape usage:
+  aug_kwargs = {"fill_value": fill_value, "interp_type": interp_type}
+  use_shape = shape is not None
+  if use_shape:
+      aug_kwargs["shape"] = shape
+
+- Selecting augmentation suite:
+  if monotonic_mag:
+      augmentations = get_rand_augment_suite(use_shape, max_translate_abs, max_translate_rel)
+  else:
+      augmentations = get_rand_augment_non_monotonic_suite(use_shape, max_translate_abs, max_translate_rel)
+
+- Excluding augmentations:
+  excluded = excluded or []
+  for name in excluded:
+      if name not in augmentation_names:
+          raise Exception(...)
+
+- Applying selected augmentations:
+  selected_augments = [aug for aug in augmentations if aug.name not in excluded]
+  return apply_rand_augment(selected_augments, data, n, m,
+                            num_magnitude_bins=num_magnitude_bins, seed=seed, **aug_kwargs)
+
+## Details
+- Data support:
+  - Images: batch of samples with layout HWC
+  - Videos: batch with layout FHWC
+  - Data type: uint8
+
+- Magnitude and bins:
+  - n: number of random augmentations to apply per sample
+  - m: magnitude index in [0, num_magnitude_bins - 1]
+  - num_magnitude_bins: number of bins dividing the magnitude ranges (default 31)
+
+- Shape vs absolute magnitudes:
+  - If shape is provided, translation magnitudes depend on the image/frame shape and span from 0 to max_translate_rel * shape.
+  - If shape is not provided, translation magnitudes are in the range [0, max_translate_abs].
+
+- Padding and interpolation:
+  - fill_value controls padding for warp_affine-based ops (translation, shear, rotate); None means clamped border.
+  - interp_type selects interpolation method (e.g., types.INTERP_LINEAR or types.INTERP_NN).
+
+- Translation options:
+  - max_translate_abs: (int) or (int, int) specifying horizontal/vertical maximal shifts in pixels (only valid when shape is not provided).
+  - max_translate_rel: (float) or (float, float) specifying shifts as a fraction of shape (only valid when shape is provided).
+
+- Monotonic_mag:
+  - True: strength of operations increases with magnitude bins.
+  - False: some color operations have non-monotonic behavior; magnitude ranges for certain operations differ.
+
+- Excluded augmentations:
+  - You can provide a list of augmentation names to exclude from the default RandAugment suite.
+  - If an excluded name is not in the suite, an exception is raised.
+
+- Extensibility:
+  - For custom augmentations, you can use apply_rand_augment directly, providing your own list of _Augmentation instances.
+
+---
+
+If you need any adjustments or a shorter/longer version, I can tailor the content.

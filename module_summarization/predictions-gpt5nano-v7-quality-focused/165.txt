@@ -1,0 +1,106 @@
+PyTables File Format
+======================
+
+Overview
+--------
+PyTables stores data in HDF5 files and uses a specialized on-disk file format for its advanced features. The PyTables File Format describes how tables, columns, and especially indexes are represented on disk, how they are laid out, and how they are accessed at runtime. Central to this format is the Index object, which accelerates queries by maintaining precomputed order and location information for a column.
+
+Versioning and defaults
+-----------------------
+- Index version: The on-disk class uses an identifier of "INDEX" and a version indicator obversion. The current default is obversion = "2.1", which corresponds to PyTables Pro 2.1 and newer.
+- Default sorting: PyTables uses mergesort as the default data-sorting method for index construction and updates.
+- Default index filters: The default I/O filters applied to index datasets are Filters(complevel=1, complib='zlib', shuffle=True, fletcher32=False).
+- Default auto-index policy: By default, PyTables keeps indexes updated automatically after operations that may invalidate them (default_auto_index = True).
+- Optimized search types: A predefined set of numeric types (int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64) have optimized search paths in C/Cython code.
+
+Key concepts
+------------
+- Index object on disk
+  - Represented by a Group with on-disk class_id "INDEX" (_c_classid = 'INDEX').
+  - Exposes attributes and properties that describe how the index is stored and used.
+- Path naming for index data
+  - Index datasets live under a path segment that starts with _i_<columnname> within the table’s group.
+  - A helper maps an index path to the corresponding table path and column path:
+    - _table_column_pathname_of_index(indexpathname)
+
+  Example interpretation:
+  - Given an index pathname with a segment starting with _i_, PyTables derives:
+    - tablepathname: the path to the containing table group, with the _i_ segment collapsed to the actual column name.
+    - colpathname: the path to the target column within that table.
+  This mapping allows code to retrieve the Table and Column objects corresponding to an index.
+
+Index structure and block layout
+--------------------------------
+- Column index properties
+  - kind: The qualitative size of the index (ultralight, light, medium, full) derived from indsize:
+    - 1 -> ultralight
+    - 2 -> light
+    - 4 -> medium
+    - 8 -> full
+  - indsize is the underlying numeric size used to encode the index’s addressing granularity.
+- Blocks and slices (low-level layout)
+  - blocksize: The size of a compound block in index datasets.
+  - slicesize: The size of a slice within a block.
+  - chunksize: The size of a chunk within a slice.
+  - superblocksize: The size of a superblock (a higher-level grouping of blocks).
+- Derived counts
+  - nblockssuperblock: Number of blocks in a superblock = superblocksize / blocksize.
+  - nslicesblock: Number of slices in a block = blocksize / slicesize.
+  - nchunkslice: Number of chunks in a slice = slicesize / chunksize.
+  - nsuperblocks: Number of superblocks in the index (provides the total count of superblocks for the index’s layout).
+- Byte order
+  - byteorder: The on-disk endianness used for index datasets.
+- Compatible types and optimization
+  - opt_search_types lists the data types for which optimized search paths exist in the PyTables implementation.
+
+Index data and attributes
+-------------------------
+- Default I/O filters
+  - default_index_filters is a global Filter configuration applied to index datasets by default.
+- Dirty flag
+  - dirty property indicates whether the index is out of sync with its underlying table data.
+  - Stored as a DIRTY attribute on the index node (DIRTY). If absent, the index is considered clean.
+  - Changing the dirty flag notifies the table’s condition cache by nail/unnail actions to reflect index consistency.
+- Table and column access
+  - column property returns the Column object associated with the index (via path resolution).
+  - table property returns the Table object containing the indexed column.
+  - These properties rely on the internal path-mapping function to locate the correct table and column.
+
+Practical examples
+------------------
+1) Inspecting index kind
+   - Access the indsize attribute (internal) and read the human-friendly kind:
+     - index.kind returns 'ultralight', 'light', 'medium', or 'full' depending on indsize.
+
+2) Resolving the indexed column
+   - Given an index path, determine the containing table and the target column:
+     - tablepath, colpath = _table_column_pathname_of_index(indexpathname)
+     - table = file._get_node(tablepath)
+     - column = table.cols._g_col(colpath)
+   This demonstrates how PyTables maps an on-disk index to its logical table and column.
+
+3) Accessing derived block layout values
+   - Use index.nblockssuperblock, index.nslicesblock, index.nchunkslice, and index.nsuperblocks
+   - These properties reflect the hierarchical block layout used to organize the index data on disk.
+
+4) Checking and updating the dirty state
+   - if index.dirty:
+       perform appropriate operations or reindexing
+   - index.dirty = True  # marks as dirty and nails the condition cache
+
+Notes
+-----
+- The index path naming convention and the _table_column_pathname_of_index helper emphasize that Index objects are tightly coupled to a specific table column.
+- The on-disk layout provides a multi-level block structure to optimize lookups and minimize I/O during searches.
+- The default settings (filters, auto-index behavior, and sorting) are designed to deliver a balance between performance and storage efficiency.
+
+Appendix: Reference constants and defaults
+------------------------------------------
+- obversion: "2.1"
+- defsort: "mergesort"
+- default_index_filters: Filters(complevel=1, complib='zlib', shuffle=True, fletcher32=False)
+- defaultAutoIndex (deprecated alias for default_auto_index)
+- defaultIndexFilters (deprecated alias for default_index_filters)
+- opt_search_types: ("int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64")
+- max32: 2**32
+- _c_classid: 'INDEX' (on-disk class identifier)

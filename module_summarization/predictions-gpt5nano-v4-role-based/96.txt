@@ -1,0 +1,122 @@
+Getting Started with Mitogen Core: Master/Parent Common Utilities
+===============================================================
+
+This document provides a concise, developer-focused getting-started tutorial for the common utilities used by Mitogen’s master and parent processes. It highlights the core concepts, key helpers, and practical considerations you’ll encounter when working with the module that is sent to child contexts to enable them to act as a parent.
+
+Prerequisites
+-------------
+- A working Python environment (the codebase supports both Python 2 and Python 3).
+- Basic familiarity with Mitogen architecture (master, broker, and child/parent context concepts).
+- An understanding that this module contains functionality that is shared between master and parent processes and is sent into child contexts as they are prepared to become a parent.
+
+What this module provides
+-------------------------
+- Shared helpers for master/parent and their child contexts:
+  - sys.executable handling for child processes
+  - Core source retrieval and a partial, compressed transfer mechanism to speed up initialization of child contexts
+  - A mechanism (_preexec_hook) to run logic in the child process just before exec()
+- PTY (pseudo-terminal) handling constants for Linux, with safeguards when SELinux is enabled
+- Diagnostic messages used for common failure modes
+- Cross-version compatibility utilities (Python 2/3 differences)
+
+Key concepts and components
+----------------------------
+- get_sys_executable
+  - Purpose: Return a usable Python executable path for new child contexts.
+  - Behavior: If sys.executable is set, it is returned. If not, a warning is logged once and a safe default ("/usr/bin/python") is used.
+  - Practical note: Ensures child contexts can be started even when Python’s executable path is not readily available.
+
+- _get_core_source and get_core_source_partial
+  - Purpose: Provide the Mitogen core source to child contexts.
+  - _get_core_source: Retrieves the authoritative Mitogen core source (as a string) from the current module’s perspective.
+  - get_core_source_partial: Lazily creates and caches a partially compressed (zlib) representation of the core source to speed up distribution to multiple child processes. This avoids repeated expensive work and helps with multi-threaded startup scenarios.
+  - Practical note: In non-master contexts, the core source can be obtained via the import mechanism; in master contexts, a minified form is prepared directly for efficiency.
+
+- _preexec_hook
+  - Purpose: A hook that, if set, is invoked in the child process just before exec() of the new process.
+  - Practical note: Useful for preparations such as setting resource limits, CPU affinity, or environment adjustments before the new process starts running.
+
+- PTY handling constants
+  - LINUX_TIOCGPTN: A Linux ioctl request used to obtain the PTY number.
+  - LINUX_TIOCSPTLCK: A Linux ioctl request used to lock/unlock a PTY.
+  - Practical note: These constants are used when Mitogen needs to manage PTYs for remote/attached processes, particularly on Linux. If SELinux is enforcing, Mitogen avoids using socketpairs/PTYs to remain compatible with SELinux policies.
+
+- SELINUX_ENABLED
+  - Determination of whether SELinux is enforcing, used to determine whether PTY-based approaches are viable in the current environment.
+
+- Diagnostic messages
+  - BROKER_SHUTDOWN_MSG: Message when a connection is cancelled because the broker is shutting down.
+  - OPENPTY_MSG: Error message when a PTY cannot be created, typically due to hitting system-imposed PTY limits, with guidance on OS-specific tunings.
+  - SYS_EXECUTABLE_MSG: Message explaining why a fallback Python executable might be used and under what conditions.
+  - Practical note: These messages help diagnose common startup and runtime issues.
+
+- Python 2/3 compatibility helpers
+  - xrange alias for range in Py3
+  - Closure and bound-method attribute naming differences
+  - These help the module remain usable across Python versions.
+
+Getting started: practical walkthrough
+--------------------------------------
+1. Inspect core startup path
+   - Understand that child contexts receiving this module as part of their initialization use get_sys_executable to determine which Python binary to invoke.
+   - When a child needs to run Mitogen’s core logic, _get_core_source provides the authoritative source, and get_core_source_partial ensures a fast, compressed transfer path for multi-process startups.
+
+2. Prepare a safe pre-exec environment
+   - If you need to adjust process attributes before the child starts (e.g., CPU affinity, resource limits), implement and assign a _preexec_hook. The child will run this hook just before exec().
+
+3. Manage PTYs responsibly
+   - Be aware of Linux PTY handling constants (LINUX_TIOCGPTN, LINUX_TIOCSPTLCK) and SELinux implications.
+   - If your environment enables SELinux, you may encounter limitations that require avoiding PTY-based mechanisms.
+
+4. Handle common failure modes
+   - If a broker shuts down mid-operation, the BROKER_SHUTDOWN_MSG will guide you to the root cause.
+   - If PTYs cannot be created, OPENPTY_MSG provides actionable guidance on system limits and configuration.
+   - If sys.executable is not set, SYS_EXECUTABLE_MSG explains the fallback behavior.
+
+5. Explore compatibility and robustness
+   - The module includes Python 2/3 compatibility shims to keep behavior consistent across runtimes.
+   - The minification/partial transfer path is designed to minimize overhead when distributing Mitogen’s core to multiple child contexts.
+
+Minimal guidance for common tasks (conceptual examples)
+- Determine the Python executable to use for a child:
+  - If a suitable sys.executable is present, use it.
+  - Otherwise, fall back to a safe default and log a warning once.
+
+- Prepare a child for parent behavior:
+  - Use a preexec hook to set up the environment before the child process starts executing the Mitogen logic.
+
+- Distribute core logic efficiently to child contexts:
+  - Leverage the partial core source cache to avoid repeated, expensive construction of the core source payload.
+
+- Diagnose startup issues:
+  - Check for PTY-related errors and consult OPENPTY_MSG for OS-specific remediation.
+  - If you see broker shutdown signals, investigate broker lifecycle and connectivity.
+
+Notes for implementers and contributors
+---------------------------------------
+- This module is a foundational utility layer. When extending Mitogen’s master or parent components, you’ll encounter these helpers frequently during process creation, communication setup, and runtime initialization.
+- Consider thread-safety when interacting with the core source cache. The get_core_source_partial function uses a lock to avoid concurrent expensive initialization.
+- Be mindful of multi-version compatibility in environments that mix Python 2 and Python 3.
+
+Further reading
+--------------
+- Mitogen architecture overview (master, broker, child contexts)
+- PTY and terminal management in Unix-like systems
+- Pre-exec hooks and process initialization patterns
+- Core source minification and distribution strategies
+
+Appendix: API at a glance (conceptual)
+- get_sys_executable(): str
+- _get_core_source(): str
+- get_core_source_partial(): None (ensures a precomputed partial core source is available)
+- _preexec_hook: callable or None
+- LINUX_TIOCGPTN: int
+- LINUX_TIOCSPTLCK: int
+- SELINUX_ENABLED: bool
+- BROKER_SHUTDOWN_MSG: str
+- OPENPTY_MSG: str
+- SYS_EXECUTABLE_MSG: str
+- _core_source_lock: threading.Lock
+- _core_source_partial: PartialZlib or None
+
+If you’d like, I can tailor this getting-started tutorial to a specific audience (e.g., contributors, operators, or end-users) or adapt the examples to a concrete workflow you’re targeting.

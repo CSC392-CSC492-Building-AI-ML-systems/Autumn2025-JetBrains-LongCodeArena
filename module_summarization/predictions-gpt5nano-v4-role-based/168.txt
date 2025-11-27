@@ -1,0 +1,108 @@
+Feature extraction for model inspection
+=======================================
+
+Overview
+--------
+This documentation describes the feature extraction tooling used to inspect and reason about a model’s internal graph for debugging, debugging, and analysis purposes. The core components are designed to trace a model’s execution while preserving a meaningful, human-readable mapping from FX Nodes to “node names” that reflect the module hierarchy and operation sequence. This enables selecting and inspecting intermediate features/activations by their named graph nodes.
+
+Key concepts
+------------
+- Leaf modules: Modules that should not be traced through. When a module is designated as a leaf, its forward call is captured as a single node rather than inlining its internal operations. This helps keep the traced graph aligned with meaningful, higher-level operations.
+- Node path naming: Each traced operation or leaf module is assigned a node name that represents its path through the module hierarchy. The top-level module name is omitted; the node name is a dot-separated path from the top-level to the specific operation or leaf module, e.g., 'relu' or 'layer1.0.conv1'.
+- Node mapping: The trace records a mapping from FX Nodes to their computed node names via node_to_qualname. This mapping is crucial for selecting and extracting features by name later in the workflow.
+- Duplicate name handling: If a node name occurs more than once, a suffix _{int} is appended to disambiguate (e.g., 'relu', 'relu_1', 'relu_2', ...). This ensures stable, unique node identifiers within the scope of tracing.
+
+Core components
+--------------
+
+LeafModuleAwareTracer
+^^^^^^^^^^^^^^^^^^^^
+- Purpose: An FX Tracer that allows the user to specify a set of leaf modules. Leaves are not traced through; instead, calls to their forward methods are recorded as single proxy nodes.
+- How it works:
+  - __init__: Accepts an optional leaf_modules parameter (a collection of module types/classes). If provided, it is stored and used to decide which modules are leaf modules.
+  - is_leaf_module(m, module_qualname): Returns True if the module m is one of the configured leaf modules; otherwise, delegates to the base tracer logic.
+- Usage note: Pass a collection of module classes to leaf_modules to treat those module types as leafs during tracing.
+
+NodePathTracer
+^^^^^^^^^^^^^^
+- Purpose: An FX tracer that, in addition to tracing operations, records the origin node’s qualified name (node name) for every operation. The node name is a dot-separated path that reflects the hierarchy from the top-level module to the operation, excluding the top-level module name.
+- Data tracked:
+  - current_module_qualname: The qualified name of the module currently being traced.
+  - node_to_qualname: An OrderedDict mapping FX Node objects to their computed node names.
+- Key behaviors:
+  - call_module(m, forward, args, kwargs):
+    - Captures the qualified name of the module being called.
+    - If the module is not a leaf module, continues tracing via forward.
+    - If the module is a leaf, records the call as a proxy via create_proxy.
+    - Restores the previous current_module_qualname after tracing.
+  - create_proxy(kind, target, args, kwargs, ...):
+    - Overrides the base Tracer.create_proxy to capture the node name for every created node.
+    - Stores the mapping: proxy.node -> computed node name (via _get_node_qualname).
+  - _get_node_qualname(module_qualname, node):
+    - Builds the node name by combining the module_qualname with the node’s representation when appropriate.
+    - Strips any pre-existing trailing FX postfixes to normalize the base name.
+    - Detects duplicates by scanning previously recorded node names (node_to_qualname) in reverse order and appends a local postfix _{int} to ensure uniqueness within the local scope.
+  - Node naming behavior details:
+    - If the node is not a "call_module", it appends the node’s string representation to the module_qualname with a dot, but only if there is an existing module_qualname.
+    - Duplicate resolution is local to the traced graph: the suffix is added to the current node name based on previously seen names.
+
+Helper utilities
+----------------
+- _is_subseq(x, y)
+  - Small utility to check whether y is a subsequence of x.
+  - Used to compare the ordering of traced nodes between train and eval graphs.
+
+- _warn_graph_differences(train_tracer, eval_tracer)
+  - Emits a warning if there are differences between the train and eval traced graphs.
+  - Compares the sequences of node names gathered by node_to_qualname from both tracers.
+  - If graphs appear identical in node naming, returns without warning.
+  - If differences exist, suggests: “When choosing nodes for feature extraction, you may need to specify output nodes for train and eval mode separately.”
+  - If one node sequence is a subsequence of the other, adds a note about potential subgraph differences when tracing in eval mode.
+
+Getting graph node names
+------------------------
+- The module exposes create_feature_extractor and get_graph_node_names as part of its public API. These helpers enable constructing a feature-extractor model that returns activations for selected graph nodes by their names.
+- The underlying mechanism relies on NodePathTracer’s node_to_qualname mapping, which is used to resolve user-specified feature keys to the corresponding FX nodes and their outputs.
+
+Practical usage
+---------------
+
+Typical workflow to enable feature extraction for model inspection:
+
+- Step 1: Build a model and determine which modules should be treated as leafs during tracing.
+- Step 2: Create a NodePathTracer (optionally with leaf_modules) to trace the model with a meaningful node naming scheme.
+- Step 3: Trace the model to obtain the node_to_qualname mapping and the list of graph node names.
+- Step 4: Use get_graph_node_names to extract a list of node names for feature extraction targets.
+- Step 5: Use create_feature_extractor (or a similar utility) to construct a module that returns the outputs of the selected nodes for inspection or debugging.
+- Step 6: If you trace the same model in training vs evaluation modes, optionally call _warn_graph_differences to surface potential mismatches and adjust your feature selection accordingly.
+
+Code excerpts (illustrative)
+
+- Marking leaf modules:
+  - tracer = NodePathTracer(leaf_modules=(nn.ReLU, nn.ReLU6))  # example leafs
+
+- Tracing a model and inspecting mappings:
+  - tracer = NodePathTracer()
+  - traced = tracer.trace(model)
+  - node_names = list(tracer.node_to_qualname.values())
+
+- Getting graph node names for feature extraction:
+  - names = get_graph_node_names(tracer)  # provided by the public API
+
+- Creating a feature extractor (high level usage):
+  - feature_extractor = create_feature_extractor(model, return_nodes=names)
+  - outputs = feature_extractor(input_tensor)
+
+Notes and caveats
+-----------------
+- Node naming is designed to be stable and human-friendly, but it is closely tied to the traversal order and the graph structure produced by FX.
+- If the training and evaluation traces differ (e.g., due to conditioning on different branches or different leaf module behavior), you may see differences in the node sequences. The provided _warn_graph_differences helper can help surface such discrepancies and guide you to specify separate outputs for train and eval modes.
+- The exact behavior of leaf_modules depends on how you provide the collection (typically module classes). Ensure you pass a compatible collection to avoid unintended traversal behavior.
+
+Reference
+---------
+- Feature extraction API: create_feature_extractor, get_graph_node_names
+- Tracing utilities: LeafModuleAwareTracer, NodePathTracer
+- Helpers: _is_subseq, _warn_graph_differences
+
+This documentation focuses on the feature extraction capabilities intended for model inspection, enabling clear, named access to intermediate activations and ensuring traces remain interpretable across model hierarchies.

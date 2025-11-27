@@ -1,0 +1,206 @@
+# Examples and usage
+
+This section covers how to define and use Field types in your models, how to create custom field types, how per-database overrides work, and practical examples showing common patterns (primary keys, defaults, indexing, and value conversion).
+
+## Overview
+
+- Each Field defines the Python type it stores (field_type) and how it maps to the database (SQL_TYPE).
+- New field types are typically created by combining Field with a Python type, using multiple inheritance. The internal metaclass detects this and sets the field_type accordingly.
+- You can override database-specific behavior by providing a nested class named in the form `class _db_<dialect>:` with dialect-specific attributes (e.g., SQL_TYPE).
+- Fields support common options like nullability, default values, indexing, and uniqueness. They also provide methods for converting values to/from the database: `to_db_value` and `to_python_value`.
+- For database-generated values, you can enable generation and provide the SQL needed to generate the value via `GENERATED_SQL`.
+
+---
+
+## Creating a new field type (via mixins)
+
+Most custom field types are created by mixing `Field` with a Python type. The `_FieldMeta` metaclass detects this pattern and sets the `field_type` accordingly.
+
+Example: define a string field type
+
+```python
+from tortoise.fields import Field
+
+class Char(Field, str):
+    SQL_TYPE = "VARCHAR(255)"
+```
+
+Usage:
+
+```python
+from tortoise.models import Model
+
+class User(Model):
+    name = Char(null=False, unique=True)
+```
+
+Notes:
+- `Char` now behaves as a `Field` with `field_type` set to `str`.
+- You can customize the SQL type via `SQL_TYPE`. This will be used for DDL generation.
+
+---
+
+## Per-database overrides
+
+If a dialect requires different behavior, you can override attributes or methods per dialect.
+
+Example: SQLite uses a smaller varchar length and you don’t want Python-side conversions
+
+```python
+class Char(Field, str):
+    SQL_TYPE = "VARCHAR(255)"
+
+    class _db_sqlite:
+        SQL_TYPE = "VARCHAR(40)"
+        skip_to_python_if_native = False
+```
+
+Notes:
+- You can override any field attributes (e.g., `SQL_TYPE`, `GENERATED_SQL`) or methods (e.g., `function_cast`) inside the dialect-specific inner class.
+- You can also use a property for dynamic behavior if needed.
+
+---
+
+## Practical usage in models
+
+Basic usage with typical options:
+
+```python
+from tortoise.models import Model
+
+class User(Model):
+    username = Char(null=False, unique=True, index=True)
+    email = Char(null=False, unique=True)
+    bio = Char(source_field="user_bio", null=True)
+```
+
+Field options demonstrated:
+- `null=False` makes the column NOT NULL.
+- `unique=True` enforces a unique constraint.
+- `index=True` creates an index on the column (only valid if `indexable` is `True`).
+
+---
+
+## Primary keys and generated values
+
+A single primary key is allowed per model. Mark a field as primary key with `pk=True`; the constructor will ensure it’s indexed and unique.
+
+```python
+class ID(Field, int):
+    SQL_TYPE = "INTEGER"
+
+class User(Model):
+    id = ID(pk=True)
+    username = Char(null=False)
+```
+
+Generated values (e.g., auto-incremented) can be indicated if a field supports generation:
+
+```python
+class AutoInt(Field, int):
+    SQL_TYPE = "INTEGER"
+    allows_generated = True
+    GENERATED_SQL = "GENERATED ALWAYS AS IDENTITY"  # dialect-dependent
+```
+
+---
+
+## Default values and description
+
+- You can supply a default value (which can be a static value or a callable).
+- Description text can be attached for documentation and DDL comments.
+
+```python
+class User(Model):
+    created_at = Char(sql_type="TIMESTAMP", default="CURRENT_TIMESTAMP")
+    bio = Char(null=True, default=None, description="User biography")
+```
+
+Note: In practice, use appropriate field types for the DB-native types (e.g., a dedicated `DateTimeField` if available).
+
+---
+
+## Source field name aliasing
+
+If you want the database column name to differ from the field name in Python, use `source_field`.
+
+```python
+class User(Model):
+    username = Char(source_field="user_name", null=False)
+```
+
+This will create a column named `user_name` in the database while using the Python attribute name `username`.
+
+---
+
+## Value conversion: Python <-> DB
+
+By default, `to_db_value` and `to_python_value` perform simple conversions based on `field_type`. You can customize conversion behavior by:
+- Overriding `to_db_value` / `to_python_value`
+- Using `function_cast` to apply a SQL cast when needed
+
+Example: custom Python-side normalization
+
+```python
+class Email(Field, str):
+    SQL_TYPE = "VARCHAR(255)"
+
+    def to_python_value(self, value: str) -> str:
+        if value is None:
+            return value
+        return value.strip().lower()
+```
+
+Example: apply a SQL cast via `function_cast` (using PyPika terms)
+
+```python
+from typing import Optional
+from pypika.terms import Term
+from tortoise.fields import Field
+from tortoise.fields import Char  # or your custom field
+
+class NumericString(Char, str):
+    SQL_TYPE = "VARCHAR(20)"
+    def function_cast(self, term: Term) -> Term:
+        from tortoise.dialects import SqlTypes
+        from pypika import functions
+        return functions.Cast(term, SqlTypes.NUMERIC)
+
+```
+
+Notes:
+- `function_cast` can be used when the DB requires explicit casting for certain types.
+- The example shows integrating with PyPika’s `Term` and dialect-specific types.
+
+---
+
+## Common patterns and tips
+
+- Use the mixin pattern to create a clean, reusable field type that clearly expresses the Python type and the SQL representation.
+- Always provide a dialect-specific inner class if your DB backend requires different SQL types or behavior.
+- When defining a primary key, rely on `pk=True`; the Field base will automatically set `index` and `unique` to `True`.
+- If a field is not safe to index on certain backends, set `indexable = False` to avoid indexing issues.
+- Use `default` for automatic values at model creation time; it can be a static value or a callable.
+
+---
+
+## Quick reference: common attributes and methods
+
+- field_type: Python type associated with this field (set by the metaclass when using the mixin pattern).
+- SQL_TYPE: SQL type used for DDL generation.
+- GENERATED_SQL: SQL snippet used to instruct the DB to auto-generate the value (if `allows_generated` is true).
+- indexable: Can this field be indexed? Set to False if indexing is unreliable.
+- has_db_field: Does this field have a direct DB column? If false, it can represent a virtual field.
+- skip_to_python_if_native: If the DB driver natively supports the Python type, skip conversion for performance.
+- allows_generated: Is this field capable of being DB-generated?
+- function_cast: A casting function to apply in DB terms when needed.
+- source_field: Override the DB column name.
+- default: Default value or callable for the field.
+- null: Is the field nullable?
+- pk: Is this field a primary key?
+- unique: Is this field unique?
+- index: Should this field be indexed?
+
+---
+
+If you’d like, I can tailor these examples to match your existing models or the specific dialects you plan to support.

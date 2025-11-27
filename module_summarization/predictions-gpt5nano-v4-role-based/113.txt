@@ -1,0 +1,252 @@
+Plans documentation
+====================
+
+This document describes the plan helpers defined in plans.rst, focusing on
+the core functionality implemented in the provided code: count, list_scan, and
+rel_list_scan (the latter is a placeholder for future implementation).
+
+Overview
+--------
+
+The module provides high-level plan generators for Bluesky workflows:
+
+- count: Take a specified number of readings from one or more detectors, with
+  optional per-shot customization and a delay between readings.
+- list_scan: Perform a Cartesian (inner product) scan over one or more motors
+  (or settable objects) with corresponding position lists, producing a sequence
+  of detector readings for every combination of motor positions.
+- rel_list_scan: Intended to perform a relative-position scan, but is not yet implemented.
+
+Key concepts used in these plans:
+
+- Decorators: The plans use preprocessors (bpp) to set up stages and run metadata.
+  Specifically, they decorate the inner plan with @bpp.stage_decorator(detectors)
+  and @bpp.run_decorator(md=_md) so that detector readings are captured in the
+  expected Bluesky message stream and metadata is attached to the run.
+- Metadata (_md): Each plan constructs a metadata dictionary describing the run,
+  including detectors, plan name, arguments, and hints (dimensions). The metadata
+  is augmented by an optional md argument provided by the user.
+- Plan patterns: list_scan relies on a plan pattern (inner_list_product) to build
+  a cycler for the inner loop. The resulting cycler is passed to scan_nd, which
+  executes the plan across the detector readings.
+- Partitioning: The code uses partition (from cytools or toolz) to split the
+  *args into motor-positions pairs (motor, [points]).
+
+API Reference
+-------------
+
+Functions implemented:
+
+- count(detectors, num=1, delay=None, *, per_shot=None, md=None)
+- list_scan(detectors, *args, per_step=None, md=None)
+- rel_list_scan(detectors, *args, per_step=None, md=None)  # TODO: not implemented
+
+Details
+
+1) count(detectors, num=1, delay=None, *, per_shot=None, md=None)
+- Purpose
+  Take one or more readings from detectors with optional per-shot customization and optional delay between readings.
+
+- Parameters
+  - detectors: list
+    A list of “readable” Ophyd-like objects (detectors) to read from.
+  - num: int or None, default 1
+    Number of readings to take. If None, capture data until canceled.
+  - delay: iterable or scalar, optional
+    Time delay in seconds between successive readings. If iterable, it must have at least
+    num - 1 entries; otherwise a ValueError is raised during iteration.
+  - per_shot: callable, optional
+    Hook invoked for customizing the action of the inner loop (messages per step).
+    Expected signature: def f(detectors: Iterable[OphydObj]) -> Generator[Msg]: ...
+    If None, a default per-shot behavior (bps.one_shot) is used.
+  - md: dict, optional
+    Additional metadata to attach to the run.
+
+- Behavior
+  - Builds a metadata dictionary _md describing the plan and its arguments.
+  - Sets default hints for dimensions: time primary, unless overridden.
+  - Applies stage and run decorators to wrap the inner plan.
+  - Executes an inner generator that yields from bps.repeat(partial(per_shot, detectors),
+    num=num, delay=delay).
+
+- Returns
+  A generator (plan) that yields detector messages for each reading.
+
+- Examples
+  - Basic usage:
+    .. code-block:: python
+
+       yield from count([det1, det2], num=5, delay=0.2)
+
+  - Custom per-shot behavior (provide your own generator of Msg objects):
+    .. code-block:: python
+
+       def my_per_shot(detectors):
+           # emit or modify messages per shot
+           yield Msg('custom', detectors)
+
+       yield from count([det1, det2], num=5, per_shot=my_per_shot)
+
+- Notes
+  - If num is None, the plan runs indefinitely (num_intervals is set to None).
+  - The plan_args in metadata include representations of detectors and the num.
+
+2) list_scan(detectors, *args, per_step=None, md=None)
+- Purpose
+  Scan over one or more variables in steps simultaneously (the inner product
+  of provided position lists), returning detector readings at each combination.
+
+- Parameters
+  - detectors: list
+    A list of readables (detectors).
+  - *args
+    Pairs of (motor, [points]) specifying the motors (or settable objects) to
+    scan and their position lists. The number of argument elements must be even
+    (motor, list) for each motor involved.
+  - per_step: callable, optional
+    Hook for customizing action of inner loop (messages per step).
+    Expected signature: f(detectors, motor, step) -> plan (generator).
+  - md: dict, optional
+    Metadata to attach to the run.
+
+- Behavior
+  - Validates that the number of args is even and that all provided lists have the
+    same length. If not, raises ValueError.
+  - Prepares md_args as a flattened representation of (motor, positions) pairs.
+  - Determines motor names and builds the _md dictionary with:
+    - plan_name: 'list_scan'
+    - plan_pattern: 'inner_list_product'
+    - plan_pattern_module: plan_patterns.__name__
+    - plan_pattern_args: dict(args=md_args)
+  - Updates hints for dimensions based on motor hints, if available, defaulting to
+    a primary dimension (x_fields) if provided.
+  - Constructs full_cycler via plan_patterns.inner_list_product(args) to produce
+    an iterable representing the Cartesian product of the provided position lists.
+  - Delegates to scan_nd(detectors, full_cycler, per_step=per_step, md=_md) and yields from it.
+
+- Returns
+  A generator (plan) that yields detector messages across the scanned positions.
+
+- Examples
+  - Simple 2-motor inner product scan:
+    .. code-block:: python
+
+       yield from list_scan([det], motorA, [0, 1, 2], motorB, [0.0, 0.5, 1.0])
+
+  - With per_step hook:
+    .. code-block:: python
+
+       def per_step(detectors, motor, step):
+           # customize step action
+           yield Msg('custom', motor.name, step)
+
+       yield from list_scan([det], motorA, [0, 1], motorB, [0, 1], per_step=per_step)
+
+- Notes
+  - The function relies on plan_patterns.inner_list_product to build the inner-cycle
+    generator and on scan_nd to execute the plan. The metadata communicates the
+    structure of the scan to downstream tools.
+
+3) rel_list_scan(detectors, *args, per_step=None, md=None)
+- Purpose
+  Intended to perform a list-based scan with relative positions (positions defined
+  relative to the current location). However, this function is not yet implemented
+  (TODO).
+
+- Status
+  TODO: Implementation pending. The docstring describes the intended usage.
+
+- Returns
+  Not implemented in this version.
+
+- Notes
+  - The signature is prepared to mirror list_scan, but the body is currently a
+    placeholder (# TODO).
+
+See Also
+--------
+
+- Bluesky plan utilities:
+  - scan_nd: general plan runner for scanning with a cycler
+  - inner_list_product: helper to construct an inner-product cycler from
+    a list of (motor, [points]) pairs
+- plan_patterns: module providing plan pattern helpers and cyclers
+  (e.g., plan_patterns.inner_list_product)
+- bpp (preprocessors): decorators for stage/run metadata
+- bps (plan stubs): helper plan stubs such as one_shot used for per-shot behavior
+- Msg: message class used for custom per-step actions and metadata handling
+
+Implementation notes
+--------------------
+
+- Partitioning:
+  - The code uses partition(2, args) to split the *args into (motor, pos_list)
+    pairs, validating that the total count is even.
+
+- Metadata handling:
+  - The _md dictionary is built with:
+    - detectors: list of detector names
+    - motors: list of motor names (for list_scan)
+    - num_points and num_intervals: derived from the length of the position lists
+    - plan_args: reprs of detectors and args
+    - plan_name: the name of the plan
+    - plan_pattern and related fields for list_scan
+    - hints: dimension hints (time for count; per-motor dimensions for list_scan)
+
+- Decorators:
+  - The count plan uses:
+    - @bpp.stage_decorator(detectors)
+    - @bpp.run_decorator(md=_md)
+  - This ensures detector stages are prepared and metadata is attached to the run.
+
+- Default behavior:
+  - count uses per_shot = bps.one_shot if not provided.
+  - list_scan builds a full cycler via plan_patterns.inner_list_product and passes it to scan_nd.
+
+- Error handling:
+  - list_scan raises ValueError if the provided positional lists have different lengths.
+  - If the number of (motor, points) pairs is inconsistent, a similar error will be raised via the length checks.
+
+- Dependencies:
+  - cytools.partition or toolz.partition for pairwise extraction
+  - plan_patterns for building cyclers and patterns
+  - Bluesky plan machinery (scan_nd, decorators)
+
+Examples (summary)
+------------------
+
+- Count with 5 readings and 0.2s delay:
+  yield from count([det1, det2], num=5, delay=0.2)
+
+- Count with custom per-shot behavior:
+  def per_shot(detectors):
+      yield Msg('custom', detectors)
+  yield from count([det1], num=3, per_shot=per_shot)
+
+- List scan over two motors:
+  yield from list_scan([det], motorA, [0, 1, 2], motorB, [0.0, 0.5, 1.0])
+
+- List scan with per_step hook:
+  def per_step(detectors, motor, step):
+      yield Msg('custom', motor.name, step)
+  yield from list_scan([det], motorA, [0, 1], motorB, [0, 1], per_step=per_step)
+
+Rel_list_scan
+-------------
+
+- Status: TODO
+- Intended usage: similar to list_scan, but positions are relative to current
+  positions rather than absolute. Implementation pending.
+
+Note to maintainers
+-------------------
+
+- The rel_list_scan function is a placeholder; consider implementing it in a
+  future release and adding tests to verify relative-position handling.
+- Consider adding unit tests that cover:
+  - count with various num/delay combinations (including None)
+  - list_scan with multiple motors having identical length lists
+  - error conditions for mismatched lengths in list_scan
+  - metadata contents (plan_name, plan_args, hints) for both count and list_scan
+
+End of documentation.

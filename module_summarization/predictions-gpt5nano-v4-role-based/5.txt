@@ -1,0 +1,133 @@
+Publishing versions
+===================
+
+Overview
+--------
+This document describes how version publishing is expected to work within the ftrack API integration provided by this codebase. It outlines the concepts, prerequisites, and a practical workflow for publishing versioned entities (assets, tasks, or other versioned objects) using the API surface implemented in Session and related components.
+
+Key concepts
+------------
+- Version: A label that identifies a specific state of a versioned entity (e.g., 1.0.0, 2.1.3). Version strings are analyzed and compared using the Python distutils.version utilities.
+- Draft vs Published: A draft version represents work in progress; publishing moves a version to a published state that is considered final or released.
+- Publishing workflow: A sequence of API operations that transitions a draft version to a published one, typically supported by recording operations and server-side state transitions.
+- Version comparison: Versions are compared using distutils.version to ensure correct ordering and validation (e.g., 1.9.0 < 2.0.0).
+
+Prerequisites
+-------------
+- Server access: A reachable ftrack server URL.
+- Credentials: API key and API user. These are required to instantiate a Session.
+- Session usage: Publishing operations are typically performed through a Session instance. The Session also supports operation recording to track changes for subsequent publishing.
+
+  Example requirements extracted from the codebase:
+  - server_url (FTRACK_SERVER or explicit URL)
+  - api_key (FTRACK_API_KEY or explicit key)
+  - api_user (FTRACK_API_USER or derived from environment or system credentials)
+  - Optional: enable and use operation recording via session.recorded_operations
+
+Publishing workflow
+-------------------
+While the exact publishing primitives depend on the concrete server-side implementation, a robust, reusable workflow follows these steps:
+
+1) Establish a session
+   - Create a session with server_url, api_key, and api_user.
+   - Optionally enable operation recording to capture changes to be published as a single cohesive transaction.
+
+2) Retrieve the target versioned entity
+   - Load the entity (e.g., an asset or other versioned object) and its current draft version.
+   - Inspect existing versions and the current published state, if any.
+
+3) Prepare a draft version (if applicable)
+   - If starting from scratch, create a new draft version or update the draft state of the entity.
+   - Validate the version string using distutils.version utilities to ensure proper formatting and ordering.
+
+4) Publish the version
+   - Transition the draft version to a published state.
+   - This typically involves:
+     - Validating the version identifiers (e.g., semantic versioning rules).
+     - Marking the version as published on the server.
+     - Optionally updating metadata such as publish timestamp, publisher identity, and release notes.
+   - If using recorded operations, flush or commit the operations so they are executed atomically on the server.
+
+5) Confirm and verify
+   - Retrieve the published version and verify its state and metadata.
+   - Ensure that downstream processes (workflows, viewers, or subscribers) are notified if the environment supports event publishing.
+
+6) Error handling
+   - Handle server-side validation errors (invalid version format, duplicate published version, insufficient permissions).
+   - Retry logic or user-facing messaging as appropriate for the application.
+
+Implementation notes (in this codebase)
+-------------------------------------
+- Session
+  - The Session class encapsulates interaction with the ftrack server, including:
+    - server_url, api_key, and api_user configuration.
+    - Optional schema caching and plugin support (not central to publishing versions, but relevant to the broader workflow).
+    - An operation recording mechanism (recorded_operations) to enable batching and later publishing of changes.
+  - The presence of a recorded_operations object (self.recorded_operations) indicates support for collecting a sequence of changes to be published together.
+
+- Authentication
+  - SessionAuthentication is provided to attach API credentials to outgoing requests, enabling authenticated publishing operations.
+
+- Versioning infrastructure
+  - The import of distutils.version suggests that the codebase relies on distribution-style version comparison for validating and ordering version strings.
+  - The codebase uses standard Python tooling for time (arrow) and deterministic hashing (hashlib) which can be used to stamp or verify published artifacts as part of the workflow.
+
+- Extendability
+  - The architecture appears to be designed for pluggable components (plugins, event hub, etc.). Publishing versions can be integrated with server-side hooks or client-side operation records, leveraging the same Session and operation mechanisms used for other actions.
+
+Practical example (conceptual)
+--------------------------------
+The following is a conceptual illustration of how you might publish a new version using the API surface demonstrated by this codebase. Replace with actual entity types and server API calls as implemented in your environment.
+
+.. code-block:: python
+
+   from ftrack_api import Session
+
+   # Prerequisites: provide valid server URL, API key, and user
+   session = Session(
+       server_url="https://your.ftrack.server",
+       api_key="your_api_key",
+       api_user="your_username",
+   )
+
+   # Optional: enable operation recording for a single publish transaction
+   session.record_operations = True
+
+   # Load the versioned entity (pseudo-code; adapt to your actual API)
+   asset = session.get("Asset", "some-asset-id")
+
+   # Determine the new version string (must be valid per configured rules)
+   new_version = "1.2.0"
+
+   # Validate version format (example using distutils.version)
+   from distutils.version import LooseVersion
+   LooseVersion(new_version)  # will raise ValueError if invalid
+
+   # Prepare draft/publish metadata (pseudo-code)
+   # asset.create_or_update_draft_version(new_version, publish=True, notes="Release notes")
+
+   # Commit/publish the version (pseudo-code)
+   session.recorded_operations.flush()  # or session.publish(recorded_operations)
+
+   # Verify
+   published = asset.get_version("1.2.0")
+   assert published.is_published()
+
+Notes
+-----
+- If you do not enable operation recording, publishing may require direct server-side calls or separate publish actions.
+- Ensure proper permissions and review workflows before publishing to avoid releasing drafts unintentionally.
+- Use semantic versioning for clarity and compatibility with version comparison utilities.
+
+See also
+--------
+- ftrack_api.session.Session: core entry point for server communication
+- ftrack_api.operation: operation recording and batching mechanism
+- distutils.version: version parsing and comparison utilities
+- ftrack_api.logging: logging utilities used by the API
+
+References
+----------
+- Code references: Session class, SessionAuthentication, and distutils.version import
+- Environment variables: FTRACK_SERVER, FTRACK_API_KEY, FTRACK_API_USER
+

@@ -1,0 +1,171 @@
+# Miscellaneous features of astropy.io.fits
+
+This section documents the miscellaneous utilities and helpers used within astropy.io.fits for verification, error reporting, and internal event notification. The components described here are used to validate FITS-related data structures, report errors in a structured way, and allow lightweight notification of changes between objects.
+
+## Verification framework
+
+The misc module includes a lightweight verification mechanism that classes can adopt to check their internal state and data for correctness, optionally fixing issues or reporting them as warnings or errors.
+
+Key components
+
+- `VerifyError` and `VerifyWarning`
+  - Exception and warning types raised or warned about during verification failures.
+- `VERIFY_OPTIONS`
+  - A list of supported option strings that control verification behavior.
+  - Examples: `"ignore"`, `"warn"`, `"exception"`, `"fix"`, `"silentfix"`, as well as combinations like `"fix+warn"`, `"silentfix+ignore"`, etc.
+- `_Verify` (mixin)
+  - Provides common verification utilities used by classes that implement a `_verify` method.
+  - Core methods:
+    - `run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)`
+      - Executes a single verification step according to the chosen option.
+      - Behavior:
+        - If the option entails reporting (e.g., `"warn"` or `"exception"`), the issue is not considered fixable.
+        - If the issue is fixable and a `fix` callback is provided, it is executed and a “Fixed.” message is appended by default.
+      - Returns a tuple: `(fixable, text)`, where `fixable` is a boolean indicating whether the issue could be fixed, and `text` is the message to report.
+    - `verify(option="warn")`
+      - Performs verification of all values in the instance by calling the user-implemented `_verify(opt)` (not shown in this snippet) and then reporting or fixing as configured.
+      - Supported options:
+        - Base options: `"ignore"`, `"warn"`, `"exception"`.
+        - Combinations with fixing: e.g., `"fix+warn"`, `"fix"`, `"silentfix+ignore"`, etc.
+      - Behavior details:
+        - If `opt == "ignore"`, verification is skipped.
+        - The option is split into a fix-related part and a reporting-related part when `"+"` is present.
+        - Special handling exists for `"silentfix"` to suppress certain reports, and for combinations where unfixable errors should raise.
+        - Messages are collected via the `_verify` method’s output and presented with a standardized header and a trailing note about zero-based indexing.
+- `_ErrList`
+  - A specialized list subclass used to accumulate and format nested verification error messages.
+  - Structure:
+    - Each item can be either a simple error message (a tuple with a boolean flag and a string) or another `_ErrList` representing a nested grouping.
+    - The `unit` attribute provides a header for nested groups (e.g., `"Element"`, `"HDU"`, etc.).
+  - Responsibilities:
+    - `__str__()` renders the entire error list as a string by joining the lines produced by `iter_lines()`.
+    - `iter_lines(filter=None, shift=0)` iterates through the nested structure and yields lines with proper indentation.
+      - Top-level messages are yielded first.
+      - Nested messages are yielded with a header like `<unit> <index>:` when applicable, followed by their content with indentation.
+  - Practical effect: This structure allows rich, hierarchical reporting of multiple issues across different logical levels.
+
+Usage guidance
+
+- To leverage the verification facility, a class should implement a `_verify(self, opt)` method that returns an `_ErrList`-structured collection of issues. The details of `_verify` are not shown in this snippet but are expected to align with how `_ErrList` is iterated and reported by `_Verify.verify()`.
+- To perform verification with fulfilling reporting or fixing behavior, call:
+  - `obj.verify(option="warn")`  # warnings reported
+  - `obj.verify(option="fix")`   # fixable issues attempted with default messaging
+  - `obj.verify(option="fix+warn")`  # fixable issues attempted, then warnings reported
+  - `obj.verify(option="silentfix+ignore")`  # fixable issues fixed silently; nothing reported
+- The verification output includes a leading note about zero-based indexing, and the messages can be emitted as warnings (via `VerifyWarning`) or raised as `VerifyError` depending on the option.
+
+Example (high level)
+
+- A class uses `_Verify` to perform checks and collects errors in an `_ErrList`.
+- Calling `verify()` with different options adjusts whether issues are fixed, reported as warnings, or raised as errors, and whether fix-related messages are printed.
+
+```python
+from astropy.io.fits.misc import _Verify, _ErrList, VerifyWarning, VerifyError
+
+class MyVerifier(_Verify):
+    def __init__(self, value):
+        self.value = value
+
+    def _verify(self, opt):
+        errs = _ErrList(unit="Element")
+        if self.value <= 0:
+            errs.append((False, "Value must be positive"))
+        # possibly more nested checks
+        return errs
+
+obj = MyVerifier(-5)
+# This will produce a warning/error depending on option
+obj.verify(option="warn")
+```
+
+Note:
+- The exact behavior of `_verify` (i.e., how `_ErrList` is populated) is implementation-dependent in the class that mixes in `_Verify`. The structure shown above demonstrates the intended interaction pattern.
+
+## Error reporting structure
+
+The error reporting is organized around `_ErrList`, a nested list structure that makes it easy to present complex, hierarchical verification results.
+
+Key aspects
+
+- Nested grouping: `_ErrList` can contain other `_ErrList` instances to represent hierarchical error categories (e.g., per element, per HDU, per table row).
+- Unit labeling: Each `_ErrList` can have a `unit` string (e.g., `"Element"`, `"HDU"`) that is used as a header when iterating lines to present a readable outline of issues.
+- Formatting and indentation: The `iter_lines()` method yields pairs of `(label, text)` with proper indentation so that the final rendered message is easy to scan.
+- Display: `__str__()` returns the concatenated text lines, suitable for user-facing messages or logs.
+
+Usage example (conceptual)
+
+```python
+from astropy.io.fits.misc import _ErrList
+
+# Simple flat error list
+errs = _ErrList([(False, "Index out of range"), (False, "Type mismatch")], unit="Element")
+print(str(errs))
+# Output:
+# Element 0: Index out of range
+# Element 1: Type mismatch
+
+# Nested example
+child = _ErrList([(False, "Child failure")], unit="Child")
+parent = _ErrList([(False, "Parent failure"), child], unit="Element")
+for label, line in parent.iter_lines():
+    if label is not None:
+        print(line)
+```
+
+Notes
+- The verification framework relies on the message content produced by `_verify` and the filtering/printing logic inside `_Verify.verify()`. The exact formatting of messages (e.g., prefixes like “Verification reported errors:”) is designed to be consistent and user-friendly for developers debugging FITS data issues.
+
+## Notifier mixin for internal event signaling
+
+The module includes a lightweight notifier mixin to support internal event signaling between objects. This is intended for internal communication and is not a user-facing API.
+
+Key features
+
+- Listener registration
+  - Objects can register listeners using an internal method (described as `_add_listener` in the docstring). Listeners are held via weak references to prevent reference cycles.
+- Change notifications
+  - When the object changes, it can call `_notify('change_type', *args, **kwargs)`, which will attempt to call a corresponding method on all listeners: `listener._update_change_type(*args, **kwargs)`.
+- Internal use
+  - The mixin is designed for internal coordination between components (e.g., tracking updates within FITS data structures) and is not intended as a public API.
+
+Example
+
+```python
+import weakref
+from astropy.io.fits.misc import NotifierMixin
+
+class Listener:
+    def _update_change_type(self, *args, **kwargs):
+        print("Received change:", args, kwargs)
+
+class Subject(NotifierMixin):
+    def __init__(self):
+        self._listeners = set()
+
+    def _add_listener(self, listener):
+        self._listeners.add(weakref.ref(listener))
+
+    def _notify(self, change_type, *args, **kwargs):
+        for ref in list(self._listeners):
+            listener = ref()
+            if listener is not None:
+                updater = getattr(listener, f"_update_{change_type}", None)
+                if callable(updater):
+                    updater(*args, **kwargs)
+
+# Usage
+subj = Subject()
+l = Listener()
+subj._add_listener(l)
+subj._notify("change_type", 123, key="value")
+# Listener prints: Received change: (123,) {'key': 'value'}
+```
+
+Notes
+- The exact internal methods and lifecycle are implementation-specific. The docstring in the codebase documents the intended pattern: register listeners with `_add_listener`, notify with `_notify`, and invoke listener methods named `_update_change_type`.
+
+## See also
+
+- The verification mechanism is part of a broader verification framework referenced by `:ref:\`astropy:verify\`` in the documentation, which discusses how to use verification options and interpret messages in the context of FITS data validation.
+
+This concludes the miscellaneous documentation for features related to verification, error reporting, and internal event notifications within astropy.io.fits.

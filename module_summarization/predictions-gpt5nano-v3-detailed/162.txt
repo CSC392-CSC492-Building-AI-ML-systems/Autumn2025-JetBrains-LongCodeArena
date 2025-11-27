@@ -1,0 +1,128 @@
+Parallel Random Number Generation
+===============================
+
+Overview
+--------
+This module provides high-performance, parallelizable random number generation capabilities for Python via a collection of C/Cython backends and Python-facing interfaces. It exposes multiple random bit generators (RNG backends) and a Python-friendly Generator abstraction that can be used to generate random numbers in parallel workloads with independent streams.
+
+Key components
+---------------
+- Bit generators
+  - MT19937: The classic Mersenne Twister backend.
+  - Philox: A counter-based RNG suitable for parallel workloads.
+  - PCG64: A modern, fast, statistically solid RNG with good parallel properties.
+  - SFC64: Small Fast ChaCha-like generator with good throughput.
+
+- Core utilities
+  - _common: Shared utilities used by multiple backends.
+  - _bounded_integers: Efficient generation of integers within a bounded range.
+
+- Python-facing interfaces
+  - _generator: High-level Python API that orchestrates a BitGenerator with number generation routines.
+  - mtrand: Legacy interface compatibility.
+
+- Distributions and random helpers
+  - Distributions and log-factorial utilities used by certain discrete random distributions.
+
+Backends and relationships
+--------------------------
+- Each back end (MT19937, Philox, PCG64, SFC64) is implemented as a backend module and can be loaded independently.
+- The Generator interface combines a chosen BitGenerator with NumPy-compatible sampling methods (integers, random, standard_normal, etc.).
+- Distributions rely on the underlying bit generators via the common utilities to produce values according to specific probability laws (e.g., hypergeometric, MVHypergeometric).
+- The _bounded_integers helper enables efficient sampling of integers in a bounded range, which is often used by discrete distributions.
+
+Key parameters and return values
+-------------------------------
+- BitGenerator backends
+  - Examples: Philox(SeedSequence), PCG64(SeedSequence), MT19937(SeedSequence), SFC64(SeedSequence)
+  - Seed preparation controls independence across streams; SeedSequence supports splitting into independent child seeds.
+
+- Generator
+  - Constructor: Generator(bit_generator)
+  - Returns a Generator object capable of producing numbers via methods like integers, standard_normal, random, etc.
+  - The Generator wraps a BitGenerator and provides a NumPy-compatible API surface.
+
+- SeedSequence
+  - Used to initialize a BitGenerator with a reproducible starting state.
+  - Supports spawning multiple independent seeds for parallel streams.
+
+- Distributions
+  - Access to discrete distributions (via the distributions module) and bounded integer generation (via _bounded_integers).
+
+Usage examples
+--------------
+
+Basic single-stream usage
+```python
+from numpy.random import Generator, Philox, SeedSequence
+
+# Create a single independent stream
+ss = SeedSequence([1, 2, 3])
+rng = Generator(Philox(ss))
+
+# Generate numbers
+a = rng.integers(0, 10, size=5)
+b = rng.standard_normal(size=3)
+```
+
+Parallel usage with independent streams
+```python
+from numpy.random import Generator, Philox, SeedSequence
+
+# Seed sequence that can be split into independent streams
+ss = SeedSequence(12345)
+child_seeds = ss.spawn(4)  # create 4 independent seeds
+
+# Create 4 independent generators for parallel tasks
+runners = [Generator(Philox(s)) for s in child_seeds]
+
+# Each runner can be used in a thread/task independently
+results = [rng.integers(0, 100, size=100) for rng in runners]
+```
+
+Choosing backends for parallel workloads
+- Philox and PCG64 are well-suited for parallel workloads due to their-counter based design and good independence guarantees when seeded via SeedSequence.
+- MT19937 remains a robust option for compatibility with legacy code paths but may not scale as efficiently in highly parallel scenarios.
+- SFC64 offers good throughput; evaluate its statistical properties for your domain requirements.
+
+Edge cases and considerations
+-----------------------------
+- Avoid sharing a single BitGenerator instance across threads. Create per-thread or per-task Generators using independent seeds to ensure stream independence.
+- Use SeedSequence.spawn(...) to produce multiple independent seeds rather than reusing a single seed across streams.
+- If combining multiple backends in the same application, ensure each back end is seeded independently to prevent cross-stream correlations.
+- For discrete distributions, prefer the _bounded_integers helper when sampling integers in a bounded range to minimize modulo bias and improve performance.
+- When upgrading NumPy or the underlying build, revalidate all backends for compatibility with the new API surface and ABI stability.
+
+Performance considerations
+--------------------------
+- Counter-based backends (Philox, PCG64) generally provide good parallel performance with predictable independence when properly seeded.
+- Memory and CPU overhead are influenced by the number of parallel streams and the size of the generated arrays; batch generation (larger sizes per call) often yields better throughput.
+- The distribution layer leverages low-level utilities to minimize Python-level overhead during generation.
+
+Compatibility and interop
+-------------------------
+- Designed to be compatible with Python’s Generator API and SeedSequence-based seeding patterns.
+- Maintains a path for legacy interfaces (mtrand) while encouraging modern, parallel-friendly usage via new BitGenerators and Generator.
+
+Notes
+-----
+- The module is part of a dual-licensed project and is built as a standalone library with C sources and Cython wrappers to maximize performance in Python environments.
+- This documentation reflects the parallel random number generation capabilities exposed by the library and its Python-facing API.
+
+Usage checklist
+-------------
+- Choose a suitable BitGenerator backend for parallel workloads (Philox, PCG64, etc.).
+- Initialize independent streams via SeedSequence and Spawn as needed.
+- Create a Generator per parallel task and perform sampling via the Generator’s API.
+- Use _bounded_integers for efficient bounded integer sampling when applicable.
+- Validate reproducibility by reusing identical seed sequences for deterministic runs.
+
+Code references (build and exposure)
+------------------------------------
+- The build compiles and exposes:
+  - _bounded_integers, _common, _mt19937, _philox, _pcg64, _sfc64
+  - bit_generator.pyx, _generator.pyx for Python-facing APIs
+  - mtrand extension for legacy compatibility
+  - A distributions module with hypergeometric and related capabilities
+
+End of documentation

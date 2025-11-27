@@ -1,0 +1,219 @@
+How Mitogen Works — Tutorial Documentation
+===========================================
+
+This document provides a developer-focused tutorial and reference for understanding how Mitogen’s core message-passing and remote execution mechanics work. It explains the principles behind the internal protocol, the flow of a typical remote call, and practical examples you can adapt when writing or debugging Mitogen-based code.
+
+Overview
+--------
+
+Mitogen is a fast, scalable framework for running Python (and other) code in remote contexts. At its heart, Mitogen uses a broker (master) process and one or more slave contexts (remote workers). Communication between the master and slaves happens through a bi-directional, event-driven channel, using a compact, well-defined message protocol.
+
+Key concepts
+------------
+
+- Broker (Master): The local process that manages routing, dispatching work, and collecting results.
+- Slave context (Worker): A remote process or environment where code is executed.
+- Channel: A bi-directional communication path between broker and slave.
+- Router: The component that forwards messages along a path (route) and cleans up on disconnections.
+- Message protocol: A small set of numeric message types used to request work, load modules, execute functions, forward logs, and manage routes.
+- Module loading and function invocation: Modules can be loaded on remote contexts, and functions within those modules can be invoked with arguments and keyword arguments.
+- Dead signaling: A sentinel value (IS_DEAD) indicates that routing is no longer possible for a given message.
+
+Message Protocol: Core Concepts
+-------------------------------
+
+Mitogen’s internal protocol uses integer-encoded message types. The following constants (as used in the engine) illustrate the core actions:
+
+- GET_MODULE = 100
+- CALL_FUNCTION = 101
+- FORWARD_LOG = 102
+- ADD_ROUTE = 103
+- DEL_ROUTE = 104
+- ALLOCATE_ID = 105
+- SHUTDOWN = 106
+- LOAD_MODULE = 107
+- FORWARD_MODULE = 108
+- DETACHING = 109
+- CALL_SERVICE = 110
+- STUB_CALL_SERVICE = 111
+
+- IS_DEAD = 999
+
+Notes
+- The IS_DEAD sentinel is a signal indicating disconnection or an inability to route a message. Upon receipt, a receiver usually raises a Router/Channel-related exception and handles cleanup.
+- Messages are typically carried as serialized payloads (originally via Python’s pickle-based mechanisms) and routed through the broker, which maintains routing tables and IDs.
+- The default text/byte buffers and encoding choices (e.g., 128 KiB buffer size, Latin-1/UTF-8 handling) affect performance and IO behavior, especially for large messages.
+
+Architectural Flow: How a Typical Remote Call Works
+---------------------------------------------------
+
+A high-level, end-to-end flow for executing a remote function:
+
+1. Establish a Channel and Route
+   - The master creates a Channel to a remote context and registers a route in the Router.
+
+2. Load the Remote Module
+   - Master sends a LOAD_MODULE message with the target module name (e.g., "os" or "mypkg.my_module").
+   - The remote context loads the module (or retrieves a previously loaded instance) and returns a module_id or equivalent handle.
+
+3. Allocate a Handler/Function Reference
+   - The master may allocate a unique identifier for the function or callable reference (via ALLOCATE_ID) to ensure correct routing for the result and reuse.
+
+4. Call the Function on the Remote Context
+   - Master sends a CALL_FUNCTION message including:
+     - The target module_id or callable reference
+     - Function name or descriptor
+     - Arguments (positional, and possibly keyword arguments)
+     - A unique call_id for correlating the result
+   - Remote executes the function and captures the return value (or exception).
+
+5. Return and Forward Results
+   - The remote side packages the result and sends it back to the master (via the reply-to path).
+   - The master matches the response to the call_id and delivers the result to the original requester.
+
+6. Route Cleanup and Detach
+   - If either side closes or the route becomes invalid, a DETACHING or IS_DEAD condition triggers cleanup on the router side.
+
+7. Optional: Forward Logs and Additional Messages
+   - As needed, FORWARD_LOG and other message types can transport logs or ancillary information back to the master for debugging or auditing.
+
+Concrete, Minimal Demonstrations
+--------------------------------
+
+Note: The following demonstrations are intentionally high-level and representative. They illustrate how the message types and routing come together rather than exact, library-specific API calls.
+
+Example 1: Loading a Module on a Remote Context
+- Intent: Ensure the remote context can access a module (e.g., "example_module").
+
+Pseudo-code:
+- Master sends: [LOAD_MODULE, payload={ "module": "example_module" }]
+- Remote replies: [LOAD_MODULE_REPLY, payload={ "module_id": 7 }]
+- Master stores module_id 7 for subsequent calls.
+
+Example 2: Invoking a Remote Function
+- Intent: Call a function named "greet" within a previously loaded module.
+
+Pseudo-code:
+- Master sends: [CALL_FUNCTION, payload={ "module_id": 7, "function": "greet", "args": ["World"], "kwargs": {} , "call_id": 42 }]
+- Remote executes greet("World") and returns: [CALL_FUNCTION_RESULT, payload={ "call_id": 42, "result": "Hello, World!" }]
+
+Example 3: Logging Forward
+- Intent: Forward a log line from the remote context to the master for centralized logging.
+
+Pseudo-code:
+- Remote sends: [FORWARD_LOG, payload={ "level": "INFO", "message": "greet() called" }]
+
+Example 4: Route Addition and Deletion
+- Intent: Add and remove a route to a particular remote context for better management of multiple intermediaries.
+
+Pseudo-code:
+- Master sends: [ADD_ROUTE, payload={ "route_id": 3, "target": "<remote-identity>" }]
+- Master sends: [DEL_ROUTE, payload={ "route_id": 3 }]
+
+Code Snippet: Minimal Conceptual Implementation
+------------------------------------------------
+
+This is a simplified, self-contained illustration (not a drop-in replacement for Mitogen) to help you reason about the protocol.
+
+.. code-block:: python
+
+    # Conceptual envelope for a master-to-remote message.
+    class MessageEnvelope:
+        def __init__(self, msg_type, payload, reply_to=None, mid=None):
+            self.msg_type = msg_type
+            self.payload = payload
+            self.reply_to = reply_to
+            self.mid = mid  # message id for correlation
+
+    # Example message types (subset)
+    GET_MODULE = 100
+    CALL_FUNCTION = 101
+    LOAD_MODULE = 107
+    ALLOCATE_ID = 105
+    IS_DEAD = 999
+
+    # Master sends a request to load a module on remote
+    msg = MessageEnvelope(LOAD_MODULE, {"module": "example_module"}, reply_to="master")
+    # Remote processes and returns module_id 7
+    reply = MessageEnvelope(GET_MODULE, {"module_id": 7, "status": "ok"})
+
+    # Master invokes a function on the remote module
+    call = MessageEnvelope(CALL_FUNCTION, {
+        "module_id": 7,
+        "function": "greet",
+        "args": ["World"],
+        "kwargs": {},
+        "call_id": 42,
+    }, reply_to="master")
+
+    # Remote returns result or exception for call_id 42
+    result = MessageEnvelope(CALL_FUNCTION, {"call_id": 42, "result": "Hello, World!"})
+
+Key Implementation Details
+--------------------------
+
+- Serialization: Mitogen relies on Python’s serialization (pickle) for transmitting complex objects. This is part of why the protocol must be tightly controlled and version-compatible across participating contexts.
+- Buffer sizing: The default buffer size (e.g., 128 KiB) for Channel read/write affects throughput and memory usage. Larger messages may require more buffering and careful tuning in high-lidelity deployments.
+- Error handling: The IS_DEAD sentinel is used to signal that a route cannot be continued, typically causing cleanup and possible re-routing if a new path is available.
+- Module loading strategy: Modules can be loaded ahead of time on the remote slave (LOAD_MODULE) or forwarded as a prepackaged module (FORWARD_MODULE) to minimize startup latency.
+
+Performance and Tuning Considerations
+-------------------------------------
+
+- Message size vs. throughput: Smaller message envelopes reduce per-message overhead but may require more round-trips for large data processing. Balance with the 128 KiB default buffer for best results.
+- Route management: ADD_ROUTE/DEL_ROUTE allow dynamic topology changes as workers come and go. Clean up routes promptly to keep routing tables lean.
+- Logging: FORWARD_LOG can be directed to the master’s logging subsystem; use it to diagnose routing or module-loading issues without slowing down the remote execution path.
+
+Security and Safety Considerations
+----------------------------------
+
+- Remote code execution: Mitogen executes code in remote contexts; ensure that only trusted code is loaded and that modules are verified or sandboxed as appropriate.
+- Serialization risks: Pickle payloads can execute arbitrary code during unpickling if untrusted data is received. Validate sources and consider alternative-safe serialization when necessary.
+- Access control: Use route-and-auth capabilities to restrict which masters can instruct a remote worker to load modules or execute functions.
+
+Practical Tutorial: Build a Simple End-to-End Scenario
+-----------------------------------------------------
+
+This simplified tutorial demonstrates the core ideas behind generating “how Mitogen works” via a remote call.
+
+1) Prepare the master and a single remote context (conceptual steps)
+- Create a Router and a Channel to the remote worker.
+- Add a route to the remote identity.
+
+2) Load a module on the remote
+- Send LOAD_MODULE with module name (e.g., "demo_module").
+- Receive module_id.
+
+3) Call a function on the remote module
+- Send CALL_FUNCTION with module_id, function name, and arguments.
+- Await response with the result.
+
+4) Optional: Forward logs during work
+- Use FORWARD_LOG to ship runtime information back to the master for debugging.
+
+Appendix: Reference — Core Message Types
+----------------------------------------
+
+- GET_MODULE: Retrieve or resolve a module reference on the remote context.
+- CALL_FUNCTION: Invoke a function in the remote context.
+- FORWARD_LOG: Transmit log records from remote to master.
+- ADD_ROUTE / DEL_ROUTE: Manage routing paths through intermediaries.
+- ALLOCATE_ID: Allocate a unique identifier for a remote resource or function reference.
+- SHUTDOWN: Terminate a remote context.
+- LOAD_MODULE: Load a module into the remote context.
+- FORWARD_MODULE: Forward a pre-packaged module to a remote context.
+- DETACHING: Indicate a context or route is detaching.
+- CALL_SERVICE / STUB_CALL_SERVICE: Call auxiliary services or provide service stubs for testing.
+- IS_DEAD: Sentinel value signaling that routing cannot proceed.
+
+Further Reading and Next Steps
+------------------------------
+
+- Dive into the Mitogen source for concrete, production-grade implementations of the above concepts.
+- Experiment with a minimal local broker and a simulated remote context to observe message types and routing behavior.
+- Explore tuning options for buffer sizes, route lifetimes, and error handling to match your deployment environment.
+
+End of Tutorial
+---------------
+
+This document provided a compact, developer-focused walkthrough of the internal flow and messaging behind Mitogen’s “Generate how Mitogen works” tutorial. Use the examples as mental models, and consult the Mitogen codebase for exact APIs and integration points in your project.

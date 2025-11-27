@@ -1,0 +1,101 @@
+Novelty and Outlier Detection
+=============================
+
+Overview
+--------
+This section covers the concepts of novelty detection and outlier (anomaly) detection, and how the codebase supports these ideas through a general architectural pattern of meta-estimators and helper utilities.
+
+Key concepts
+------------
+- Outlier Detection (unsupervised outliers): Build detectors from unlabeled data to identify anomalous samples. Examples include IsolationForest, LocalOutlierFactor, and OneClassSVM (with default settings). Often used to flag unusual observations in a stream or batch data.
+- Novelty Detection: Train detectors on “normal” data and detect anomalies in new, unseen data. In practice, you typically train with novelty=True or use a dedicated novelty-detection workflow (e.g., OneClassSVM with novelty=True, or other dedicated novelty detectors). The model is then used to score or classify new samples as normal or anomalous.
+
+Core ideas in this codebase
+----------------------------
+- Meta-estimators for multi-output scenarios: The codebase provides a pattern for wrapping a base estimator so it can operate over multiple outputs or targets. This is represented by a _MultiOutputEstimator class and associated helpers.
+- Sub-estimator orchestration: Private helpers (_fit_estimator, _partial_fit_estimator) orchestrate fitting or partial fitting of a sub-estimator, enabling composite or ensemble-like detectors that operate across multiple channels or views of the data.
+- Conditional parameter exposure: _available_if_estimator_has helps gate parameter visibility in pipelines or meta-estimators based on what the sub-estimator supports (e.g., fit, predict methods).
+
+Architecture and code patterns
+------------------------------
+- _MultiOutputEstimator
+  - Purpose: Serves as a base for meta-estimators that wrap a single base estimator to handle multiple outputs.
+  - Key constraint: Requires the wrapped estimator to implement fit and predict (via HasMethods check).
+  - Typical use: If you have a detector that should produce an anomaly score per target/channel, you can implement it as a multi-output meta-estimator around a simple base detector.
+- _fit_estimator(estimator, X, y, sample_weight=None, **fit_params)
+  - Clones the provided estimator and fits it on the data, honoring sample_weight if provided.
+  - Ensures the fitted estimator does not mutate the original object (clone-on-fit).
+- _partial_fit_estimator(estimator, X, y, classes=None, partial_fit_params=None, first_time=True)
+  - Supports incremental learning by calling partial_fit on the sub-estimator, with an option to initialize by cloning on the first call.
+- _available_if_estimator_has(attr)
+  - Returns a gating function suitable for use with availability decorators (e.g., in pipelines) to indicate whether the sub-estimator supports a given attribute (like fit or predict).
+
+Practical usage patterns
+------------------------
+Outlier detection
+- Typical workflow:
+  - Train on the data (often unlabeled; normal data is assumed to dominate).
+  - Use the trained model to score or predict anomalies on new data.
+- Example (isolation-based detector):
+  - Model: IsolationForest
+  - Outlier scoring: score_samples or decision_function
+  - Prediction: predict with -1 (anomaly) or 1 (normal)
+
+Novelty detection
+- Typical workflow:
+  - Train on normal data only.
+  - Evaluate new samples with the detector to determine novelty/anomaly.
+- Example (one-class detector with novelty support):
+  - Model: OneClassSVM with novelty=True
+  - Scoring: decision_function or score_samples
+  - Prediction: predict with -1 (novel) or 1 (normal)
+
+Implementation hints for new detectors
+-------------------------------------
+- Derive from the appropriate base classes (e.g., BaseEstimator, MetaEstimatorMixin) and, if supporting multi-output, from _MultiOutputEstimator.
+- Implement fit (and predict or score) consistent with scikit-learn conventions.
+- If your detector needs incremental learning, implement partial_fit and wire it with _partial_fit_estimator.
+- If you expose optional parameters that depend on sub-estimators, use _available_if_estimator_has to reflect their availability in pipelines or model selection tools.
+- Use clone in fitting helpers to avoid side effects on the provided estimator instances.
+
+Examples
+--------
+
+Outlier detection with a standard estimator (IsolationForest)
+.. code-block:: python
+
+   from sklearn.ensemble import IsolationForest
+
+   # Unsupervised outlier detection
+   clf = IsolationForest(n_estimators=200, random_state=42, novelty=False)
+   clf.fit(X_train)            # train on unlabeled data
+   y_pred = clf.predict(X_test)  # -1 for outliers, 1 for normal
+   scores = clf.score_samples(X_test)  # higher scores indicate normal observations
+
+Novelty detection with a novelty-enabled detector (OneClassSVM)
+.. code-block:: python
+
+   from sklearn.svm import OneClassSVM
+
+   # Novelty detection: train on normal data, predict on new data
+   clf = OneClassSVM(kernel="rbf", gamma="scale", nu=0.05, random_state=42, novelty=True)
+   clf.fit(X_normal_train)            # train on normal data only
+   novelty_scores = clf.decision_function(X_new)  # higher means more normal; lower indicates novelty
+   novelty_pred = clf.predict(X_new)            # -1 for novelty, 1 for normal
+
+Notes
+-----
+- In multi-output scenarios, the _MultiOutputEstimator pattern can be used to wrap a detector so that a separate detector runs per target or feature channel. This is useful when evaluating novelty or outliers across multiple data streams or feature subsets.
+- For evaluation, consider metrics suited to anomaly detection such as ROC-AUC, precision-recall AUC, or domain-specific cost-based metrics. Thresholds for labeling as anomalous should be chosen based on the desired trade-off between false positives and false negatives.
+
+See Also
+--------
+- sklearn.ensemble.IsolationForest
+- sklearn.svm.OneClassSVM
+- sklearn.neighbors.LocalOutlierFactor
+- sklearn.base.BaseEstimator, sklearn.base.MetaEstimatorMixin
+
+References
+----------
+- Documentation on novelty detection: OneClassSVM with novelty handling; anomaly scoring and thresholds
+- scikit-learn meta-estimators and multi-output patterns (for extending detectors to multi-output contexts)

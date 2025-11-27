@@ -1,0 +1,159 @@
+Using SQLite and asyncio effectively
+=====================================
+
+This documentation describes the module that integrates SQLite with asynchronous I/O patterns, providing type-adapted data handling, an asynchronous batch iterator, and related utilities. It is designed for developers who want to understand how the module converts Python types for SQLite, how to perform asynchronous batched queries, and how to work with the in/out converters that keep SQLite results compatible with expectations from other engines (e.g., Postgres).
+
+Overview
+--------
+
+- Purpose: Enable efficient, asyncio-friendly access to SQLite databases, with sensible type conversions and an asynchronous batched query interface.
+- Core ideas:
+  - Register adapters and converters so SQLite uses/produces types that align with other engines.
+  - Provide AsyncBatch for streaming large results without loading everything into memory.
+  - Offer a foundation compatible with the Piccolo ORM query flow (Query, DDL, QueryString, etc.).
+
+Key concepts
+- Adapters and converters
+  - In-bound conversion: Python types (Decimal, UUID, datetime, lists, etc.) to SQLite-compatible representations.
+  - Out-bound conversion: SQLite data (as bytes) to Python types (Decimal, UUID, datetime, etc.).
+- Async batch processing
+  - AsyncBatch enables batched retrieval of results via an asynchronous iterator pattern.
+  - Designed to work with an aiosqlite Connection and a Piccolo Query object.
+- TYPE_CHECKING imports
+  - Optional typing imports are guarded for type-checking without importing at runtime.
+
+Adapters and converters
+-----------------------
+
+The module defines a set of adapters and converters to harmonize SQLite data handling with the expectations of Postgres-like behavior.
+
+In-bound converters (Python → SQLite)
+- convert_numeric_in: Decimal -> float
+- convert_uuid_in: UUID -> str
+- convert_time_in: datetime.time -> string (ISO)
+- convert_date_in: datetime.date -> string (ISO)
+- convert_datetime_in: datetime.datetime -> string (UTC if tz-aware)
+- convert_timedelta_in: datetime.timedelta -> total seconds
+- convert_array_in: list -> JSON string (only str, int, float allowed)
+
+Out-bound converters (SQLite → Python)
+- convert_numeric_out: bytes -> Decimal
+- convert_int_out: bytes -> int
+- convert_uuid_out: bytes -> uuid.UUID
+- convert_date_out: bytes -> datetime.date
+- convert_time_out: bytes -> datetime.time
+- convert_seconds_out: bytes -> datetime.timedelta
+- convert_boolean_out: bytes -> bool
+- convert_timestamp_out: bytes -> datetime.datetime
+- convert_timestamptz_out: bytes -> datetime.datetime (UTC tzinfo)
+- convert_array_out: bytes -> list (JSON)
+- convert_M2M_out: bytes -> list (comma-separated values)
+
+Registration
+- sqlite3.register_converter(...) and sqlite3.register_adapter(...) are used to wire these conversions into the SQLite engine.
+
+AsyncBatch
+---------
+
+AsyncBatch is a dataclass-based helper for asynchronous batched queries.
+
+Highlights
+- Inherits from Batch (runtime integration with Piccolo’s batch machinery).
+- Holds:
+  - connection: an aiosqlite Connection
+  - query: a Piccolo Query
+  - batch_size: number of rows per batch
+- Provides:
+  - cursor property: guard to ensure the internal cursor is set
+  - next(): fetches the next batch and processes results
+  - __aiter__/__anext__: supports async-for iteration with StopAsyncIteration when done
+  - __aenter__/__aexit__: context manager for resource lifecycle (opens position on enter, closes cursor/connection on exit)
+
+Usage pattern
+-------------
+
+- The AsyncBatch context manager is intended to be used with an aiosqlite Connection and a Piccolo Query object. It yields batches of results (as lists of dictionaries) via an asynchronous iterator.
+
+Example: basic async batched iteration
+-------------------------------------
+
+This example demonstrates how you might use AsyncBatch in an asyncio context. It omits setup of the full Piccolo environment and focuses on the AsyncBatch usage pattern.
+
+.. code-block:: python
+
+    import asyncio
+    from piccolo.querystring import QueryString  # or obtain via Piccolo's query API
+    from piccolo.engine.base import Query  # typical Piccolo query type
+    from piccolo.query.base import DDL
+    # The actual usage would depend on your Piccolo setup; this illustrates the pattern.
+
+    async def process_batches(connection, query: Query, batch_size: int = 100):
+        # connection is an aiosqlite.Connection
+        batch = AsyncBatch(connection=connection, query=query, batch_size=batch_size)
+        async with batch:
+            async for rows in batch:
+                # rows is a list of dicts, one per row
+                for row in rows:
+                    handle_row(row)
+
+    asyncio.run(process_batches(your_connection, your_query, batch_size=500))
+
+Notes
+- __aenter__ prepares a cursor based on the first querystring of the provided Query.
+- __anext__ fetches the next batch with fetchmany(self.batch_size) and processes results using the query’s _process_results helper, returning a list of dictionaries per batch.
+
+Getting started
+--------------
+
+Prerequisites
+- Python with asyncio support (3.8+ recommended)
+- aiosqlite installed for asynchronous SQLite support
+- The Piccolo ORM stack (or a compatible subset that provides Query, QueryString, and related types)
+
+Usage hints
+- Import-time adapters/converters registration is handled internally by the module, ensuring SQLite uses consistent types when writing/reading data.
+- AsyncBatch is designed to minimize memory usage for large result sets by streaming results in batches.
+
+Notes on TransactionType
+------------------------
+
+The module defines a TransactionType enum (details are truncated in the snippet you provided). It is intended to describe transaction modes compatible with the library’s transaction handling in the SQLite context. For concrete values and semantics, refer to the module’s source or the associated transaction management utilities in the surrounding codebase.
+
+API reference
+-------------
+
+- AsyncBatch
+  - Fields:
+    - connection: Connection (aiosqlite)
+    - query: Query
+    - batch_size: int
+  - Methods:
+    - __aiter__(self) -> AsyncBatch
+    - __anext__(self) -> List[dict]
+    - __aenter__(self) -> AsyncBatch
+    - __aexit__(self, exception_type, exception, traceback) -> bool
+    - next(self) -> List[dict]
+    - cursor (property): Cursor
+- convert_numeric_in / convert_numeric_out
+- convert_uuid_in / convert_uuid_out
+- convert_time_in / convert_time_out
+- convert_date_in / convert_date_out
+- convert_datetime_in / convert_timestamp_out / convert_timestamptz_out
+- convert_timedelta_in / convert_seconds_out
+- convert_array_in / convert_array_out
+- convert_M2M_out
+- sqlite3.register_converter / sqlite3.register_adapter usage (internal)
+
+Migration and compatibility notes
+---------------------------------
+
+- This module is designed to be compatible with the Piccolo ORM’s expectations for Query, QueryString, and batch processing, while improving interoperability with SQLite via adapters/converters.
+- The LazyLoader pattern for aiosqlite allows SQLite integration to be optional at import time; if aiosqlite is not installed, functionality that requires async SQLite will be unavailable, but other parts of the module may still import.
+
+Examples for further exploration
+-------------------------------
+
+- Setting up an environment with Piccolo’s query objects to exercise AsyncBatch end-to-end.
+- Demonstrating conversion behavior by inserting and reading data types such as Decimal, UUID, dates, times, and JSON arrays, then observing the Python-side results.
+
+If you’d like, I can tailor this documentation to match your exact codebase layout or add more concrete, end-to-end examples that align with your existing Query and Engine usage patterns.

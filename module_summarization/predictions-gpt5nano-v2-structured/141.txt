@@ -1,0 +1,168 @@
+Connect to remote data
+======================
+
+
+Overview
+--------
+
+The read_bytes utility enables reading data from remote or local filesystems using fsspec-backed protocols (e.g., s3://, hdfs://). It returns lazy, delayed blocks that can be processed in parallel with Dask. The data can be split into blocks by a delimiter, read in configurable chunk sizes, and optionally include the file path information with each block.
+
+Key capabilities
+- Read from single files, multiple files, or glob patterns.
+- Work with remote filesystems via fsspec (storage_options can be passed through).
+- Split data into blocks by a delimiter for easy streaming of text/binary records.
+- Support for both uncompressed and compressed files (with restrictions for chunked reads).
+- Return a sample header and the blocks (as Dask Delayed objects); optionally include paths.
+
+API SUMMARY
+-------------
+
+read_bytes(
+    urlpath,
+    delimiter=None,
+    not_zero=False,
+    blocksize="128 MiB",
+    sample="10 kiB",
+    compression=None,
+    include_path=False,
+    **kwargs,
+)
+
+- urlpath: string or list/tuple/os.PathLike
+  - Path(s) or globstring(s) to read. May include protocols like s3://, hdfs://, etc.
+- delimiter: bytes
+  - Optional delimiter to split blocks (e.g., b"\n"). If provided, blocks are aligned to delimiter boundaries.
+- not_zero: bool
+  - If True, seek to the first delimiter after the start of each file (useful for skipping headers).
+- blocksize: int or str
+  - Chunk size in bytes. Default "128 MiB". If None, reads are unchunked (one block per file).
+- sample: int, str, or bool
+  - Whether to return a header sample. False means no sample. True/str/int specify sample size.
+- compression: str or None
+  - Compression type (e.g., 'gzip', 'xz') or None. When using chunked reads, compression is not supported.
+- include_path: bool
+  - If True, return the file paths corresponding to each block alongside the data blocks.
+- **kwargs: storage options
+  - Extra options for the storage connection (e.g., host, port, username, password).
+
+Returns
+-------
+
+- sample: bytes
+  - The header sample (or an empty sample if none requested).
+- blocks: list of lists of dask.delayed.Delayed
+  - Outer list corresponds to input files; inner lists contain Delayed objects for each block in that file.
+- paths: list of str (only if include_path is True)
+  - The file paths corresponding to the blocks.
+
+How it works
+------------
+
+- Resolves the provided path(s) using fsspec via get_fs_token_paths.
+- Determines file sizes to compute block offsets and lengths if blocksize is specified.
+- For each file, creates Delayed tasks that read from specific offsets using read_block_from_file and read_block.
+- If a delimiter is provided, blocks are aligned so they start/end at delimiter boundaries.
+- If sample is requested, reads a small portion from the first file to serve as a header sample.
+- If include_path is True, returns the corresponding file paths for each block.
+
+Important behaviors and caveats
+- blocksize=None disables chunked reading; each file yields a single block.
+- If compression is inferable and blocksize is used, compressed files are not supported for chunked reads (you must set blocksize=None).
+- The function requires the filesystem to be able to determine file size when blocksize is used; otherwise a ValueError is raised.
+- If the URL path resolves to no files, an OSError is raised.
+- Profiles with remote protocols will pass through storage_options via **kwargs.
+
+Examples
+--------
+
+Basic usage: read a newline-delimited text pattern from multiple files with block boundaries on newline
+
+.. code-block:: python
+
+   sample, blocks = read_bytes('2020-*-*.log', delimiter=b'\n')
+
+# blocks is a list of lists of Dask Delayed objects, one sublist per input file
+# To compute, you would trigger orchestration with Dask
+
+.. code-block:: python
+
+   from dask.base import tokenize
+   from dask import compute
+
+   sample, blocks = read_bytes('2020-*-*.log', delimiter=b'\n')
+   sample_val, blocks_vals = compute(sample, blocks)
+
+Read from remote storage with a header sample and include paths
+
+.. code-block:: python
+
+   sample, blocks, paths = read_bytes(
+       's3://my-bucket/logs/2020-*/log-*.txt',
+       delimiter=b'\n',
+       sample="8 KiB",
+       include_path=True
+   )
+   sample_val, blocks_vals, paths_vals = compute(sample, blocks, paths)
+
+Use a fixed blocksize and no sample
+
+.. code-block:: python
+
+   sample, blocks = read_bytes(
+       'data/*.csv',
+       delimiter=b'\n',
+       blocksize="256 MiB",
+       sample=False
+   )
+   sample_val, blocks_vals = compute(sample, blocks)
+
+Read with no chunking (single block per file)
+
+.. code-block:: python
+
+   sample, blocks = read_bytes(
+       ['file1.csv', 'file2.csv'],
+       delimiter=b'\n',
+       blocksize=None
+   )
+   sample_val, blocks_vals = compute(sample, blocks)
+
+Notes
+-----
+
+- To read from a remote filesystem (e.g., S3, GCS, HDFS), ensure the corresponding filesystem libraries are installed (e.g., s3fs, gcsfs, pyarrow, etc.) and provide any necessary storage options via the function’s kwargs.
+- The returned blocks are lazy Delayed objects; use Dask’s compute (or a Dask distributed client) to materialize the data.
+- If you need to align blocks with textual records, provide a suitable delimiter (commonly b'\n') and a non-null blocksize.
+
+See also
+--------
+
+- fsspec: File-system specification for abstracting remote storage
+- dask.delayed: Lazy evaluation and task graphs
+- read_block_from_file: Internal helper for per-block I/O (used by read_bytes)
+
+Code structure (reference)
+--------------------------
+
+The primary entry point is read_bytes, which orchestrates:
+- Path resolution via get_fs_token_paths
+- Optional blocksize computation and block offset generation
+- Delayed block creation using read_block_from_file
+- Optional header sampling
+- Optional inclusion of file paths with blocks
+
+Example snippet (internal behavior)
+
+.. code-block:: python
+
+   fs, fs_token, paths = get_fs_token_paths(urlpath, mode="rb", storage_options=kwargs)
+   # offsets/lengths computed per file when blocksize is not None
+   delayed_read = delayed(read_block_from_file)
+   for path, offset, length in zip(paths, offsets, lengths):
+       token = tokenize(fs_token, delimiter, path, fs.ukey(path), compression, offset)
+       keys = [f"read-block-{o}-{token}" for o in offset]
+       values = [delayed_read(OpenFile(fs, path, compression=compression), o, l, delimiter, dask_key_name=key)
+                 for o, key, l in zip(offset, keys, length)]
+       out.append(values)
+
+This documentation provides a concise reference for using connect-to-remote-data’s readBytes-based workflow to connect to remote data sources, read in parallel, and drive downstream processing with Dask.

@@ -1,0 +1,148 @@
+w_select.rst
+
+w_select — select dynamics segments by a user-defined predicate
+
+Overview
+--------
+w_select selects segments from WESTPA trajectory data by applying a user-provided predicate
+function to each iteration. The predicate chooses which segments to keep. By default only
+the matching segments are written to the output file; when the -a/--include-ancestors option
+is specified, ancestors of the matched segments are also included in the output.
+
+Key ideas
+- Requires a callable predicate with the signature predicate(n_iter, iter_group) that returns a
+  collection of segment IDs matching the predicate for that iteration.
+- Predicate results can be inverted with -v/--invert.
+- Output is written to an HDF5 file with datasets describing which segments matched in which iterations.
+- The operation is parallelized over iterations to speed up processing.
+
+Command summary
+---------------
+w_select [options]
+
+Options
+- -p, --predicate-function MODULE.FUNCTION
+  Python path to the predicate function to apply for each iteration. The function must be
+  callable as predicate(n_iter, iter_group) and return a sequence of segment IDs that match
+  the predicate for that iteration.
+
+- -v, --invert
+  Invert the predicate result: include segments that do NOT match the predicate.
+
+- -a, --include-ancestors
+  Include ancestors of matched segments in the output. (Exact behavior depends on the
+  implementation; the flag signals that ancestors should be included if available.)
+
+- -o, --output OUTPUT
+  Output file. Default: select.h5
+
+- Other options
+  The command also supports the standard WestPA data-reader options and progress-reporting
+  options via the integrated argument parsers (see Argument sections).
+
+Predicate function
+------------------
+What it does
+- The predicate function determines which segments in a given iteration should be kept.
+- It is called once per iteration with:
+  - n_iter: the iteration number
+  - iter_group: the HDF5 group corresponding to that iteration (containing per-iteration data)
+- It must return a collection of segment IDs (integers) that match the predicate in that iteration.
+
+Predicate usage notes
+- The predicate is loaded using get_object(args.predicate_function, path=['.']) and must be callable.
+- If the object is not callable, a TypeError is raised during argument processing.
+
+Example predicate (conceptual)
+- Simple range-based predicate (returns the first 100 segments of each iteration):
+  def predicate(n_iter, iter_group):
+      nsegs = iter_group['seg_index'].shape[0]
+      return list(range(min(100, nsegs)))
+
+- Weight-based predicate (illustrative; actual dataset names depend on your HDF5 structure):
+  def predicate(n_iter, iter_group):
+      weights = iter_group['weights'][...]  # 1D array with per-segment weights
+      return [i for i, w in enumerate(weights) if w > 0.5]
+
+Invert behavior
+- If -v/--invert is selected, the set of IDs returned by the predicate is replaced by all IDs
+  in the iteration minus the predicate IDs.
+
+Ancestors
+- When -a/--include-ancestors is provided, ancestors of the matched segments will be included in
+  the output. This feature is controlled by the include_ancestors flag and affects the content of
+  the /seg_ids and related datasets in the output.
+
+Output format
+-------------
+The output file (default: select.h5) contains the following datasets:
+
+- /n_iter
+  - type: Integer
+  - Description: Iteration numbers for each entry in the other datasets.
+
+- /n_segs
+  - type: Integer (uint)
+  - Description: Number of segment IDs matching the predicate (or the inverted predicate, if -v is specified)
+    in the given iteration.
+
+- /seg_ids
+  - type: Integer (seg_id_dtype)
+  - Description: Matching segments in each iteration. For an iteration n_iter, only the first
+    n_segs[n_iter] entries are valid. For example, the full list of matching seg_ids in the first
+    stored iteration is seg_ids[0][:n_segs[0]].
+
+- /weights
+  - type: Floating-point (weight_dtype)
+  - Description: Weights corresponding to each matching segment in /seg_ids.
+
+Notes
+- The number of iterations written is the length of the selected range, defined by the IterRangeSelection.
+- The shape of /seg_ids and /weights is (iter_count, 0) with a maximum growth (maxshape) along the second axis.
+- The implementation uses parallel execution to evaluate the predicate for each iteration:
+  - Each iteration runs _find_matching_segments(west_datafile_name, n_iter, predicate, invert)
+  - The function returns (n_iter, matchvec) where matchvec is the sorted list of matching segment IDs for that iteration.
+- If no segments match in an iteration, the corresponding /n_segs entry is 0 and /seg_ids for that
+  iteration is an empty slice.
+
+Command-line arguments and workflow (high level)
+- The tool uses WESTDataReader to locate and read the input WESTPA data file(s) and an iterator range
+  for the iterations to process.
+- The user supplies a predicate function via -p/--predicate-function MODULE.FUNCTION.
+- The predicate is loaded and validated as callable.
+- The tool creates an output file (default select.h5) and pre-allocates datasets for
+  n_iter, n_segs, seg_ids, and weights.
+- The tool launches parallel tasks, one per iteration, to compute matching segments.
+- Results are written to the output file in an end-to-end fashion as iterations complete.
+
+Practical workflow example
+- Prepare your predicate function in a module, e.g., my predicates module:
+  def my_predicate(n_iter, iter_group):
+      # Simple example: first 50 segments of the iteration
+      nsegs = iter_group['seg_index'].shape[0]
+      return list(range(min(50, nsegs)))
+- Run the command:
+  w_select -p mymodule:my_predicate -o select.h5 -a
+  This will:
+  - Apply my_predicate to every iteration in the selected range
+  - Include ancestors for matched segments
+  - Write results to select.h5 with datasets /n_iter, /n_segs, /seg_ids, and /weights
+
+Implementation notes
+- The core matching logic is encapsulated in _find_matching_segments, which:
+  - Opens the input WESTPA HDF5 file
+  - Retrieves the iteration group for n_iter
+  - Calls predicate(n_iter, iter_group) to obtain matching segment IDs
+  - Applies inversion if requested
+  - Returns (n_iter, matchvec) with IDs cast to seg_id_dtype and sorted
+- The go() method orchestrates dataset creation and parallel processing of iterations.
+- The include_ancestors feature is exposed as a flag but its exact handling is implementation-dependent.
+
+See also
+--------
+- WestPA data I/O (h5io WESTPAH5File, iter_group handling)
+- IterRangeSelection for selecting iteration ranges
+- get_object for loading user objects (e.g., predicate function)
+- ProgressIndicatorComponent for optional progress reporting
+
+This documentation covers the w_select command's purpose, usage, data structures, and workflow, providing developers with a clear understanding of how to implement and use a predicate-based segment selector within WestPA.

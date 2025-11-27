@@ -1,0 +1,128 @@
+# w_states
+
+## Overview
+w_states is a command-line tool for displaying or manipulating basis (initial) states and target (recycling) states in a WEST simulation. By default, states are displayed (dumped to files). The tool can replace the current states for the next iteration, or append target states to the current list for the next iteration. Basis states cannot be appended.
+
+Key behaviors:
+- Show current basis and target states for the current iteration.
+- Replace current basis/target states with new ones provided via files or command-line.
+- Append target states (not basis states) to the existing target-state list for the next iteration.
+
+Example usage and format guidance are provided below.
+
+---
+
+## Key Components
+
+- entry_point: CLI entry point that defines argument parsing and dispatches to initialize().
+- initialize(mode, bstates, _bstate_file, tstates, _tstate_file): Core logic that reads, validates, and applies states according to the selected mode.
+- BasisState / TargetState: Classes used to represent basis and target states, with helpers for I/O (e.g., states_to_file, states_from_file) and progress coordinates assignment.
+- WestPA infrastructure: Interacts with the master work manager, data manager, and simulation manager to read current state data, assign progress coordinates, and write state data into the WEST HDF5 backing store.
+
+---
+
+## Usage
+
+- Modes of operation (mutually exclusive):
+  - --show: Display current basis/target states (or dump to files).
+  - --append: Append given target state(s) to those currently in use.
+  - --replace: Replace current basis/target states with the provided ones.
+
+- State input/output options:
+  - --bstate-file BSTATE_FILE: Read or write basis states (names, probabilities, and optional auxiliary references).
+  - --bstate: Add a basis state string to the list (format: label,probability[,auxref]).
+  - --tstate-file TSTATE_FILE: Read or write target states (label and representative progress coordinates).
+  - --tstate: Add a target state string to the list (format: label,pcoord0[,pcoord1[,...]]).
+
+- Default behavior: mode defaults to show if none is specified.
+
+Examples:
+- Show current states to files:
+  w_states --show --bstate-file=bstates.txt --tstate-file=tstates.txt
+
+- Replace current basis and target states with those from files:
+  w_states --replace --bstate-file=bstates.txt --tstate-file=tstates.txt
+
+- Append a target state (example; append is only for target states):
+  w_states --append --tstate="newlabel,0.5,1.0"
+
+Notes:
+- Basis states cannot be appended. If you need to add basis states, use the recommended workflow described in the help text (edit bstates.txt and use --replace to update).
+- When replacing, if the current iteration has completed segments, the change is applied to the next iteration (the code prints a message indicating the iteration shift).
+
+---
+
+## Details
+
+- Modes and argument parsing
+  - The CLI supports:
+    - --show: display current states
+    - --append: append target states for the next iteration
+    - --replace: replace current states for the next iteration
+  - Basis/target state input can come from files or direct CLI specifications:
+    - --bstate-file reads/writes basis states: each line contains label,probability[,auxref]
+    - --bstate appends basis states from the CLI (format: label,probability[,auxref])
+    - --tstate-file reads/writes target states: each line contains label,pcoord0[,pcoord1[,...]]
+    - --tstate appends target states from the CLI (format: label,pcoord0[,pcoord1[,...]])
+
+- Data management (master process)
+  - The master handles reading and writing to the WEST HDF5 backing store.
+  - For show mode:
+    - basis_states = data_manager.get_basis_states(n_iter)
+    - target_states = data_manager.get_target_states(n_iter)
+    - If present, basis/target states are written to the specified files (or stdout) with a header line indicating the iteration.
+  - For replace mode:
+    - seg_index = data_manager.get_seg_index(n_iter)
+    - If any segments are complete for the current iteration, the replacement will apply to the next iteration (iteration number incremented).
+    - Basis states are built from:
+      - Contents of --bstate-file (if provided)
+      - States provided on the command line via --bstate
+    - Basis state validation:
+      - The total probability of all basis states must sum to unity.
+      - If the sum deviates beyond a tolerance (EPS), the probabilities are rescaled to sum to one, and a warning is logged.
+    - Progress coordinates:
+      - sim_manager.get_bstate_pcoords(basis_states, n_iter) assigns progress coordinates for basis states.
+    - Data writing:
+      - data_manager.create_ibstate_group(basis_states, n_iter)
+      - sim_manager.report_basis_states(basis_states)
+    - Target states are handled similarly (reading from --tstate-file and --tstate, assigning coordinates, and writing to the appropriate storage).
+  - Append mode:
+    - Applies only to target states (not basis states). New target states are appended to the existing target state list for the next iteration.
+
+- Format notes
+  - Basis state entries: label,probability[,auxref]
+  - Target state entries: label,pcoord0[,pcoord1[,...]]
+  - Progress coordinates are determined by the simulation manager per iteration.
+
+- Important considerations
+  - Basis state probabilities must sum to one. If not, the code rescales them to unity and logs a warning.
+  - Appending basis states is not permitted, due to normalization concerns.
+  - The implementation communicates with WestPA’s data and simulation managers to ensure consistency with the current iteration and simulation state.
+
+---
+
+## Reference (key behavioral excerpts)
+
+- Entry point defines argument parser with modes and file/entry options:
+  - Modes: show, append, replace
+  - File inputs/outputs: --bstate-file, --tstate-file
+  - Inline entries: --bstate, --tstate
+
+- Show mode behavior:
+  - Retrieve and dump current basis and target states for iteration n_iter:
+    - Basis: BasisState.states_to_file(basis_states, file_handle)
+    - Target: TargetState.states_to_file(target_states, file_handle)
+
+- Replace mode behavior (highlights):
+  - If iteration has completed segments, advance to the next iteration.
+  - Build basis_states from file and/or CLI.
+  - Validate and (if needed) rescale probabilities to unity.
+  - Assign progress coordinates, create the ibstate group, and report the basis states.
+  - Target states are handled similarly.
+
+- Rationale for not appending basis states:
+  - Appending would require renormalizing basis state probabilities in potentially error-prone ways.
+
+---
+
+If you need a tailored section addition (e.g., a quick-start tutorial or a troubleshooting appendix), I can append that as well.

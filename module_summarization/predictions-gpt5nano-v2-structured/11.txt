@@ -1,0 +1,212 @@
+Working with entities
+=====================
+
+
+Overview
+--------
+
+In the ftrack API, entities are the primary representation of data stored on the ftrack server (e.g. Tasks, Projects, Events, etc.). Entities are designed to be idempotent, lazily populated, and easily navigable through relationships. A Session is used to communicate with the server, query for entities, and perform mutations. Attributes of an entity can be loaded on demand (lazy population) to minimize initial data transfer.
+
+Key concepts
+------------
+
+- Entity objects represent server resources (e.g. Task, Project, User).
+- Lazy/populated attributes: if an attribute hasn’t been loaded yet, accessing it can trigger a server fetch automatically when auto-populate is enabled.
+- Sessions manage authentication, caching, and optional event hub connectivity.
+- Queries are constructed against entity types and can be iterated to yield entity instances.
+- Caching speeds up repeated access by avoiding redundant server calls.
+- Event hub (optional) enables publishing and subscribing to events beyond the local process.
+
+Getting started
+---------------
+
+Create a session to connect to your ftrack server. You must supply the server URL, an API key, and an API user.
+
+Example: create a session
+.. code-block:: python
+
+    import ftrack_api
+
+    session = ftrack_api.Session(
+        server_url='https://my.ftrack.server',
+        api_key='YOUR_API_KEY',
+        api_user='your_username',
+        auto_populate=True,          # enable lazy loading of attributes
+        schema_cache_path='/path/to/cache'  # optional schema caching
+    )
+
+Authentication
+--------------
+
+The Session class handles authentication by attaching the necessary headers to HTTP requests. The SessionAuthentication class can be used to manually attach authentication information if needed.
+
+Example: using the built-in authentication (recommended)
+.. code-block:: python
+
+    import ftrack_api
+
+    session = ftrack_api.Session(
+        server_url='https://my.ftrack.server',
+        api_key='YOUR_API_KEY',
+        api_user='your_username'
+    )
+    # The session automatically uses headers like:
+    # 'ftrack-api-key': YOUR_API_KEY
+    # 'ftrack-user': your_username
+
+If you need to construct raw requests, you can use the SessionAuthentication class:
+.. code-block:: python
+
+    from requests import Session as ReqSession
+    from ftrack_api import SessionAuthentication
+
+    req_session = ReqSession()
+    req_session.auth = SessionAuthentication('YOUR_API_KEY', 'your_username')
+
+Working with queries and entities
+----------------------------------
+
+Entities are retrieved via queries against an entity type. The ftrack API provides a query mechanism to fetch entities such as Task, Project, etc.
+
+Example: query for tasks (iterate results)
+.. code-block:: python
+
+    # Assuming a valid session from above
+    task_query = session.query('Task').where('name contains "Design"')
+    for task in task_query:
+        print(task['name'])
+
+Notes:
+- The first time a task's attributes are accessed, if they have not been loaded yet, they may be fetched from the server automatically (when auto_populate is True).
+- You can navigate relationships between entities by accessing related attributes, for example task['project'] to get the related Project entity.
+
+Accessing attributes and relationships
+--------------------------------------
+
+Entity attributes can be accessed in a few common ways. Attributes that have not yet been loaded will be fetched from the server when needed.
+
+Example: access attributes and related entities
+.. code-block:: python
+
+    # Access a scalar attribute
+    title = task['name']
+    # Access a related entity
+    project = task['project']
+    project_name = project['name']
+
+Caching and performance
+-----------------------
+
+The session can work with a cache to speed up repeated access and reduce server load.
+
+- If you provide a cache implementing ftrack_api.cache.Cache, it will be used as part of a layered caching strategy.
+- By default, a MemoryCache is used at the top level.
+- You can configure schema caching by setting schema_cache_path. This stores schema information to speed up object creation and introspection.
+
+Example: enable a memory cache
+.. code-block:: python
+
+    from ftrack_api.cache import MemoryCache
+
+    session = ftrack_api.Session(
+        server_url='https://my.ftrack.server',
+        api_key='YOUR_API_KEY',
+        api_user='your_username',
+        cache=MemoryCache()
+    )
+
+Example: enable schema cache path
+.. code-block:: python
+
+    session = ftrack_api.Session(
+        server_url='https://my.ftrack.server',
+        api_key='YOUR_API_KEY',
+        api_user='your_username',
+        schema_cache_path='/path/to/schema/cache'
+    )
+
+Event hub integration
+---------------------
+
+If auto_connect_event_hub is True (the default), an embedded event hub can publish and subscribe to non-local events. This happens in a background thread to keep startup fast. Subscribing to events does not require an active hub connection, but some plugins may require it.
+
+Example: connect to the event hub
+.. code-block:: python
+
+    from ftrack_api.event.hub import EventHub
+
+    session = ftrack_api.Session(
+        server_url='https://my.ftrack.server',
+        api_key='YOUR_API_KEY',
+        api_user='your_username',
+        auto_connect_event_hub=True
+    )
+    # hub connection is established automatically in the background
+    # or you can manage it explicitly if needed:
+    # hub = EventHub(session)
+    # hub.connect()
+
+Schema caching
+--------------
+
+Schema caching can significantly speed up startup by avoiding repeated schema introspection.
+
+- Set schema_cache_path to a folder path.
+- If not set, the environment variable FTRACK_API_SCHEMA_CACHE_PATH is used.
+- If the environment variable is also not set, a temporary directory is used.
+- Set to False to disable schema caching entirely.
+
+Example: disable schema caching
+.. code-block:: python
+
+    session = ftrack_api.Session(
+        server_url='https://my.ftrack.server',
+        api_key='YOUR_API_KEY',
+        api_user='your_username',
+        schema_cache_path=False
+    )
+
+Design and extension points
+---------------------------
+
+- Core objects:
+  - Session: central point for server interaction, authentication, and configuration.
+  - SessionAuthentication: attaches API key and user to outgoing requests.
+- Entities and factories:
+  - ftrack_api.entity.base and ftrack_api.entity.factory provide the core functionality for creating, loading, and manipulating entity instances.
+- Queries and collections:
+  - ftrack_api.query provides querying capabilities against server-side entity types.
+  - ftrack_api.collection supports iteration and manipulation of sets of entities.
+- Caching and storage:
+  - ftrack_api.cache offers cache implementations for performance improvements.
+  - ftrack_api.accessor.server and related components handle data retrieval/storage interactions.
+- Events and plugins:
+  - ftrack_api.event.hub supports event publishing/subscription.
+  - ftrack_api.plugin and related hooks enable extending behavior.
+
+Best practices
+--------------
+
+- Prefer enabling auto_populate for convenient lazy loading, but be mindful of potential performance implications for large result sets.
+- Use a cache (and optionally schema caching) in long-running sessions to improve responsiveness.
+- If you rely on asynchronous event handling or cross-process communication, enable and correctly configure the event hub.
+- Keep API keys secure; prefer environment-based configuration and rotation where possible.
+
+Troubleshooting quick start
+---------------------------
+
+- If a required parameter (server_url, api_key, api_user) is missing, the Session constructor will raise a TypeError with guidance on how to provide it.
+- If you encounter authentication issues, verify the API key and user are correct and that the server URL is reachable.
+- If attributes do not appear to load, ensure auto_populate is enabled on your session and that you have network access to the server.
+
+Related references
+------------------
+
+- Session: ftrack_api.Session
+- SessionAuthentication: ftrack_api.SessionAuthentication
+- Querying: ftrack_api.query
+- Caching: ftrack_api.cache
+- Event hub: ftrack_api.event.hub
+- Entity systems: ftrack_api.entity.base, ftrack_api.entity.factory
+
+This documentation covers the core workflow for working with entities via the Session in ftrack API, including retrieving, accessing attributes, navigating relationships, and leveraging caching and event capabilities.

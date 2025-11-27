@@ -1,0 +1,165 @@
+Isototonic Regression
+=====================
+
+Overview
+--------
+This module provides utilities for isotonic regression, i.e., fitting a monotone (non-decreasing or non-increasing) function to data. It exposes:
+
+- check_increasing: a helper to determine whether y tends to increase with x using Spearman correlation.
+- isotonic_regression: a functional API to compute the isotonic fit for a 1D response y with optional weighting and bounds.
+- IsotonicRegression: a reusable estimator compatible with scikit-learn’s estimator interface (fit/predict/transform) that encapsulates an isotonic regression model, with additional options for bounds and how to handle out-of-domain inputs.
+
+Key concepts
+------------
+- Monotone fitting: The fitted y_ is constrained to be monotonic with respect to the input x or, in the estimator, to follow a monotone relationship learned from data.
+- Bounds: y_min and y_max allow bounding the predicted values.
+- Increasing vs. decreasing: The model can enforce either non-decreasing or non-increasing relationships. The class supports an 'auto' mode that decides based on a Spearman correlation estimate.
+- Out-of-bounds handling (IsotonicRegression): When predicting on values outside the training domain, choices include returning NaN, clipping to the nearest interval endpoint, or raising an error.
+
+API reference
+-------------
+
+Functions
+---------
+
+check_increasing(x, y)
+- Purpose: Determine whether y is monotonically correlated with x.
+- Parameters:
+  - x: array-like, shape (n_samples,)
+  - y: array-like, shape (n_samples,)
+- Returns: boolean indicating whether the relationship is increasing (True) or decreasing (False) with respect to x.
+- Notes:
+  - Uses Spearman correlation to assess monotonicity.
+  - If the 95% confidence interval for Spearman’s rho spans zero (and there are more than 3 samples), a warning may be raised.
+
+isotonic_regression(y, *, sample_weight=None, y_min=None, y_max=None, increasing=True)
+- Purpose: Compute the isotonic regression fit for a 1D response y.
+- Parameters:
+  - y: array-like, shape (n_samples,)
+  - sample_weight: array-like, shape (n_samples,), default=None. If None, weights are all 1.
+  - y_min: float, optional. Lower bound for the output. Defaults to -inf if not provided.
+  - y_max: float, optional. Upper bound for the output. Defaults to +inf if not provided.
+  - increasing: bool, default True. If True, fit a non-decreasing function; if False, non-increasing.
+- Returns: y_ (ndarray), shape (n_samples,), the isotonic fit of y with the requested monotonicity and bounds.
+- Notes:
+  - Internally, a weighted isotonic regression is solved. Bounds are applied after fitting.
+  - Ordering is applied to enforce increasing/decreasing as requested.
+
+Class
+-----
+
+IsotonicRegression(RegressorMixin, TransformerMixin, BaseEstimator)
+- Purpose: A reusable estimator implementing isotonic regression with a scikit-learn compatible API.
+- Parameters:
+  - y_min: float, default=None. Lower bound on the minimum predicted value. Default is -inf.
+  - y_max: float, default=None. Upper bound on the maximum predicted value. Default is +inf.
+  - increasing: bool or 'auto', default=True. Determines monotonic direction or automatic detection.
+  - out_of_bounds: {'nan', 'clip', 'raise'}, default='nan'. Behavior for X values outside training domain during prediction.
+- Attributes:
+  - X_min_: float. Minimum value of training X used for left bound computation.
+  - X_max_: float. Maximum value of training X used for right bound computation.
+  - X_thresholds_: ndarray, shape (n_thresholds,). Unique ascending X values used to interpolate the monotone function.
+    (Introduced in version 0.24.)
+  - y_thresholds_: ndarray, shape (n_thresholds,). Corresponding y values for interpolation.
+- Methods:
+  - fit(X, y, sample_weight=None): Learn an isotonic regression model from input X and response y.
+  - predict(X): Predict the monotone function values for new X. Behavior for out-of-bounds is governed by out_of_bounds.
+  - transform(X): Alias for predict(X) to support Pipelines that expect a Transformer interface.
+- Notes:
+  - The implementation relies on an in-place, contiguous isotonic regression algorithm.
+  - When increasing='auto', the direction is chosen based on the sign of the Spearman correlation between X and y (via the same logic used by check_increasing).
+  - If y_min/y_max are provided, the fitted values are clipped to the specified bounds.
+  - Out-of-bounds handling affects only predictions; training data must lie within the measured domain.
+
+Usage examples
+--------------
+
+Quick start: using the functional isotonic_regression
+----------------------------------------------------
+
+```python
+import numpy as np
+from isotonic import isotonic_regression
+
+# Example data
+y = np.array([1.0, 2.0, 1.5, 3.0, 2.5])
+# Fit isotonic regression with a non-decreasing constraint
+y_iso = isotonic_regression(y, increasing=True)
+print(y_iso)
+```
+
+check_increasing example
+------------------------
+
+```python
+import numpy as np
+from isotonic import check_increasing
+
+x = np.array([0, 1, 2, 3, 4], dtype=float)
+y = np.array([0.1, 0.9, 1.8, 3.1, 4.0], dtype=float)  # clearly increasing
+print(check_increasing(x, y))  # True
+```
+
+IsotonicRegression usage
+------------------------
+
+```python
+import numpy as np
+from isotonic import IsotonicRegression
+
+X = np.array([0.0, 1.0, 2.0, 3.0])
+y = np.array([0.0, 1.5, 1.0, 2.0])
+
+# Create an estimator (auto-detects direction)
+iso = IsotonicRegression(y_min=None, y_max=None, increasing='auto', out_of_bounds='nan')
+iso.fit(X, y)
+
+# Predict on new data
+X_new = np.array([0.5, 1.5, 2.5])
+y_pred = iso.predict(X_new)
+print(y_pred)
+```
+
+Notes and considerations
+------------------------
+
+- The check_increasing helper provides a simple, centralized way to decide monotonic direction when using IsotonicRegression with increasing='auto'.
+- Bounds (y_min, y_max) should be chosen based on domain knowledge; values outside these bounds are clipped after fitting.
+- Out-of-bounds behavior affects only prediction time. For strict error signaling on unseen inputs, set out_of_bounds to 'raise'.
+- The underlying algorithm uses a weighted isotonic regression via an active-set-like method and may rely on SciPy efficiently for numerical operations.
+
+Internal details (brief)
+------------------------
+
+- check_increasing uses SciPy’s spearmanr to estimate monotonic relationship and Fisher transformation to evaluate confidence intervals; a warning may be raised if the CI spans zero.
+- isotonic_regression applies optional weights, reverses the data for decreasing fits, performs in-place isotonic regression, and then clips to y_min/y_max if provided.
+- IsotonicRegression exposes interpolation-structured attributes (X_thresholds_, y_thresholds_) that describe the monotone function learned from the training data, enabling efficient prediction and potential interpretability.
+
+References
+----------
+
+- Best, M. J., & Chakravarti, N. (1990). “Active set algorithms for isotonic regression; a unifying framework.” (Context for the isotonic regression algorithm used in this module.)
+
+Versioning
+----------
+
+- IsotonicRegression: versionadded 0.13.
+- X_thresholds_ attribute: versionadded 0.24.
+
+Related modules
+---------------
+
+- _isotonic (private): in-place isotonic regression routines used by the public API.
+- base, utils: supporting infrastructure for validation, array handling, and estimator interfaces.
+
+End-to-end example workflow
+---------------------------
+
+1. Determine monotone direction (optional):
+   - check_increasing(x, y) → boolean
+2. Fit isotonic regression with isotonic_regression or IsotonicRegression.
+3. If using the estimator, call fit(X, y) and predict(X_new) to obtain monotone predictions.
+
+Notes
+-----
+This documentation reflects the conceptual API and common usage patterns for isotonic regression as implemented in this module. For exact behavior and version-specific details, refer to the source and accompanying user guide.

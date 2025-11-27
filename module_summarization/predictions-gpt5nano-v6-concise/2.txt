@@ -1,0 +1,221 @@
+Encoding media (encode_media.rst)
+==================================
+
+Overview
+--------
+The encode_media module provides a high-level API to transcode media files from one
+format to another. It is designed to be backend-agnostic, with FFmpeg as the
+default encoding backend, and supports synchronous and asynchronous encoding,
+progress reporting, and error handling. The module is intended for developers who
+need reliable, reproducible media conversions as part of their media pipelines or
+asset workflows.
+
+Key concepts
+- Profiles: Named encoding configurations that map to a target container, codec
+  settings, and quality characteristics (e.g. HD 1080p, web-optimized profiles).
+- Backends: Pluggable components responsible for performing the actual encoding.
+  The default backend uses FFmpeg; custom backends can be registered by the
+  application.
+- Jobs: An encoding operation can be run synchronously or asynchronously. Async
+  jobs provide progress callbacks and cancellation support.
+
+Features
+- Transcode video and audio between common formats (e.g., MP4, MOV, WEBM, MP3, AAC).
+- Preserves or redefines resolution, bitrate, framerate, and codecs via profiles.
+- Progress reporting via callbacks or polling.
+- Cancellation and error handling with rich exceptions.
+- Backend-agnostic design for easy extension and testing.
+- Optional post-encoding metadata handling (e.g., duration, frame rate).
+
+Backends and dependencies
+-------------------------
+- Default backend: FFmpeg (ffmpeg/ffprobe must be installed and available on PATH or
+  configured explicitly).
+- Other backends can be registered by the application to support additional formats
+  or encoders.
+
+Required external tools
+- FFmpeg and FFprobe: Used by the default backend to perform encoding and probe
+  input/output properties. Ensure the binaries are accessible (PATH or explicit
+  configuration).
+
+API reference
+-------------
+Module: encode_media
+
+Public exceptions
+- EncodingError: Base exception for encoding-related failures.
+- EncodingCancelledError: Raised when a running encoding job is cancelled by the user.
+
+Core API
+- get_supported_profiles() -> List[str]
+  Return the list of available encoding profiles. Profiles represent predefined
+  combinations of container, codecs, and quality settings.
+
+- encode_media(input_path: str, output_path: str, profile: str, *,
+  preserve_timestamps: bool = True, metadata: Optional[dict] = None,
+  extra_args: Optional[list] = None) -> EncodingResult
+  Perform a synchronous transcode of input_path to output_path using the given
+  profile. Returns an EncodingResult with status, duration, and file properties.
+
+- encode_media_async(input_path: str, output_path: str, profile: str, *,
+  preserve_timestamps: bool = True, metadata: Optional[dict] = None,
+  extra_args: Optional[list] = None, progress_cb: Optional[callable] = None,
+  cancel_event: Optional[threading.Event] = None) -> EncodingJob
+  Start an asynchronous encoding job. The return value is an EncodingJob handle
+  that can be used to query status, wait for completion, or cancel the job. If
+  progress_cb is provided, it will be invoked with status updates.
+
+- cancel_encoding(job: EncodingJob) -> None
+  Cancel a running asynchronous encoding job.
+
+- EncodingResult
+  Data class-like structure with fields such as:
+  - success: bool
+  - output_path: str
+  - duration_seconds: float
+  - profile: str
+  - notes: Optional[str]
+
+- EncodingJob
+  A lightweight handle for asynchronous jobs. Members include:
+  - job_id: str
+  - status: str ('queued', 'running', 'completed', 'failed', 'cancelled')
+  - result: Optional[EncodingResult]
+  - wait(timeout=None) -> EncodingResult
+  - cancel() -> None
+  - poll_status() -> str
+
+- EncodingError
+  Base exception for encoding-related failures.
+
+- ProgressCallback
+  Type alias for progress callback signature: def callback(status: dict) -> None
+
+Usage examples
+--------------
+
+Synchronous encoding
+--------------------
+from encode_media import get_supported_profiles, encode_media
+
+# Inspect available profiles
+profiles = get_supported_profiles()
+print("Available profiles:", profiles)
+
+# Choose a profile and encode
+try:
+    result = encode_media(
+        input_path="/path/to/input.mov",
+        output_path="/path/to/output.mp4",
+        profile="hd_1080p",
+        preserve_timestamps=True,
+        metadata={"title": "Encoded Version", "author": "Dev"}
+    )
+    print("Encoding finished. Success:", result.success)
+    print("Output:", result.output_path)
+    print("Duration (s):", result.duration_seconds)
+except EncodingError as e:
+    print("Encoding failed:", str(e))
+
+Asynchronous encoding with progress callback
+--------------------------------------------
+from encode_media import encode_media_async
+
+def on_progress(status):
+    # status example: {'job_id': '...', 'state': 'running', 'progress': 42.3}
+    print("Progress:", status)
+
+job = encode_media_async(
+    input_path="/path/to/input.mkv",
+    output_path="/path/to/output.webm",
+    profile="web_720p",
+    progress_cb=on_progress
+)
+
+# You can also poll or wait for completion
+result = job.wait(timeout=600)  # seconds
+print("Async encoding result:", result)
+
+Canceling a running job
+----------------------
+# Start a long-running encoding
+job = encode_media_async(...)
+
+# At some later point, cancel
+job.cancel()
+
+Progress and status
+-------------------
+- The progress callback receives a status dictionary with keys such as:
+  - job_id
+  - state ('queued', 'running', 'completed', 'failed', 'cancelled')
+  - progress (0.0 to 100.0)
+  - duration_estimate (optional)
+  - message (optional human-readable note)
+
+Advanced usage
+--------------
+
+Profiles and configuration
+--------------------------
+Profiles encapsulate encoding targets. Typical fields include:
+- container: mp4, mov, webm, mkv, etc.
+- video_codec: h264, hevc, av1, etc.
+- audio_codec: aac, mp3, opus, etc.
+- video_bitrate: e.g. 5000k
+- audio_bitrate: e.g. 192k
+- max_framerate: e.g. 60
+- resolution: e.g. 1920x1080 or 1280x720
+- profile_name: human-friendly label
+
+You can define custom profiles via the configuration system used by your project.
+Profiles can be validated at load time to ensure required fields are present.
+
+Post-processing and metadata
+----------------------------
+- Optionally attach or update metadata on the source or encoded asset.
+- Preserve or normalize timestamps.
+- Re-embed or strip metadata as required by downstream processes.
+
+Error handling and reliability
+------------------------------
+- EncodingError is raised for unrecoverable failures.
+- Transient failures may be retried depending on the backend settings.
+- If a job is cancelled, the system will attempt to terminate the encoder gracefully.
+
+Testing
+-------
+- Use mocks to simulate backend responses and test progress callbacks.
+- Validate that profile validation catches invalid configurations.
+- Ensure cancellation paths clean up temporary files and resources.
+
+Configuration and environment
+-----------------------------
+- FFmpeg availability: Ensure ffmpeg and ffprobe are installed and discoverable.
+- Backend configuration: Path or environment variables to locate the backend binary.
+- Timeouts and retry policies: Configure according to your environment.
+
+Compatibility and limitations
+-----------------------------
+- The exact set of supported containers/codecs depends on the active backend.
+- Some profiles may be hardware-accelerated on capable platforms; ensure drivers are installed.
+- Large files require sufficient disk space and I/O bandwidth.
+
+See also
+--------
+- ftrack_api.encoding (if applicable)
+- The project’s plugin system for registering alternative encoding backends
+- Documentation for the configuration system used to define profiles
+
+Notes
+-----
+- This documentation describes the encode_media module in a backend-agnostic way.
+- Adjust API surface and behavior to match your actual implementation as needed.
+
+References
+----------
+- FFmpeg: https://ffmpeg.org
+- FFprobe: https://ffmpeg.org/ffprobe.html
+
+End of documentation.

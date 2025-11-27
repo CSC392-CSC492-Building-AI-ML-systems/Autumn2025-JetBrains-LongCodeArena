@@ -1,0 +1,229 @@
+Work with images or data cubes related to Cherenkov Cameras
+============================================================
+
+This section documents how to work with per-camera images and multi-telescope data
+cubes in Cherenkov camera workflows. It covers the data model, common operations
+on single-camera images, handling per-event and per-telescope data cubes, and
+practical examples for building, transforming, and saving image data using the
+camera geometry and subarray tools provided by the CTApipe camera geometry
+infrastructure.
+
+Key concepts
+------------
+
+- Camera image: a 1D array of pixel values for a single telescope camera, typically
+  measured per event. The length equals the number of pixels in the camera’s
+  geometry.
+- Data cube: a multi-dimensional array containing many images, e.g.
+  - per-event cube for a single telescope: (n_events, n_pixels)
+  - per-event cube for a subarray: (n_events, n_telescopes, n_pixels)
+  - higher-level cubes with derived quantities (e.g., mean image per telescope)
+- Subarray and telescope geometry: mappings between telescope identifiers, pixel
+  indices, and the physical layout of pixels. The SubarrayDescription and related
+  geometry classes provide:
+  - tel_ids, tel_indices, and tel_index_array to map telescope IDs to fixed-length
+    indices suitable for stacking into data cubes
+  - per-camera geometry describing the arrangement of pixels (positions, order,
+    and how to translate raw data into images)
+- Coordinate frames: CameraFrame and GroundFrame represent, respectively, the
+  pixel coordinates within a camera’s image plane and the telescope’s ground
+  position. Coordinate transforms are used for alignment, visualization, and
+  reconstruction.
+
+Data model and common structures
+-------------------------------
+
+- Image representation
+  - A single telescope image is a 1D NumPy array with length equal to the number
+    of camera pixels.
+  - A per-event data structure typically holds a mapping from tel_id to its image,
+    or a stacked array with shape (n_telescopes, n_pixels).
+- Data cube representations
+  - Single telescope: (n_events, n_pixels)
+  - Subarray: (n_events, n_telescopes, n_pixels)
+- Telescopes and indices
+  - SubarrayDescription.tels: a dictionary from tel_id to TelescopeDescription
+  - SubarrayDescription.tel_index_array: maps tel_id to a flat index (or -1 for gaps)
+  - SubarrayDescription.tel_ids: an array of telescope IDs in the subarray
+  - These helpers are useful when constructing or manipulating data cubes that
+    combine multiple telescopes.
+
+Working with single-camera images
+---------------------------------
+
+Typical workflow:
+- Acquire an image for a given telescope (tel_id) and event.
+- Apply a mask to ignore bad pixels or regions, if a per-camera mask is available.
+- Compute simple statistics (sum/mean, centroid) or pass the image to reconstruction
+  algorithms.
+
+Example: basic image processing for a single telescope
+- Goal: compute total signal and the centroid of the signal in pixel coordinates.
+
+.. code-block:: python
+
+    # Assume:
+    # - images is a dict-like structure: {tel_id: image_array} for a given event
+    # - cam_geom is a CameraGeometry instance describing the camera layout
+    # - bad_pixels is a boolean array with True for good pixels and False for bad
+
+    tel_id = 42  # example telescope id
+    image = images[tel_id]           # 1D array of length n_pixels
+    mask = bad_pixels.astype(bool)  # or use an existing mask
+
+    # Apply mask
+    image_masked = np.where(mask, image, 0)
+
+    # Total signal
+    total_signal = image_masked.sum()
+
+    # Centroid in camera coordinates (requires pixel position arrays; adapt as needed)
+    # If cam_geom provides pixel coordinates (px, py) in its 2D layout:
+    # centroid_x = (image_masked * cam_geom.px).sum() / total_signal
+    # centroid_y = (image_masked * cam_geom.py).sum() / total_signal
+
+Notes:
+- If your CameraGeometry provides per-pixel coordinate information (e.g., px, py),
+  you can compute a centroid or moments-based quantities directly.
+- For non-rectangular camera layouts, you may visualize by projecting pixel
+  coordinates onto a 2D plane for plotting.
+
+Working with data cubes across events
+------------------------------------
+
+Common use cases:
+- Build an event-by-event cube for a single telescope: (n_events, n_pixels)
+- Build a joint cube for a subarray: (n_events, n_telescopes, n_pixels)
+
+Example: stacking per-event images for a single telescope
+.. code-block:: python
+
+    # images_by_event is a list of per-event dictionaries: [{tel_id: image}, ...]
+    tel_id = 42
+    per_event_images = [evt[tel_id] for evt in images_by_event]
+    cube = np.stack(per_event_images, axis=0)  # shape (n_events, n_pixels)
+
+    # Compute mean image across events
+    mean_image = cube.mean(axis=0)
+
+Example: stacking per-event images across a subarray
+.. code-block:: python
+
+    # images_by_event is a list of per-event dictionaries: [{tel_id: image, ...}, ...]
+    subarray_tel_ids = list(subarray.tel_ids)  # telescope IDs in the subarray
+    # Build a 3D cube: (n_events, n_tels, n_pixels)
+    cubes = []
+    for evt in images_by_event:
+        img_list = [evt[tid] for tid in subarray_tel_ids]
+        cubes.append(np.stack(img_list, axis=0))
+    subarray_cube = np.stack(cubes, axis=0)
+
+    # Per-telescope mean image
+    mean_per_tel = subarray_cube.mean(axis=0)  # shape (n_tels, n_pixels)
+
+    # Global mean image across telescopes (optional)
+    mean_global = subarray_cube.mean(axis=(1, 0))  # per-event scalar means (or adapt as needed)
+
+Tips:
+- Use SubarrayDescription.tel_index_array to map tel_id to a fixed index when
+  assembling arrays, especially if the number of telescopes varies between
+  subarrays or experiments.
+- When saving or loading cubes, ensure consistent shapes and axis order across
+  files (e.g., (n_events, n_telescopes, n_pixels)).
+
+Saving and loading image cubes
+------------------------------
+
+Common formats:
+- HDF5 via PyTables: efficient for large cubes with compression and chunking.
+- FITS or NumPy .npz/.npy files for simple use cases or interoperability.
+
+Example: saving a 3D data cube to HDF5
+.. code-block:: python
+
+    import tables
+    import numpy as np
+
+    # subarray_cube has shape (n_events, n_telescopes, n_pixels)
+    with tables.open_file('camera_images Cube.h5', mode='w') as f:
+        atom = tables.Atom.from_dtype(subarray_cube.dtype)
+        filters = tables.Filters(complevel=5, complib='blosc')
+        ds = f.create_carray(f.root, 'images', atom, subarray_cube.shape, filters=filters)
+        ds[:] = subarray_cube
+
+Example: saving a mean image per telescope to a small HDF5 dataset
+.. code-block:: python
+
+    mean_per_tel  # shape (n_telescopes, n_pixels)
+    with tables.open_file('mean_images.h5', mode='w') as f:
+        f.create_array('/', 'mean_per_tel', mean_per_tel)
+
+Visualization notes
+---------------------
+
+- For visualization, it is often helpful to project camera images onto a 2D plane
+  using per-pixel coordinates from the camera geometry (cam_geom.pix_x, cam_geom.pix_y
+  or equivalent). This makes it possible to display the camera image in its natural
+  layout, independent of the underlying data array shape.
+- When dealing with irregular camera layouts, consider using sparse masks or
+  irregular plotting utilities that respect the actual pixel positions.
+
+Advanced topics
+---------------
+
+- Coordinate transforms: use CameraFrame and GroundFrame to transform pixel
+  coordinates to a common reference frame for cross-camera alignment or
+  stereo reconstruction.
+- Re-sampling and re-binning: for visualization or comparison, you may map
+  per-camera pixels to a common grid or onto a per-telescope 2D image using the
+  camera geometry’s pixel coordinates.
+- Multi-subarray analysis: SubarrayDescription.info() and related utilities can help
+  you organize per-telescope data across a subarray, enabling efficient assembly
+  of data cubes for joint analyses.
+
+Examples: practical snippets related to SubarrayDescription
+---------------------------------------------------------
+
+- Mapping tel_id to a fixed index for stacking
+  - The SubarrayDescription provides tel_index_array which maps each tel_id to a
+    fixed index starting at 0 for the first telescope in the subarray. This is
+    useful when constructing data cubes across telescopes and when aligning data
+    from different telescopes.
+
+.. code-block:: python
+
+    # given a SubarrayDescription instance `subarray`
+    tel_ids = [1, 2, 3, 5]  # example telescope IDs in a subarray
+    # Build a dense index array for all possible tel_ids up to max
+    index_for_tel = subarray.tel_index_array  # length max_tel_id+1
+    # For a specific tel_id:
+    idx = index_for_tel[1]  # might be 0
+    # For a list of tel_ids:
+    indices = subarray.tel_ids_to_indices(tel_ids)
+
+- Accessing per-telescope pixel positions for visualization
+  - You can use the camera geometry associated with each telescope to obtain
+    pixel coordinates for visualization and projection.
+
+.. code-block:: python
+
+    # Pseudo-code illustrating intent
+    cam_geom = telescope_camera_geometry  # CameraGeometry for a given telescope
+    xs, ys = cam_geom.pix_x, cam_geom.pix_y  # per-pixel coordinates on the camera plane
+    # Use xs, ys for scatter/heatmap plots of the image
+
+Notes and best practices
+------------------------
+
+- When dealing with images from many events and/or many telescopes, prefer data
+  cube representations with fixed shapes to simplify batch processing and
+  vectorized computations.
+- Keep a consistent axis order across files and functions to minimize errors when
+  stacking or concatenating data.
+- Use the SubarrayDescription helpers (tel_ids, tel_index_array, tel_indices) to
+  manage variable subarrays, ensuring robust mapping from telescope IDs to array
+  indices in your data cubes.
+
+This documentation aims to provide a practical starting point for working with
+images and data cubes in Cherenkov camera analyses, leveraging the camera
+geometry and subarray utilities described in camera_geometry.rst.

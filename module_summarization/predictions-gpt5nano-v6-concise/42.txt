@@ -1,0 +1,114 @@
+# How to Generate Schema
+
+This document explains how to generate and apply database schema using the utilities provided by the schema module. It covers both generating the SQL text and executing it against a database client.
+
+## Prerequisites
+
+- A database client that implements the BaseDBAsyncClient interface (or a compatible client used by the ORM).
+- The client must expose a `schema_generator` method that returns an object capable of:
+  - `get_create_schema_sql(safe: bool) -> str`
+  - `generate_from_string(sql: str) -> Awaitable[None]`
+- An understanding that schema generation is performed asynchronously.
+
+## API
+
+### get_schema_sql(client, safe)
+
+- **Signature**: `get_schema_sql(client: BaseDBAsyncClient, safe: bool) -> str`
+- **Purpose**: Generate the SQL schema string for the given client.
+- **Parameters**:
+  - `client`: The database client to generate Schema SQL for.
+  - `safe`: If `True`, the generated SQL will create tables only if they do not already exist (i.e., using `CREATE TABLE IF NOT EXISTS ...` semantics as implemented by the generator).
+- **Returns**: A SQL string that represents the schema to be applied to the database.
+- **Notes**:
+  - Internally, the function obtains a schema generator via `client.schema_generator(client)` and calls `get_create_schema_sql(safe)` on it.
+
+**Example**
+
+```python
+from tortoise.backends.base.client import BaseDBAsyncClient
+
+# assume `client` is an instance of a class implementing BaseDBAsyncClient
+sql = get_schema_sql(client, safe=True)
+print(sql)  # Outputs the SQL statements to create the schema
+```
+
+---
+
+### generate_schema_for_client(client, safe)
+
+- **Signature**: `generate_schema_for_client(client: BaseDBAsyncClient, safe: bool) -> None`
+- **Purpose**: Generate the SQL schema and apply it directly to the given client.
+- **Parameters**:
+  - `client`: The database client to generate and apply the schema for.
+  - `safe`: If `True`, creates tables only if they do not already exist.
+- **Behavior**:
+  1. Obtains a schema generator via `client.schema_generator(client)`.
+  2. Gets the SQL schema string using `get_schema_sql(client, safe)`.
+  3. Logs the schema at debug level.
+  4. If the schema is non-empty, executes it with `generator.generate_from_string(schema)`.
+- **Returns**: `None` (the operation is performed asynchronously).
+- **Notes**:
+  - The function checks `if schema` before applying to avoid no-op calls.
+  - Logging is performed with the `"tortoise"` logger.
+
+**Example**
+
+```python
+import asyncio
+from tortoise.backends.base.client import BaseDBAsyncClient
+
+# async context where `client` is an initialized BaseDBAsyncClient
+async def migrate(client: BaseDBAsyncClient):
+    await generate_schema_for_client(client, safe=True)
+
+# usage
+# asyncio.run(migrate(client))
+```
+
+## Schema Generator Contract
+
+Both functions rely on the client-provided schema generator. The contract is:
+
+- `generator = client.schema_generator(client)`
+- `generator.get_create_schema_sql(safe: bool) -> str`
+  - Returns the SQL text to create the schema.
+- `generator.generate_from_string(sql: str) -> Awaitable[None]`
+  - Executes the provided SQL against the database.
+
+### Safe Mode
+
+- When `safe` is `True`, schema creation should be idempotent, avoiding errors if objects already exist (e.g., using `IF NOT EXISTS` semantics or equivalent in the underlying DB).
+- When `safe` is `False`, the SQL may attempt to create objects unconditionally, which could raise errors if objects already exist.
+
+## Examples
+
+- Generate SQL text without applying it:
+
+```python
+sql = get_schema_sql(client, safe=True)
+print(sql)  # Inspect the SQL before applying
+```
+
+- Generate and apply schema:
+
+```python
+import asyncio
+
+async def apply_schema(client):
+    await generate_schema_for_client(client, safe=True)
+
+# asyncio.run(apply_schema(client))
+```
+
+## Troubleshooting
+
+- If `schema` is empty, no operation is performed. Ensure your `schema_generator` is properly configured and the client is connected.
+- If applying schema fails, check the underlying generator’s `generate_from_string` implementation and database permissions.
+
+## Related References
+
+- BaseDBAsyncClient: interface for asynchronous database clients.
+- The schema generator object: expected to expose `get_create_schema_sql` and `generate_from_string`.
+
+This documentation covers how to generate and apply the schema using the provided utilities. If you have a custom database backend, ensure its schema generator implements the required interface.

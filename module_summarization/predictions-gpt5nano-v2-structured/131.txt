@@ -1,0 +1,128 @@
+Scheme to verify FITS data
+===========================
+
+Overview
+--------
+The verification framework provides a structured, extensible scheme for checking FITS-related data
+and reporting or correcting issues. Verification results are collected in a hierarchical error
+list and can be reported as warnings, raised as exceptions, or automatically fixed when possible.
+
+Key concepts
+- Verification is performed by classes that derive from _Verify and implement a _verify(self, option) method.
+- _verify returns an _ErrList describing issues found. Each issue is a pair (fixable, message) or a nested _ErrList for hierarchical checks.
+- Each issue can be either fixable or unfixable. If fixable, you can supply a fix function that will be invoked when an option requests fixing.
+- Verification options control both reporting and fixing behavior. Options can be combined with a “+” (e.g., fix+warn) to separate fix behavior from reporting behavior.
+
+API and data structures
+- VERIFY_OPTIONS
+  - A list of supported option strings. Examples: "ignore", "warn", "exception", "fix", "silentfix", "fix+warn", "silentfix+ignore".
+- _Verify
+  - Mixin class providing:
+    - run_option(self, option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+      - Executes a single verification decision, possibly applying a fix.
+      - Returns a tuple (fixable, text) where fixable indicates whether the issue is fixable.
+      - If the option implies reporting (e.g., "warn" or "exception"), fixable is set to False.
+      - If fix is provided and the issue is fixable, the fix function is invoked and the text is augmented with fix_text.
+    - verify(self, option="warn")
+      - Runs the full verification by calling self._verify(opt).
+      - Splits the opt into fix and report parts if a "+" is present (e.g., "fix+warn").
+      - Applies fixing behavior, controls output (warnings, exceptions, or silent reporting), and prints or raises as appropriate.
+- _ErrList
+  - A nested list structure to accumulate verification errors.
+  - Each non-nested item is a tuple (fixable, message).
+  - Nested _ErrList objects represent hierarchical checks (e.g., per-field or per-substructure checks).
+  - Methods:
+    - __str__() and iter_lines(filter=None, shift=0) provide human-readable representations with indentation.
+    - iter_lines() yields tuples suitable for creating a human-readable report, with appropriate indentation and unit headers when nested.
+
+How verification works
+- _verify must return an _ErrList describing all issues found for the given data/object.
+- Each issue is created as a tuple (fixable, message) or as a nested _ErrList to represent structured checks.
+- The verify() method then:
+  - Checks that the option is valid.
+  - If option is "ignore", does nothing.
+  - Splits the option into fix and report components if "+" is present.
+  - If "silentfix" is used, fixes are applied silently and reporting may be suppressed if there are no unfixable errors.
+  - Builds a report by iterating over errs.iter_lines with optional filtering.
+  - If any messages exist, prepends a header and a note about zero-based indexing.
+  - Depending on the report option, either emits warnings, raises VerifyError, or remains silent.
+
+Usage examples
+1) Minimal verification class
+- Implement a class that checks some FITS data and returns an _ErrList.
+
+.. code-block:: python
+
+    from astropy.io import fits
+    from verification_module import _Verify, _ErrList
+
+    class FitsDataVerifier(_Verify):
+        def __init__(self, data):
+            self.data = data
+
+        def _verify(self, option):
+            errs = _ErrList(unit="FITS dataset")
+
+            # Example check: ensure a required header key exists
+            if not hasattr(self.data, "header") or "KEY1" not in self.data.header:
+                try:
+                    # This is a fixable issue; provide a fix function if possible
+                    def fix_header():
+                        self.data.header["KEY1"] = "default"
+                        # In real usage, you would update header in a FITS object
+
+                    fixable, text = self.run_option(
+                        option=option,
+                        err_text="Missing required header KEY1.",
+                        fix_text="Inserted default KEY1.",
+                        fix=fix_header,
+                        fixable=True,
+                    )
+                except Exception:
+                    fixable, text = False, "Missing required header KEY1 (unfixable)."
+                errs.append((fixable, text))
+
+            # Add more checks as needed, using nested _ErrList for hierarchical structure
+            return errs
+
+2) Running verification
+- Create an instance of your verifier and call verify with different options.
+
+.. code-block:: python
+
+    data = ...  # some FITS data structure
+    verifier = FitsDataVerifier(data)
+
+    # Show warnings for issues, do not stop execution
+    verifier.verify("warn")
+
+    # Attempt to fix issues and report only warnings for fixable ones
+    verifier.verify("fix+warn")
+
+    # Do not report or fix; ignore issues
+    verifier.verify("ignore")
+
+3) Inspecting errors programmatically
+- You can inspect the structured errors returned by _verify via the _ErrList API.
+
+.. code-block:: python
+
+    errs = verifier._verify("warn")
+    for fixable, line in errs.iter_lines():
+        if fixable is not None:
+            print(f"{'FIXABLE' if fixable else 'FIX-IMPO' }: {line}")
+
+Notes
+- The verification system uses zero-based indexing in messages to align with common Python and FITS-related indexing semantics.
+- Messages are accumulated in a human-readable form, with indentation indicating hierarchy (e.g., per-field and per-substructure checks).
+- The run_option helper centralizes the logic of applying a fix and formatting the accompanying text, ensuring consistent behavior across different checks.
+
+When to use
+- Use this scheme when you need a uniform, extensible way to:
+  - Validate FITS data structures and headers.
+  - Provide user-configurable reporting and automatic fixing.
+  - Produce hierarchical, readable reports suitable for logs or interactive sessions.
+
+Limitations
+- Implementations must provide a _verify method that returns an _ErrList with the appropriate structure.
+- Fixing logic relies on explicit fix callbacks supplied by the developer; the verifier framework does not know how to fix arbitrary FITS data without guidance.

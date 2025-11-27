@@ -1,0 +1,118 @@
+# Computational Performance
+
+This section covers how the multioutput estimators in this module affect computational performance, including parallelism, scaling with the number of targets, memory considerations, and practical guidance for achieving better run times.
+
+## Overview
+
+- The module provides meta-estimators that wrap a base estimator to handle multiple targets (outputs).
+- Training cost scales with the number of outputs (targets) and the cost of fitting the base estimator.
+- Predictions also scale with the number of outputs.
+- Parallelism is achieved by distributing work across outputs (and/or folds) via a parallel execution backend. The n_jobs parameter controls the level of parallelism.
+
+## Parallelism and scaling
+
+- The wrappers typically fit one base estimator per target. If multiple outputs are present, this can be parallelized to fit multiple base estimators concurrently.
+- The n_jobs parameter (where supported by the wrapper) enables parallel execution:
+  - n_jobs = 1 or None: serial execution.
+  - n_jobs > 1: parallel execution across outputs (or tasks) to leverage multicore CPUs.
+- Parallelism is most effective when:
+  - The base estimator has substantial training time.
+  - The number of targets is large.
+  - The memory footprint of duplicating the base estimator per target remains manageable.
+
+Example (conceptual):
+- Base estimator cost: O(C_train)
+- Number of outputs: k
+- Total training cost (serial): O(k * C_train)
+- Total training cost (parallel): approximately O(C_train) with a constant factor improvement depending on available cores and overhead.
+
+Note: The internal helpers in this module (e.g., _fit_estimator, _partial_fit_estimator) clone the base estimator per target and call fit or partial_fit. Parallel execution is orchestrated via a parallel backend to distribute these calls.
+
+## Complexity and memory considerations
+
+- Training:
+  - Multioutput training involves training a separate instance of the base estimator for each target.
+  - Total training time grows roughly linearly with the number of outputs, assuming the base estimator training time dominates.
+- Prediction:
+  - Predictions must produce a value for each target, so the cost scales with the number of outputs.
+- Memory:
+  - Each target keeps its own copy of the fitted base estimator, increasing memory usage by approximately the footprint of the base estimator per target.
+  - For very large numbers of outputs or large base estimators, monitor memory usage to avoid saturation.
+
+## Meta-estimators and performance trade-offs
+
+- MultiOutputRegressor / MultiOutputClassifier:
+  - Treat targets as independent (in terms of fitting). Can be efficiently parallelized across outputs.
+  - Generally preferred when there are many targets or when targets are largely independent.
+- ClassifierChain / RegressorChain:
+  - Train a sequence of estimators where each step uses previous outputs as additional features.
+  - Can capture dependencies between outputs but may incur higher training time due to sequential fitting.
+  - In practice, you trade potential accuracy gains for slower training times, especially as the number of outputs grows.
+
+## Practical tips for better performance
+
+- Leverage multicore hardware:
+  - Set n_jobs to a value that matches your CPU core count.
+  - Be mindful of memory overhead from duplicating the base estimator per target.
+- Choose an appropriate base estimator:
+  - For expensive base estimators, parallelization across outputs can yield noticeable speedups.
+  - For lightweight base estimators, overhead from parallelization may outweigh benefits.
+- Use incremental learning when supported:
+  - If the base estimator supports partial_fit, the module can perform incremental fitting, potentially reducing peak memory and enabling streaming data scenarios.
+- Profile and scale:
+  - Start with a small subset of outputs to gauge how training time scales with more targets.
+  - Monitor memory usage as the number of outputs grows.
+- Consider chaining only when dependencies between outputs justify it:
+  - If outputs are highly correlated, a chain method might improve accuracy but at a computational cost. Weigh accuracy gains against training time.
+
+## Example usage
+
+- MultiOutputRegressor with a parallel-capable base estimator:
+
+```python
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.ensemble import RandomForestRegressor
+import numpy as np
+
+# Example data: X is (n_samples, n_features), y is (n_samples, n_outputs)
+X = np.random.randn(1000, 20)
+y = np.random.randn(1000, 5)  # 5 targets
+
+base = RandomForestRegressor(n_estimators=200, random_state=0, n_jobs=4)
+mor = MultiOutputRegressor(base, n_jobs=4)
+
+mor.fit(X, y)
+pred = mor.predict(X_new)  # X_new is (m, n_features); output is (m, 5)
+```
+
+- Incremental learning with partial_fit (if the base estimator supports it):
+
+```python
+from sklearn.linear_model import SGDRegressor
+from sklearn.multioutput import MultiOutputRegressor
+
+X_batch = ...  # (batch_size, n_features)
+y_batch = ...  # (batch_size, n_outputs)
+
+base = SGDRegressor(loss='squared_loss')
+mor = MultiOutputRegressor(base)
+
+# Require base estimator to implement partial_fit
+mor.partial_fit(X_batch, y_batch)
+```
+
+Note: Partial-fit support depends on the base estimator. The wrapper provides a mechanism (_partial_fit_estimator) to delegate to the base estimator when available.
+
+## API notes
+
+- Primary parameters:
+  - estimator: The base estimator to wrap. Must implement fit and predict.
+  - n_jobs: Integer or None. Controls parallelism. Higher values enable more concurrent fits/predictions across targets where supported.
+- The internal implementation clones the base estimator for each target to ensure independence between targets during training.
+
+## See also
+
+- ClassifierChain / RegressorChain: chain-based multi-output estimators with sequential training.
+- The internal helpers (_fit_estimator, _partial_fit_estimator) illustrate how per-target estimators are managed under the hood for performance considerations.
+
+This documentation summarizes how computational performance behaves in this module and provides practical guidance to optimize training and inference when working with multioutput estimators.

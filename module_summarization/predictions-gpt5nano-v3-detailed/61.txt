@@ -1,0 +1,187 @@
+Class Instrumentation (ORM)
+============================
+
+Overview
+--------
+
+This module implements SQLAlchemy's internal system for instrumenting user-defined
+classes so that the ORM can track per-instance state and per-attribute behavior.
+Instrumentation is closely tied to the ORM's state management (state.py) and
+attribute instrumentation (attributes.py), and it can be customized via the external
+sqlalchemy.ext.instrumentation package.
+
+Key concepts:
+
+- ClassManager: The central per-class instrumenter responsible for storing
+  per-class state, wiring in base class instrumenters, and coordinating with
+  the event system. Instances of ClassManager map attribute names to
+  QueryableAttribute implementations and participate in the ORM's instrumentation
+  lifecycle.
+- State and attributes integration: ClassManager interacts with per-instance state
+  (state.InstanceState) and per-attribute instrumentation (attributes) to enable
+  features such as tracked attributes, lazy loading, and event dispatching.
+- Extensibility: The instrumentation system can be customized on a per-class or
+  global basis via sqlalchemy.ext.instrumentation, which installs a more
+  comprehensive resolution mechanism.
+
+Public API
+----------
+
+ClassManager
+------------
+
+The ClassManager class tracks instrumentation state at the class level and acts
+as a mapping from attribute names (str) to QueryableAttribute[Any]. It also
+serves as an EventTarget, emitting and handling ORM-related events for the class
+it instruments.
+
+Key attributes
+
+- class_: The Python class being instrumented.
+- info: A mutable dict used to store per-class instrumentation metadata.
+- new_init: A placeholder for a user-supplied initialization hook, if any.
+- originals: A dict of original attribute values that were replaced during
+  instrumentation.
+- _finalized: Internal flag indicating whether the class has been finalized for
+  instrumentation.
+- factory: Optional factory for creating ClassManager instances.
+- init_method: Optional callable that supplies a custom initialization method for
+  the instrumented class.
+- original_init: The original __init__ method of the class, preserved for
+  restoration or wrapping.
+- _bases: A list of ClassManager instances representing instrumented base
+  classes. This enables inheritance-aware instrumentation propagation.
+- declarative_scan: Optional weak reference to a MapperConfig used during
+  declarative scanning.
+- registry: A reference to the global registry that tracks all instrumented
+  managers.
+- dispatch: The event dispatch object (per-class) used to emit and listen for
+  ORM-related events related to this class.
+- DEL_ATTR: Internal sentinel used to represent a deleted attribute (engineered
+  by the instrumentation layer) via util.symbol("DEL_ATTR").
+
+Important methods
+
+- __init__(self, class_): Initialize a ClassManager for the given class. This
+  sets up base-class instrumentation, wires into the EventTarget system, and
+  prepares the class for instrumentation.
+- _update_state(...): Update the internal state of the manager with relevant
+  components. Parameters include:
+  - mapper: Optional Mapper instance to associate with this manager.
+  - registry: Optional registry object to register this manager with.
+  - declarative_scan: Optional MapperConfig used for declarative scanning.
+  - expired_attribute_loader: Optional loader for attributes that should be
+    loaded lazily/on-demand.
+  - init_method: Optional initialization method to install for the class.
+  Returns: None.
+- _finalize(): Finalize instrumentation for the class, ensuring that the
+  instrumentation hooks are installed (notably wrapping or replacing __init__ as
+  needed). This is idempotent and will only run once per class.
+
+Notes on internal behavior
+
+- Inheritance handling: During initialization, ClassManager collects base class
+  managers (via opt_manager_of_class) and copies information from them to ensure
+  consistent instrumentation across an inheritance hierarchy.
+- Event integration: The manager subscribes to class-level instance events through
+  the ORM's event system (InstanceEvents) to coordinate per-instance state and
+  lifecycle events.
+- Deprecations: The deferred_scalar_loader attribute is deprecated in favor of
+  expired_attribute_loader (since version 1.4). Accessors are provided as a
+  compatibility alias for backward compatibility.
+- Finalization and lifecycle: Finalization (via _finalize) prepares the class
+  for instrumented use. If a user defines __del__ on the instrumented class, a
+  warning is issued to discourage potential reference cycles and memory leaks.
+
+Edge cases and considerations
+
+- __del__ presence: If the instrumented class defines __del__, SQLAlchemy emits a
+  warning about potential unreachable cycles and memory leaks due to
+  instrumentation introducing cross-references.
+- Finalization guard: _finalize is guarded to run only once; repeated calls are
+  ignored to avoid re-wrapping or re-wiring instrumentation.
+- Internal API usage: ClassManager and related machinery are intended for internal
+  ORM use. Applications generally interact with higher-level ORM APIs and
+  extensions (e.g., sqlalchemy.ext.instrumentation) rather than manipulating
+  ClassManager directly.
+
+Code structure and relationships
+-------------------------------
+
+- Base modules:
+  - state.py: Per-instance state tracking that ClassManager coordinates with.
+  - attributes.py: Attribute instrumentation that ClassManager exposes to map
+    class attributes to instrumented QueryableAttribute implementations.
+- Event system:
+  - EventTarget: ClassManager inherits from EventTarget to participate in the ORM
+    event dispatch mechanism.
+  - InstanceEvents: The per-instance event interface for instrumented classes.
+- External extension:
+  - sqlalchemy.ext.instrumentation: A separate extension module that can customize
+    the instrumentation system beyond the default behavior provided here.
+
+Usage considerations
+--------------------
+
+- Typical usage of this module is indirect. It is primarily engaged by the ORM
+  when mapping user classes and by the instrumentation extension to customize
+  behavior. End users normally interact via the higher-level ORM configuration and
+  the ext.instrumentation package.
+- If you are developing custom instrumentation or extending SQLAlchemy's
+  instrumentation mechanism, you may interact with ClassManager to:
+  - Inspect or modify the class-level state and per-attribute instrumentation.
+  - Provide custom init_method or expired_attribute_loader behavior.
+  - Connect additional event handlers to the ClassManager.dispatch.
+
+Deprecations
+------------
+
+- The property ClassManager.deferred_scalar_loader is deprecated in favor of
+  expired_attribute_loader. The deprecated accessor is kept for backward
+  compatibility but should not be used in new code.
+
+Code examples
+-------------
+
+Note: As ClassManager is part of SQLAlchemy's internal instrumentation system, direct
+interaction is typically unnecessary for application code. The following example is
+conceptual and intended to illustrate how instrumentation customization might be
+conceptually wired via the extension system.
+
+.. code-block:: python
+
+    # Conceptual example: customize attribute loading via the extension
+    # Actual APIs live in sqlalchemy.ext.instrumentation and related internals.
+    from sqlalchemy.ext import instrumentation
+
+    class User:
+        pass
+
+    # Hypothetical pathway to customize ClassManager for User (illustrative only)
+    # mgr = instrumentation.get_class_manager(User)
+    # mgr.expired_attribute_loader = my_loader
+
+Relationships and references
+-----------------------------
+
+- ClassManager is tightly coupled with:
+  - state.InstanceState: per-instance ORM state tracking.
+  - attributes.QueryableAttribute: per-attribute instrumentation objects.
+  - InstanceEvents and the ORM's event system for lifecycle hooks.
+  - The external sqlalchemy.ext.instrumentation package for advanced customization.
+
+See also
+--------
+
+- sqlalchemy.orm.state
+- sqlalchemy.orm.attributes
+- sqlalchemy.event
+- sqlalchemy.ext.instrumentation
+
+Notes
+-----
+
+- This documentation reflects the instrumentation internals as implemented in the
+  orm/instrumentation.py module. Applications typically rely on the ORM's public
+  configuration and the external instrumentation extension for customization.
+

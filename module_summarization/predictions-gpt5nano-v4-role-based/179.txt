@@ -1,0 +1,92 @@
+Cross decomposition
+===================
+
+Overview
+--------
+Cross decomposition in scikit-learn’s cross_decomposition module refers to methods that extract latent variables by decomposing the cross-covariance between input X and target Y. The goal is to capture shared structure that explains the relationship between X and Y, enabling tasks such as prediction (PLS Regression) or exploration of X–Y associations (Canonical-like approaches).
+
+Key ideas:
+- The cross-covariance matrix C = X^T Y is decomposed to reveal directions in X and Y that maximize their shared variance.
+- The first latent components are obtained from the leading singular vectors of C, with subsequent components obtained by deflating X and Y.
+- Two implementation strategies are provided: a direct SVD of X^T Y, and an iterative power-method approach that can operate in two modes (A and B) to accommodate different cross-decomposition formulations.
+
+Public API (related to cross decomposition)
+- PLSCanonical: Zero-mean, optional-scaled cross-decomposition that emphasizes shared structure between X and Y (canonical-like).
+- PLSRegression: Cross-decomposition oriented at predicting Y from X.
+- PLSSVD: Direct SVD-based cross-decomposition of X^T Y.
+
+Core algorithms
+1) SVD-based cross-decomposition
+- Concept: Compute C = X^T Y and perform a full SVD. The leading left singular vector U[:, 0] and leading right singular vector Vt[0, :] give the first cross-decomposition directions in X and Y.
+- Implementation (conceptual):
+  - C = X.T @ Y
+  - U, s, Vt = svd(C, full_matrices=False)
+  - x_weights = U[:, 0]
+  - y_weights = Vt[0, :]
+
+2) Power-method cross-decomposition
+- Concept: Iteratively estimate the first cross-decomposition vectors without forming the full cross-covariance. This can be advantageous for large problems.
+- Modes:
+  - Mode A: standard power iterations based on X and Y residuals.
+  - Mode B:CCA-like approach using pseudo-inverses to stabilize updates when appropriate.
+- Behavior:
+  - Iteratively update:
+    - x_weights (from either X^T y_score or pseudo-inverse-based step)
+    - x_score = X @ x_weights
+    - y_weights (from either Y^T x_score or pseudo-inverse-based step)
+    - y_score = Y @ y_weights (optionally normalize y_weights)
+  - Normalize x_weights and optionally y_weights
+  - Stop when changes in x_weights are below tol or when Y has a single column
+  - Returns: x_weights, y_weights, n_iter
+- Stability notes:
+  - Mode B can be unstable if the dimensionality exceeds the sample size (n_features > n_samples or n_targets > n_samples). The implementation uses pseudo-inverses to address this, with caveats described in code comments.
+
+Data preparation and normalization
+- centering and optional scaling:
+  - Before cross-decomposition, data are typically centered (and optionally scaled) per feature to ensure comparable scales and to focus on covariation rather than means.
+  - Function: _center_scale_xy(X, Y, scale=True)
+  - Returns: X, Y, x_mean, y_mean, x_std, y_std
+  - Behavior: centers X and Y by their column means; if scale is True, scales each column to unit standard deviation (ddof=1), with zeros prevented from dividing by zero.
+
+Sign conventions for deterministic results
+- The sign of singular vectors is arbitrary in SVD. A helper ensures consistent signs for 1D vectors:
+  - _svd_flip_1d(u, v): adjusts signs so that the largest-absolute-value component of u is positive, applying the same sign to v.
+
+Internal helpers and notes
+- _get_first_singular_vectors_svd(X, Y):
+  - Returns the first left and right singular vectors from SVD of C = X^T Y.
+- _get_first_singular_vectors_power_method(X, Y, mode="A", max_iter=500, tol=1e-06, norm_y_weights=False):
+  - Performs power-method based computation of the first cross-decomposition vectors.
+  - Supports mode "A" (default) and mode "B" (CCA-like with pseudo-inverses).
+  - Returns x_weights, y_weights, n_iter.
+  - Raises StopIteration if the Y residual is constant; warns on convergence if max_iter is reached.
+
+Practical usage notes
+- When to use SVD vs. Power method:
+  - SVD is straightforward and robust for moderate-sized problems.
+  - The power method can be preferable for very large datasets where forming X^T Y is expensive or infeasible, or when an iterative solution is desired (with control over convergence behavior).
+- Scaling decisions:
+  - Centering is essential. Scaling (scale=True) is common to ensure features contribute equally; adjust based on domain knowledge.
+- Mode selection:
+  - Mode A corresponds to a typical cross-decomposition objective focusing on the cross-covariance structure.
+  - Mode B aligns with a CCA-like formulation using pseudoinverses; use with caution on high-dimensional data relative to sample size.
+
+Relationships to other components
+- The cross-decomposition machinery feeds into the higher-level estimators:
+  - PLSCanonical and PLSRegression leverage these components to build score representations and predictions.
+  - PLSSVD directly relies on SVD-based cross-decomposition to obtain latent directions.
+- After extracting components, deflation steps (not shown here) remove the explained cross-covariance from X and Y to derive subsequent components.
+
+Example (conceptual)
+- SVD-based first component:
+  - C = X.T @ Y
+  - U, s, Vt = svd(C, full_matrices=False)
+  - x_weights = U[:, 0]
+  - y_weights = Vt[0, :]
+- Power-method first component (conceptual):
+  - x_weights, y_weights, n_iter = _get_first_singular_vectors_power_method(X, Y, mode="A")
+
+References and notes
+- The power-method implementation references Wegelin’s review, section 11.3, for context on the iterative approach.
+- The underlying cross-decomposition approach is implemented across two strategies (SVD and power method) to support robust and scalable usage in the public estimators: PLSCanonical, PLSRegression, and PLSSVD.
+- Some internal utilities (e.g., _pinv2_old) address numerical stability for pseudo-inverse computations across SciPy versions.

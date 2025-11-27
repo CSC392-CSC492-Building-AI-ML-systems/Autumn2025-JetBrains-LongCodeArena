@@ -1,0 +1,111 @@
+# Stochastic Gradient Descent (SGD)
+
+This document describes the Stochastic Gradient Descent (SGD) approach used in this project, and how it is implemented and integrated in the sgd.rst documentation for developers.
+
+## Overview
+
+- SGD is an optimization algorithm for minimizing an objective function that is a sum of many component losses, typically of the form:  
+  f(w) = (1/m) ∑ L(y_i, f_w(x_i)) + regularization
+- Instead of computing the gradient over the full dataset, SGD updates the parameters using the gradient computed on a single example (or a small minibatch). This makes SGD scalable to large datasets and often speeds up convergence in practice.
+- In this codebase, SGD is implemented with fused-type Cython classes to support both 32-bit and 64-bit floating point types for performance and memory efficiency.
+
+## Key concepts
+
+- Loss function: The quantity being minimized with respect to model parameters. Examples in this codebase include:
+  - Squared loss (for regression)
+  - Multinomial logistic loss (for multiclass classification)
+- Gradient: The vector of partial derivatives of the loss with respect to model parameters. SGD updates are performed in the direction opposite to the gradient.
+- Learning rate (step size): A schedule η_t that controls the magnitude of each parameter update. Proper scheduling (constant, decay, or adaptive) is crucial for convergence.
+- Numerical stability: Special techniques (e.g., logsumexp) are used to avoid overflow/underflow when handling log probabilities and softmax computations.
+
+## Mathematical formulation
+
+- For a single example (x_i, y_i) with loss L, the SGD update for parameters w is:
+  w ← w − η_t ∇_w L(y_i, f_w(x_i))
+- With a minibatch B, the update becomes:
+  w ← w − η_t (1/|B|) ∑_{i ∈ B} ∇_w L(y_i, f_w(x_i))
+
+## Loss functions implemented
+
+- Multinomial logistic loss (with logsumexp for numerical stability)
+  - Purpose: multiclass classification where y ∈ {0, ..., C-1}
+  - Stable computation strategy: _logsumexp implementation to compute log sum exp efficiently
+  - Gradient computation: per-class gradient that integrates the softmax-like probabilities
+
+- Squared loss
+  - Purpose: regression tasks where the residual error is squared
+
+- Soft-thresholding (proximal operator)
+  - Useful when implementing regularized SGD (e.g., L1 regularization) via proximal updates
+
+## Numerical stability techniques
+
+- Logsumexp: A numerically stable way to compute log(sum(exp(prediction))) by factoring out the maximum value.
+- Fused types: Implementations are generated for both 32-bit and 64-bit floating point data (float and double), reducing casting overhead and improving speed on different platforms.
+
+## Developer-oriented architecture notes
+
+- dtypes:
+  - 64-bit: c_type = 'double', np_type = np.float64
+  - 32-bit: c_type = 'float',  np_type = np.float32
+- Core components:
+  - _logsumexp (per dtype): stable log-sum-exp computation
+  - MultinomialLogLoss{{name_suffix}}:
+    - _loss(prediction, y, n_classes, sample_weight) -> loss
+    - dloss(prediction, y, n_classes, sample_weight, gradient_ptr) -> fills gradient
+  - __reduce__: supports pickling of the loss object
+- Safety and performance:
+  - nogil blocks and C-level loops for speed
+  - skl_isfinite{{name_suffix}} checks for numerical stability
+- Extensibility:
+  - The codebase is designed to be extended with additional loss functions while preserving a consistent interface.
+
+## Example usage (conceptual)
+
+Note: The following examples illustrate how SGD concepts map to the implemented classes. They are written as high-level pseudocode to show intent; actual usage may differ depending on the surrounding Python wrappers.
+
+### Example 1: Linear regression with SGD
+
+- Objective: Minimize squared loss on a dataset (X, y)
+- Pseudocode:
+  - Initialize weights w (n_features) and bias b
+  - For each epoch:
+    - For each sample i:
+      - prediction = dot(X[i], w) + b
+      - error = prediction - y[i]
+      - w := w − η * error * X[i]
+      - b := b − η * error
+
+### Example 2: Multiclass classification with MultinomialLogLoss
+
+- Objective: Minimize multinomial logistic loss for C classes
+- Pseudocode:
+  - For each sample i:
+    - Compute a prediction vector scores of length C for sample i
+    - Use MultinomialLogLoss to compute loss and gradient:
+      - loss = loss_obj._loss(scores, y_i, C, sample_weight)
+      - gradient[c] = computed via loss_obj.dloss(scores, y_i, C, sample_weight, gradient_ptr)
+    - Update model parameters using the gradient and the input features x_i
+      (Typically: w_j := w_j − η_t * gradient_j * x_i for each feature j, with appropriate shaping)
+
+## Practical guidelines for developers
+
+- Choosing a learning rate:
+  - Start with a modest η and adapt over time (e.g., decaying schedule) to improve convergence.
+- Data representation:
+  - Use 2D arrays for feature matrices and 1D arrays for labels.
+  - Ensure labels are encoded as integers in [0, n_classes-1].
+- Performance considerations:
+  - Favor 64-bit or 32-bit fused types consistently to avoid type casting overhead.
+  - Leverage the nogil blocks and compiled C loops for speed on large datasets.
+- Regularization:
+  - Add L2 (weight decay) or L1 (via proximal updates) to prevent overfitting.
+  - Proximal updates can leverage the _soft_thresholding helper when using L1 regularization.
+
+## References and related material
+
+- Fundamental SGD references (textbook style): Bishop, C. M. (2006). Pattern Recognition and Machine Learning.
+- Softmax/logsumexp stability techniques
+- Proximal SGD for L1 regularization (soft-thresholding)
+
+If you need, I can tailor this documentation to match your exact sgd.rst structure (headings, sections, and any project-specific API names) or add concrete API usage blocks based on the surrounding Python wrappers.

@@ -1,0 +1,219 @@
+# polys.rst
+
+Polynomials: factorization routines in characteristic zero
+
+Overview
+--------
+This module provides a mixin class that underpins the factorization routines used by the
+polynomial framework for characteristic-zero domains. The implemented strategies target
+polynomials over the integers (Z[X]), as well as multivariate polynomials with integer
+coefficients, and extend to algebraic number fields when required.
+
+Key ideas:
+- Trial division helper utilities to extract multiplicities of known factors.
+- Zassenhaus-based factorization for univariate polynomials over Z, with Mignotte bounds and Hensel lifting.
+- EEZ/Zassenhaus variants and related techniques for multivariate polynomials in Z[X].
+- Support for algebraic extensions via Trager-style factorization of multivariate polynomials over algebraic number fields.
+- Interaction with the domain abstraction (domain, gens, coefficients, coercions) and the system-wide query settings to enable/disable specific factorization strategies.
+
+This module is designed as a mixin (intended to be used by higher-level factorization implementations) and is not usually invoked directly by end users. The public surface consists of internal methods used by concrete polynomial ring implementations.
+
+API reference
+-------------
+Note: The following are internal methods used by factorization routines. They assume access to a host class that provides:
+- self.domain: the current coefficient/domain context.
+- self.gens: a tuple/list of generator symbols for the polynomial ring.
+- Methods like co cofactors, compose, eject, primitive, is_univariate, is_ground, and ring-related utilities.
+
+Public/Private API (in this module):
+- _trial_division(f, factors)
+- _aa_factor_trager(f)
+- _zz_factor(f)
+- _zz_mignotte_bound(f)
+- _zz_zassenhaus(f)
+
+Details
+
+1) _trial_division(self, f, factors)
+- Purpose
+  Compute the multiplicities of the given factors in the polynomial f via trial division.
+
+- Parameters
+  - f: a polynomial instance to factor using trial divisions.
+  - factors: an iterable of candidate factors to test against f (each is treated as a divisor).
+
+- Returns
+  - A list of tuples (factor, exponent), representing factorization candidates and their multiplicities, sorted by _sort_factors.
+
+- Behavior
+  For each candidate factor:
+  - Repeatedly divide f by that factor while the remainder is zero, counting the exponent k.
+  - Append (factor, k) to the result.
+  - Move to the next candidate factor.
+  The final result is normalized via _sort_factors for deterministic ordering.
+
+- Notes
+  - This routine is a building block used by higher-level factorization methods to assemble a factor list after a factoring attempt (e.g., after obtaining a set of candidate irreducibles).
+
+- Example (conceptual)
+  Given f and a list of candidate factors [f1, f2, ...], _trial_division returns [(f1, k1), (f2, k2), ...] where f = f1**k1 * f2**k2 * ...
+
+2) _aa_factor_trager(self, f)
+- Purpose
+  Factor multivariate polynomials over algebraic number fields using a polynomial-time variant of Trager’s approach.
+
+- Parameters
+  - f: a multivariate polynomial over an algebraic extension (the current domain).
+
+- Returns
+  - A tuple (lc, factors) where lc is the leading coefficient of the original polynomial (unfolded as a scalar factor) and factors is a list of irreducible factors with their multiplicities, i.e., [(f1, k1), (f2, k2), ...].
+
+- High-level workflow
+  - Make f monic and extract the leading coefficient lc.
+  - If f is ground (constant), return lc and an empty factor list.
+  - Compute square-free part and a square-free component f with an associated normal form.
+  - Obtain square-free factors of the square-free part; if there is more than one factor, compute cofactors for each factor with respect to the polynomial g.
+  - Lift cofactors via substitution in the algebraic extension (via domain units) and reuse _trial_division with the lifted factors.
+  - Return the leading coefficient and the factored form.
+
+- Notes
+  - This routine relies on domain-aware operations such as .sqf_part(), .sqf_norm(), .cofactors(), .compose(), and the ability to adjust the ring/domain of factors.
+  - Intended for algebraic-extensions factorization, not plain Z[x].
+
+3) _zz_factor(self, f)
+- Purpose
+  Complete factorization for (non square-free) polynomials in Z[X], returning (content, [(f1, k1), ..., (fn, kn)]) where content is the content factor (an integer) and each (fi, ki) represents a primitive irreducible factor with multiplicity ki.
+
+- Parameters
+  - f: a (multivariate) polynomial over integers.
+
+- Returns
+  - A tuple (content, factors) where:
+    - content is the gcd of coefficients of f (the content part).
+    - factors is a list of (factor, exponent) pairs giving the complete factorization of the primitive part.
+
+- Univariate path
+  - If the polynomial is univariate:
+    - Compute the primitive part cont, g.
+    - If deg(g) <= 0, return cont, [].
+    - If deg(g) == 1, return cont, [(g, 1)].
+    - If configured to check irreducibility in factor, and g is irreducible, return cont, [(g, 1)].
+    - Reduce to a square-free part g = g.sqf_part() and attempt cyclotomic factoring if enabled (H = self._zz_cyclotomic_factor(g)).
+    - Otherwise, apply Zassenhaus-based factoring (H = self._zz_zassenhaus(g)).
+    - Factorize using trial division with H and return cont, factors.
+
+- Multivariate path
+  - If f is not zero, compute primitive part cont, g.
+  - If g is ground (constant in all variables), return cont, [].
+  - Remove the first variable via g = g.eject(*self.gens[1:]); re-derive a primitive factorization G, g = g.primitive(); g = g.inject().
+  - Initialize an empty factor list.
+  - If deg(g) > 0, factor g as a square-free part and factorize via H = self._zz_wang(g); then accumulate via _trial_division.
+  - Recursively factor the extracted multivariate part G.ring._zz_factor(G) and prepend results (with ring adjustments) to the factor list.
+  - Return cont, sorted(factors).
+
+- Notes
+  - The method encodes the classic Zassenhaus strategy for Z[X] in both univariate and multivariate contexts, with a pathway for WANG-style multivariate factoring as part of an EEZ-like approach.
+  - The implementation relies on several domain-specific operations (primitive decomposition, degree computation, eject/primitive steps, and ring manipulation).
+
+4) _zz_mignotte_bound(self, f)
+- Purpose
+  Compute Mignotte’s bound for multivariate polynomials in Z[X], which is used to choose primes and estimate coefficients during Zassenhaus lifting.
+
+- Parameters
+  - f: a multivariate polynomial over Z.
+
+- Returns
+  - A bound value (an integer in the current domain) that controls the size of the search space during factoring.
+
+- Calculation
+  - a = f.max_norm()
+  - b = abs(f.LC)
+  - n = sum(f.degree(x) for x in self.gens)
+  - bound = sqrt(n + 1) * 2**n * a * b
+
+- Notes
+  - The bound informs the choice of primes and the depth of Hensel-lift procedures in univariate factoring.
+
+5) _zz_zassenhaus(self, f)
+- Purpose
+  Factor primitive, square-free polynomials in Z[x] using Zassenhaus factorization (classic algorithmic approach).
+
+- Parameters
+  - f: a univariate polynomial over Z, asserted to be primitive and square-free for the factoring loop.
+
+- Returns
+  - A list of irreducible factors (with multiplicities) for f, i.e., [f1, f2, ..., fm].
+
+- High-level outline
+  - Validate that the domain is integer ring and that f is univariate.
+  - Compute degree n and extract coefficients (fc, A, b, B, C, gamma, bound) to prepare the lifting process.
+  - Select a prime p for which f is square-free modulo p, performing a small search guided by a bound.
+  - Lift factorizations from F mod p to the integers using Hensel lifting with exponent l, form products of subsets S to try candidate factor composites, and test divisibility of the constant term to prune candidates.
+  - Continue lifting and partitioning until a complete factorization is achieved.
+
+- Notes
+  - This implementation follows the theoretical framework described in standard references (e.g., Gathen & Gerhard, Modern Computer Algebra).
+  - The method is designed for univariate polynomials in Z[x], with the potential to be integrated into multivariate strategies via ring lifting.
+
+Algorithms and references
+-------------------------
+- Zassenhaus factorization (univariate Z[x]):
+  - Core approach: reduce modulo a prime p where f is square-free, factor modulo p, lift the factors to Z using Hensel lifting, and iteratively refine subsets of factors until a complete factorization is obtained.
+  - Key bound used: Mignotte bound to bound coefficient growth during lifting.
+  - Reference: Gathen & Gerhard, Modern Computer Algebra (as cited in the code).
+
+- Trager factorization (algebraic number fields):
+  - Multivariate factorization over algebraic extensions by combining square-free factorization, cofactors, and algebraic substitutions to reduce to known factors in the base field.
+
+- EEZ (Enhanced Extended Zassenhaus) considerations:
+  - The multivariate path (via Wang lifting and related steps) indicates integration with an EEZ-style strategy for factoring multivariate polynomials over Z.
+
+Usage notes
+-----------
+- These routines rely on a broader polynomial framework with:
+  - A domain-object abstraction exposing ring arithmetic, gcds, and normalization.
+  - A gens collection describing the variables in the polynomial ring.
+  - Methods for square-free factorization parts, cofactors, composition across substitution maps, and primitive decompostion.
+- The class is a mixin; concrete factorization functionality is provided by domain-specific factorization implementations that inherit from _Factor.
+
+Exceptions and error handling
+-----------------------------
+- The module imports and usage are compatible with standard error types used by the polynomial framework:
+  - CoercionFailedError, DomainError, EvaluationFailedError, ExtraneousFactorsError
+- Factorization routines may raise errors when:
+  - The target domain is incompatible with the requested factorization (e.g., attempting Z[x] factoring in a non-integer domain).
+  - Coercion or lifting steps fail due to domain mismatches or algebraic dependencies.
+  - Extraneous factors are produced or duplicates found in an inconsistent factor list (handled by the surrounding framework).
+
+Examples
+--------
+- Univariate Z[x] factorization example:
+  - Given the univariate polynomial 2*x**4 - 2 over ZZ:
+    - The factor_list operation returns: (2, [(x - 1, 1), (x + 1, 1), (x**2 + 1, 1)])
+  - This demonstrates the content factor and the irreducible factorization over the integers.
+
+- Multivariate Z[x, y] factorization example:
+  - For 2*x**2 - 2*y**2 over ZZ:
+    - The factor_list operation returns: (2, [(x - y, 1), (x + y, 1)])
+  - Demonstrates factorization into linear irreducibles in the multivariate setting.
+
+Implementation notes for maintainers
+-----------------------------------
+- The methods assume a coherent domain interface with:
+  - Polynomial attributes/methods: LC, monic(), is_ground, sqf_part(), sqf_norm(), primitive(), degree(), max_norm(), eject(), inject(), compose(), factor_list(), ring, etc.
+  - Ring-level operations and factorization hooks: _zz_wang, _zz_hensel_lift, _zz_irreducible_p, _zz_cyclotomic_factor, cofactors, and cofactor generation.
+- The code is designed to be extended by additional factorization strategies, especially for multivariate polynomials beyond Z[X], as new domains or specializations are added.
+- The internal API (prefixed with underscores) is fragile to domain changes; maintainers should ensure compatibility with the host domain classes and update references when extending the domain interface.
+
+References
+----------
+- Gathen, Joachim von, and Gerhard, Jürgen: Modern Computer Algebra. (Referenced in the univariate Z[x] Zassenhaus implementation.)
+
+Practical note for users
+-----------------------
+If you are implementing a new polynomial domain or extending factorization capabilities, you can reuse these strategies by:
+- Subclassing _Factor as a mixin in your domain class.
+- Providing the required domain primitives (primitive decomposition, square-free parts, cofactors, monic normalization, coercions, and ring/domain adjustments).
+- Enabling/disabling advanced factorization strategies via the query() configuration keys (e.g., USE_IRREDUCIBLE_IN_FACTOR, USE_CYCLOTOMIC_FACTOR).
+
+This documentation documents the internal factorization routines and their roles within the characteristic-zero polynomial factoring framework.

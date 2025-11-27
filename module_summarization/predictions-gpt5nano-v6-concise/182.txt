@@ -1,0 +1,322 @@
+# Developing scikit-learn estimators
+
+This document provides guidance for developers who implement new estimators in scikit-learn, with best practices, design patterns, and concrete examples. It covers core API, parameter handling, multi-output and meta-estimators, testing, and documentation considerations.
+
+---
+
+## Table of contents
+
+- [Overview and goals](#overview-and-goals)
+- [Estimator API and lifecycle](#estimator-api-and-lifecycle)
+- [Base classes, mixins, and parameter validation](#base-classes-mixins-and-parameter-validation)
+- [Multi-output and meta-estimators](#multi-output-and-meta-estimators)
+- [Guidelines for implementing a new estimator](#guidelines-for-implementing-a-new-estimator)
+- [Examples](#examples)
+  - [Example 1: ConstantRegressor (simple, multi-output)](#example-1-constantregressor-simple-multi-output)
+  - [Example 2: PerOutputEstimator (simple multi-output meta-estimator)](#example-2-peroutputestimator-simple-multi-output-meta-estimator)
+- [Testing and validation](#testing-and-validation)
+- [Documentation and maintainability](#documentation-and-maintainability)
+- [Dependency and CI considerations](#dependency-and-ci-considerations)
+
+---
+
+## Overview and goals
+
+- Provide a clean, consistent API for estimators that integrates with scikit-learn’s ecosystem.
+- Enforce explicit parameter initialization in __init__, with parameters exposed via get_params/set_params.
+- Separate training data handling (fit) from prediction (predict, transform).
+- Support multi-output targets through dedicated mechanisms (e.g., meta-estimators, MultiOutput utilities).
+- Ensure estimators are testable, auditable, and well-documented.
+
+Key patterns you’ll encounter:
+- Parametrization through __init__ with proper default values.
+- Attributes ending with an underscore (e.g., coef_, intercept_) set during/after fitting.
+- Use of mixins such as RegressorMixin and ClassifierMixin to signal compatibility with downstream helpers and metrics.
+- Validation helpers (HasMethods, StrOptions, _check_method_params) to ensure required methods exist on estimators.
+- Meta-estimators and multi-output support via helper utilities (e.g., _fit_estimator, _partial_fit_estimator, available_if).
+
+---
+
+## Estimator API and lifecycle
+
+- __init__(self, ...): Define all user-settable parameters. Do not perform heavy computation here; just store parameters.
+- fit(self, X, y=None, ...): Learn from data. Return self.
+- predict(self, X): Return predictions. For regression, shape (n_samples,) or (n_samples, n_outputs).
+- transform(self, X): For transformers; not all estimators implement this.
+- get_params(self, deep=True): Retrieve constructor parameters.
+- set_params(self, **params): Set constructor parameters (with validation).
+- Attributes ending with an underscore (e.g., n_features_in_, coef_) are created during fit.
+
+Design tips:
+- Validate inputs where possible, but avoid doing heavy work in __init__ or before any data is seen.
+- If your estimator supports partial_fit (online learning), implement it and ensure it interacts well with multiple calls to fit.
+- For multi-output targets, consider using a meta-estimator (see section on multi-output) or implement per-output handling inside fit/predict.
+
+---
+
+## Base classes, mixins, and parameter validation
+
+Key building blocks you’ll likely encounter or reuse:
+
+- BaseEstimator: Core behavior for parameter handling and representation.
+- RegressorMixin / ClassifierMixin: Semantic signals for regression/classification tasks and compatibility with metrics.
+- MetaEstimatorMixin: For meta-estimators that wrap another estimator.
+- _parameter_constraints: A mechanism to annotate parameter types for validation tools.
+- Validation helpers: HasMethods, StrOptions, _check_method_params to validate estimator capabilities.
+
+Multi-output helpers (as seen in the code sample):
+- _fit_estimator(estimator, X, y, sample_weight=None, **fit_params): Clone and fit a sub-estimator.
+- _partial_fit_estimator(...): Support partial_fit for online learner scenarios.
+- available_if: Decorator to conditionally expose parameters or attributes based on sub-estimator capabilities.
+
+For multi-output, you can design estimators that train a separate sub-estimator per target dimension and combine their predictions.
+
+---
+
+## Multi-output and meta-estimators
+
+- Multi-output estimators extend single-output estimators to predict multiple targets. They often wrap a base estimator and apply it independently to each target column.
+- Meta-estimators are estimators that take another estimator as a parameter (e.g., a base estimator) and orchestrate its use across the dataset.
+
+Practical guidance:
+- When building a multi-output wrapper, be explicit about the shape of y (1D vs 2D). Normalize to 2D internally if needed.
+- Use clone(estimator) to create independent copies for each target, ensuring clean parameter propagation and avoiding shared state across targets.
+- Provide parallelization options (n_jobs) where beneficial, using utilities like Parallel and delayed to scale across outputs or folds.
+
+---
+
+## Guidelines for implementing a new estimator
+
+1. Define __init__(...) with user-facing parameters only.
+   - Do not perform heavy computations here.
+   - Validate parameter types minimally here (e.g., using StrOptions, integral checks elsewhere).
+
+2. Implement fit(self, X, y, ...):
+   - Validate input shapes and types (use existing utilities where possible).
+   - Compute and store learned parameters with trailing underscores (e.g., coef_, fitted_).
+   - Return self to enable chaining.
+
+3. Implement predict(self, X):
+   - Produce predictions with the expected shape (n_samples, n_outputs) for multi-output.
+   - Use stored parameters from fit.
+
+4. Provide get_params and set_params via mixins/BaseEstimator:
+   - Leverage defaults and ensure parameters can be tuned by users after construction.
+
+5. Document the estimator well:
+   - Docstring for the class and each parameter.
+   - Examples section illustrating typical usage.
+
+6. Add tests:
+   - Basic correctness tests (shape, deterministic outputs, type checks).
+   - Check estimator compatibility with check_estimator or estimator_checks.
+   - Tests for multi-output behavior if applicable.
+
+7. Consider multi-output strategies:
+   - If your estimator inherently handles multi-output (y with many columns), implement directly.
+   - If you want to wrap a single-target estimator, implement a clear Per-Output wrapper with per-output clones.
+
+8. Align with dependency, CI, and packaging:
+   - Ensure minimum dependency requirements are documented and reflect in CI.
+   - If using optional features (docs, tests, benchmarks), annotate accordingly.
+
+---
+
+## Examples
+
+Below are two minimal, self-contained examples that illustrate the patterns described above. They are simplified to focus on API and multi-output handling rather than performance or feature richness.
+
+### Example 1: ConstantRegressor (simple, multi-output)
+
+This estimator predicts a constant value for each target dimension. The constant is learned as the mean of y during fit, and predicted for all samples otherwise.
+
+```python
+from sklearn.base import BaseEstimator, RegressorMixin
+import numpy as np
+
+class ConstantRegressor(BaseEstimator, RegressorMixin):
+    """
+    A simple regressor that always predicts a constant value per output.
+    The constant is learned as the mean of y during fit (multi-output supported).
+    """
+
+    def __init__(self, constant=None):
+        """
+        Parameters
+        ----------
+        constant : array-like of shape (n_outputs,), optional
+            If provided, this constant will be used for all predictions.
+            If None, the mean of y is used during fit.
+        """
+        self.constant = constant
+
+    def fit(self, X, y):
+        X = np.asarray(X)
+        y = np.asarray(y)
+
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+
+        if self.constant is None:
+            self.constant_ = y.mean(axis=0)
+        else:
+            self.constant_ = np.asarray(self.constant)
+            if self.constant_.ndim == 0:
+                self.constant_ = self.constant_.reshape(1)
+            if self.constant_.shape[0] != y.shape[1]:
+                raise ValueError("constant has incompatible shape with y")
+
+        return self
+
+    def predict(self, X):
+        X = np.asarray(X)
+        n_samples = X.shape[0]
+
+        value = np.atleast_1d(self.constant_)
+        # Ensure shape is (n_outputs,)
+        if value.ndim == 0:
+            value = value.reshape(1)
+
+        # Broadcast to (n_samples, n_outputs)
+        return np.tile(value.reshape(1, -1), (n_samples, 1))
+```
+
+Usage:
+```python
+from sklearn.datasets import make_regression
+
+X, y = make_regression(n_samples=100, n_features=4, n_targets=3, random_state=0)
+est = ConstantRegressor()
+est.fit(X, y)
+pred = est.predict(X)  # shape (100, 3)
+```
+
+Notes:
+- Works with any number of outputs (n_targets >= 1).
+- Demonstrates __init__ parameter handling, fit-side attribute creation (constant_), and predict shape logic.
+
+---
+
+### Example 2: PerOutputEstimator (simple multi-output meta-estimator)
+
+This meta-estimator wraps a base estimator and trains a separate clone per target dimension. It uses clone to create independent sub-estimators for each output.
+
+```python
+from sklearn.base import BaseEstimator, RegressorMixin, clone
+import numpy as np
+
+class PerOutputEstimator(BaseEstimator, RegressorMixin):
+    """
+    Meta-estimator: fits a separate clone of the base estimator for each output
+    dimension of y (multi-output regression).
+    """
+
+    def __init__(self, estimator, *, n_jobs=None):
+        """
+        Parameters
+        ----------
+        estimator : estimator instance
+            Base estimator to clone for each output.
+        n_jobs : int or None
+            Number of parallel jobs to run for fitting each output. Not
+            utilized in this minimal example, but reserved for future parallelization.
+        """
+        self.estimator = estimator
+        self.n_jobs = n_jobs
+
+    def fit(self, X, y):
+        X = np.asarray(X)
+        y = np.asarray(y)
+
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+
+        self.estimators_ = []
+        for i in range(y.shape[1]):
+            est = clone(self.estimator)
+            est.fit(X, y[:, i])
+            self.estimators_.append(est)
+
+        return self
+
+    def predict(self, X):
+        X = np.asarray(X)
+        preds = [est.predict(X) for est in self.estimators_]
+        return np.column_stack(preds)
+```
+
+Usage:
+```python
+from sklearn.linear_model import LinearRegression
+
+X, y = make_regression(n_samples=100, n_features=4, n_targets=3, random_state=0)
+base = LinearRegression()
+meta = PerOutputEstimator(estimator=base)
+
+meta.fit(X, y)
+preds = meta.predict(X)  # shape (100, 3)
+```
+
+Notes:
+- Demonstrates a simple multi-output meta-estimator pattern.
+- Keeps parameter handling straightforward; uses clone for clean sub-estimator instances.
+- In real-world usage, you might add n_jobs support with Parallel/Delayed for per-output fitting.
+
+---
+
+## Testing and validation
+
+- Use standard sklearn tests to validate behavior, shapes, and invariants.
+- Use check_estimator or estimator_checks utilities to validate compatibility with scikit-learn’s ecosystem.
+- Verify:
+  - Parameter propagation via get_params/set_params.
+  - Correct handling of 1D vs 2D y in multi-output scenarios.
+  - Correct creation and naming of underscore attributes after fit.
+  - Proper error handling for invalid parameter shapes or types.
+
+Example test scaffold (conceptual):
+- Test that ConstantRegressor.predict returns shape (n_samples, n_outputs).
+- Test that PerOutputEstimator with a simple base estimator yields consistent shapes and fits without errors.
+- Use synthetic datasets with known outputs to assert basic numerical properties.
+
+---
+
+## Documentation and maintainability
+
+- Document every estimator class with a clear docstring, describing:
+  - Purpose and intended use case.
+  - Parameters, their types, default values, and semantics.
+  - Attributes created during fit (ending with underscore).
+  - Example usage and typical workflows.
+- Provide at least one usage example in docstrings and in developer docs.
+- Keep API surface minimal and stable; prefer explicit parameter validation over implicit behavior.
+- If you introduce advanced features (partial_fit, memory-mapped data, custom validation), document their constraints and intended usage thoroughly.
+
+---
+
+## Dependency and CI considerations
+
+- Align estimator dependencies with the project’s minimum versions. The development guide in the repository shows a mechanism to specify minimum versions per dependency (e.g., in a script that maps packages to minimum versions for CI).
+- Ensure tests cover environments with the minimum supported dependencies.
+- Use CI to validate:
+  - Fitting with small synthetic datasets.
+  - Serialization/deserialization (pickling) of estimators.
+  - Parametric searches and grid searches where applicable.
+
+Example snippet (from dependency tooling concept):
+- Define dependent_packages with (min_version, tags) for numpy, scipy, etc.
+- Use tag_to_packages to map tags to specific package requirements for CI channels (build/install/tests/docs/maintenance).
+
+---
+
+## Practical tips for maintainers
+
+- Prefer a clear separation between parameter handling (__init__) and learning logic (fit).
+- Use clone for sub-estimators to avoid shared state across outputs or folds.
+- Name underscore attributes clearly (e.g., coef_, intercept_, estimators_) and document them.
+- When wrapping a base estimator, ensure a reasonable default behavior if input data is unusual (e.g., missing values, 0 samples).
+- Consider adding a lightweight example to your estimator’s documentation to demonstrate end-to-end usage.
+
+---
+
+If you’d like, I can tailor these examples to match your project’s coding standards or integrate with your repository’s existing helper utilities (e.g., _fit_estimator, _partial_fit_estimator, available_if).

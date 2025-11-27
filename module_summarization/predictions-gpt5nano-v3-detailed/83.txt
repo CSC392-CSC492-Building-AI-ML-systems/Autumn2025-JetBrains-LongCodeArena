@@ -1,0 +1,143 @@
+Cockroach Engine (cockroach_engine.rst)
+======================================
+
+Overview
+--------
+
+This module provides the CockroachEngine, an extension of the PostgresEngine tailored for CockroachDB. It preserves the core Postgres-compatible behavior while enabling CockroachDB-specific functionality where available. It also gracefully handles cases where cluster-level permissions are not granted.
+
+Key concepts
+------------
+
+- CockroachEngine: A specialized engine type that inherits from PostgresEngine and adds CockroachDB-specific preparation logic.
+- Engine type: "cockroach"
+- Optional pre-configuration: Attempts to enable CockroachDB cluster behavior for altering column types via a cluster setting.
+- Graceful degradation: If the database user lacks permission to set cluster options, a warning is issued without failing initialization.
+
+Class and relationships
+-----------------------
+
+Class: CockroachEngine
+
+- Inherits from: PostgresEngine
+- Purpose: Provide a CockroachDB-compatible engine by extending the Postgres engine with minimal Cockroach-specific setup.
+
+Attributes
+----------
+
+- engine_type: "cockroach"
+- min_version_number: 0
+  - Note: CockroachDB versioning is not used for this engine; set to 0 to reflect that limitation.
+
+Constructor
+-----------
+
+def __init__(
+    self,
+    config: t.Dict[str, t.Any],
+    extensions: t.Sequence[str] = (),
+    log_queries: bool = False,
+    log_responses: bool = False,
+    extra_nodes: t.Dict[str, "CockroachEngine"] = None,
+) -> None
+
+- config: Connection/configuration dictionary for the database.
+- extensions: Optional list of extensions to enable.
+- log_queries: If True, log executed queries.
+- log_responses: If True, log responses from the database.
+- extra_nodes: Optional mapping for additional CockroachEngine instances (useful for multi-node setups).
+- Behavior: Delegates to the base PostgresEngine constructor to initialize common behavior.
+
+Methods
+-------
+
+prep_database
+=============
+
+async def prep_database(self)
+
+- Purpose: Attempt to enable CockroachDB-specific behavior by setting a cluster option that allows experimental alter column types.
+- Implementation details:
+  - Executes the following statement on a new connection:
+    SET CLUSTER SETTING sql.defaults.experimental_alter_column_type.enabled = true;
+  - If the current user does not have sufficient privileges, catches asyncpg.exceptions.InsufficientPrivilegeError and emits a colored warning:
+    "=> Unable to set up Cockroach DB functionality may not behave as expected. Make sure your database user has permission to set cluster options."
+- Return: None
+- Notes:
+  - The cluster setting is a CockroachDB feature flag; not all users or deployments will have permission to modify cluster settings.
+  - The warning is issued with a medium log level and does not raise an exception.
+
+Usage examples
+--------------
+
+Basic usage
+-----------
+
+A minimal example shows how to initialize the engine and prepare the database:
+
+.. code-block:: python
+
+    from cockroach_engine import CockroachEngine
+
+    config = {
+        "database": "defaultdb",
+        "user": "root",
+        "password": "",
+        "host": "localhost",
+        "port": 26257,
+    }
+
+    engine = CockroachEngine(config=config, log_queries=True)
+
+    # Async context required for prep_database
+    import asyncio
+
+    async def main():
+        await engine.prep_database()
+
+    asyncio.run(main())
+
+Advanced usage with multiple nodes
+----------------------------------
+
+If you are using a multi-node CockroachDB cluster, you can provide additional nodes via extra_nodes:
+
+.. code-block:: python
+
+    from cockroach_engine import CockroachEngine
+
+    base_config = {
+        "database": "defaultdb",
+        "user": "root",
+        "password": "",
+        "host": "localhost",
+        "port": 26257,
+    }
+
+    extra = {
+        "node-1": CockroachEngine(config=base_config, log_queries=False),
+        "node-2": CockroachEngine(config=base_config, log_queries=False),
+    }
+
+    engine = CockroachEngine(config=base_config, extra_nodes=extra, log_queries=True)
+
+    import asyncio
+
+    async def main():
+        await engine.prep_database()
+
+    asyncio.run(main())
+
+Important considerations and edge cases
+--------------------------------------
+
+- Privilege dependency: If the database user lacks permission to set cluster options, prep_database will emit a colored warning and proceed without failing the initialization.
+- Versioning: min_version_number is set to 0 since CockroachDB versioning is not used by this engine.
+- Dependency availability: asyncpg is lazily loaded via LazyLoader. Ensure asyncpg is installed when connecting to the database and invoking methods that rely on it (e.g., prep_database).
+- Schema changes: The prepared behavior relies on CockroachDB’s cluster settings; behavior may vary across CockroachDB versions or deployment configurations.
+- Extra nodes: extra_nodes allows associating additional CockroachEngine instances for a multi-node setup; this is optional and not required for single-node deployments.
+
+See also
+--------
+
+- PostgresEngine: The CockroachEngine extends the standard PostgresEngine to reuse common database interaction logic. See the PostgresEngine documentation for details on interfaces and behavior.

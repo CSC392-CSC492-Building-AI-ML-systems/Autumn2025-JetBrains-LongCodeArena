@@ -1,0 +1,182 @@
+Convolution module: Built-in kernels (kernels.rst)
+===================================================
+
+Overview
+--------
+This section documents the built-in kernel shapes supplied to the Convolution module
+in the Convolution subpackage. Kernels are central to performing fast, accurate
+convolutions on N-dimensional data. They are represented by Kernel, Kernel1D, and
+Kernel2D objects and are consumed by the Convolution class (and related helpers)
+to carry out the actual convolution operations.
+
+Key concepts
+- Kernel, Kernel1D, Kernel2D
+  - Encapsulate a tabulated kernel (weights) that defines the impulse response used by
+    the convolution. The data are stored as NumPy arrays and are interpreted with a
+    center/origin aligned to the kernel’s center.
+  - Kernel1D represents a one-dimensional kernel; Kernel2D represents a two-dimensional
+    kernel. They are designed to be centered to a well-defined origin, which is essential
+    for proper alignment during convolution.
+- Normalization
+  - Kernels can be normalized to ensure that a unit impulse produces a unit response
+    (sum of weights equals 1) or other normalization schemes. The codebase uses MAX_NORMALIZATION
+    and related helpers to manage normalization consistently.
+- Validation and axis parity
+  - The kernel construction enforces certain parity (odd-sized axes) to guarantee a well-defined
+    center. Helpers such as has_even_axis and raise_even_kernel_exception guard against
+    invalid, non-centered kernels. See the API notes for specifics.
+- Performance hints
+  - The module includes logic to choose FFT-friendly padding lengths. The _next_fast_lengths
+    helper chooses optimal or near-optimal sizes for fast Fourier transforms, using SciPy
+    when available, and a curated list of “good” sizes otherwise.
+- Boundary handling
+  - Boundary behavior is configurable. The BOUNDARY_OPTIONS list documents supported
+    boundary modes, which control how data outside the input extent are treated during
+    convolution (e.g., padding with zeros, wrapping, or extending edge values).
+
+Internal helpers (brief)
+- _convolveNd_c
+  - The C-extension routine that performs the actual convolution for ND data, used for
+    performance-critical paths.
+- _copy_input_if_needed
+  - Prepares input data for convolution (e.g., handling quantity units, masks, and fill values).
+- _next_fast_lengths(shape)
+  - Computes padding lengths for FFT-based convolution to maximize performance.
+- KernelSizeError
+  - Raised when a requested kernel size is not supported by the built-in kernel set or
+    when a size is not suitable for efficient FFT-based convolution.
+- has_even_axis, raise_even_kernel_exception
+  - Helpers used to enforce parity requirements of kernel axes. If an axis has an even
+    length where odd-length is required, an exception is raised to prevent misalignment.
+
+What’s inside the built-in kernel family
+----------------------------------------
+The built-in kernels are provided as Kernel1D and Kernel2D instances, designed to be
+centered at the origin and ready for use with the Convolution engine. Common shapes
+include, but are not limited to:
+- Box (uniform) kernels
+- Gaussian-like kernels
+- Other symmetric, centered kernels suitable for point-spread-function
+  (PSF) approximations and simple smoothing
+
+Note: The exact named classes available may vary between releases. In your code base,
+you typically construct kernels via pre-defined helper kernels or by instantiating
+Kernel1D/Kernel2D with a NumPy array representing the kernel weights.
+
+Creating and using built-in kernels
+-----------------------------------
+The recommended approach is to use the provided kernel constructors (e.g., Gaussian or
+Box kernels) when available. If a custom kernel shape is required, you can wrap a
+NumPy array using Kernel1D or Kernel2D.
+
+Examples
+--------
+
+1) 1D Gaussian kernel (built-in helper)
+- This example uses a Gaussian kernel constructor to create a 1D kernel and runs a convolution.
+
+.. code-block:: python
+
+    from astropy.modeling.convolution import Gaussian1DKernel, Convolution
+
+    # Create a 1D Gaussian kernel with sigma = 2.0
+    g1d = Gaussian1DKernel(2.0)
+    conv1d = Convolution(g1d)
+
+    # Example input data (1D)
+    data = np.linspace(-5, 5, 100)
+
+    # Perform the convolution (default boundary handling)
+    result = conv1d(data)
+
+2) 2D Box kernel (built-in helper)
+- A simple, uniform 2D kernel used for smoothing or averaging.
+
+.. code-block:: python
+
+    from astropy.modeling.convolution import Box2DKernel, Convolution
+    import numpy as np
+
+    box2d = Box2DKernel(5)  # 5x5 uniform kernel
+    conv2d = Convolution(box2d)
+
+    # Example input 2D image
+    image = np.random.random((100, 100))
+
+    # Convolution
+    result = conv2d(image, boundary='extend')
+
+3) Custom kernel via Kernel1D/Kernel2D
+- Wrap a NumPy array defining the kernel weights.
+
+.. code-block:: python
+
+    from astropy.modeling.convolution import Kernel1D, Kernel2D, Convolution
+    import numpy as np
+
+    k1d = Kernel1D(np.array([1, 2, 1], dtype=float))
+    conv1d = Convolution(k1d)
+    data1d = np.array([0, 1, 2, 3, 4, 5], dtype=float)
+    out1d = conv1d(data1d)
+
+    k2d = Kernel2D(np.array([[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=float))
+    conv2d = Convolution(k2d)
+    image2d = np.random.random((64, 64))
+    out2d = conv2d(image2d)
+
+Boundary handling
+------------------
+- The Convolution machinery supports several boundary modes:
+  - None (default): no explicit boundary handling
+  - "fill": pad with fill_value
+  - "wrap": wrap around (periodic)
+  - "extend": extend the edge values
+- The boundary mode is chosen via the boundary argument to the Convolution interface (or
+  the constructor if supported). The BOUNDARY_OPTIONS list documents the accepted values.
+
+Performance considerations
+-------------------------
+- FFT-friendly padding
+  - For large kernels or large inputs, performance is strongly influenced by the padding
+    length used for FFT-based convolution. The _next_fast_lengths helper computes padding
+    lengths that are optimal for numpy.fft and scipy.fft backends when available.
+- Parity and normalization
+  - Kernels are expected to be centered. The internal parity checks (has_even_axis) prevent
+    mis-centered kernels and raise informative errors via raise_even_kernel_exception if violated.
+- Masked inputs and fill handling
+  - Inputs with masks or NaN/fill values are handled by _copy_input_if_needed to ensure that
+    convolution results are well-defined and reproducible.
+
+Extending and contributing
+--------------------------
+- Adding a new built-in kernel
+  - Implement a new Kernel1D/Kernel2D instance that represents the desired shape.
+  - Ensure the kernel is centered (odd axis lengths), or handle parity explicitly with
+    the provided parity utilities.
+  - Document the normalization expectations and boundary behavior.
+- Contributing to performance improvements
+  - If you add a new kernel type, consider how its symmetry and support affect FFT padding
+    and boundary handling. Where possible, leverage _next_fast_lengths to optimize FFT sizes.
+
+API reference (high level)
+- Kernel
+  - Base container for kernel data (ND) and its metadata (e.g., shape, origin, normalization).
+- Kernel1D
+  - 1D kernel wrapper around a 1D array of weights.
+- Kernel2D
+  - 2D kernel wrapper around a 2D array of weights.
+- Convolution
+  - The operator that applies a given kernel to input data, with options for boundary
+    handling, nan-treatments, and dtype/shape control.
+
+Notes
+-----
+- This documentation refers to internal helpers such as _convolveNd_c, _copy_input_if_needed,
+  _next_fast_lengths, KernelSizeError, has_even_axis, and raise_even_kernel_exception. These
+  utilities support correctness, performance, and robust error reporting in the built-in
+  kernel path.
+- For exact API surface and the latest built-in kernel shapes, refer to the module’s
+  public API in your current Astropy version, as the set and naming of built-in kernels can
+  evolve between releases.
+
+End of kernels.rst

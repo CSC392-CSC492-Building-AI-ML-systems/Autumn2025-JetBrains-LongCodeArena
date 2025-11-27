@@ -1,0 +1,164 @@
+# Sans to Sesans Conversion (SANS to SESANS)
+
+This documentation describes the purpose, theory, data flow, and practical usage for converting SANS data (I(q)) to SESANS data (P(z)) and, when desired, performing the inverse transformation. It is intended for developers contributing to or using the sans_to_sesans.rst interface within SASModels.
+
+## Overview
+
+- SANS provides the scattering intensity I(q) as a function of momentum transfer q.
+- SESANS measures neutron spin-echo polarization P(z) as a function of the spin-echo length z, which encodes real-space correlations in the sample.
+- Under common isotropic-sample assumptions, P(z) is (up to normalization) the cosine transform of I(q). Equivalently, the SESANS correlation function G(z) is proportional to the Fourier-cosine transform of I(q).
+- The typical relationship (normalized) is:
+  - P(z) ∝ ∫ I(q) cos(q z) dq
+  - G(z) ∝ ∫ I(q) cos(q z) dq
+  - Normalization is often chosen so that P(0) or G(0) equals an appropriate reference value (e.g., total scattering power).
+
+This module focuses on practical, implementable transforms, normalization, and data handling, with attention to finite q-range, resolution, and noise.
+
+## Theory and Formulation
+
+- I(q): SANS intensity as a function of magnitude q.
+- P(z): SESANS polarization as a function of spin-echo length z.
+- G(z): SESANS/SLD autocorrelation along the beam axis (line-of-sight) up to normalization.
+
+Key practical relationship (assuming isotropy and single-scattering, with appropriate normalization):
+- P(z) = P0 × [ ∫_{q_min}^{q_max} I(q) cos(q z) dq ] / [ ∫_{q_min}^{q_max} I(q) dq ]
+- G(z) ∝ ∫ I(q) cos(q z) dq
+- The choice of normalization depends on the available reference (e.g., P(0) or G(0)) and on instrument conventions.
+
+Notes:
+- Finite q-range (q_min to q_max) and instrumental resolution affect the retrieved P(z) and G(z). Proper normalization and zero-padding help mitigate truncation artefacts.
+- For real samples, additional factors such as multiple scattering, background, and incoherent scattering should be considered.
+
+## Data Flow and Usage
+
+- Input: SANS data I(q) on a q-grid. Optional: background-subtracted I(q), or raw data with background model.
+- Output: SESANS data P(z) on a z-grid (and optionally the unnormalized transform G(z)).
+- Inverse option: If you have SESANS P(z) and want to estimate I(q), perform the inverse transform (with caution, due to loss of information and potential artefacts from finite sampling).
+
+Recommended workflow:
+1. Preprocess I(q):
+   - Subtract background.
+   - Normalize to a reference (e.g., total scattering power if known) or to I(0) if available.
+2. Choose z-grid:
+   - z_max roughly scales with the reciprocal of the q-range. More precisely, z_max is limited by the available q-range and resolution.
+   - Define a set of z-values where you want P(z).
+3. Compute P(z) via cosine transform:
+   - P(z) = ∑ I(q_i) cos(q_i z) Δq, for each z, optionally divided by ∑ I(q_i) Δq for normalization.
+4. Post-process:
+   - Normalize P(z) to P(0) if required by your analysis.
+   - Estimate uncertainties via propagation of I(q) uncertainties if provided.
+5. Visualization and validation:
+   - Compare the forward-transformed P(z) with experimental SESANS data.
+   - If inverse-transforming, apply regularization or smoothing to stabilize the result.
+
+## Practical Implementation Notes
+
+- Transform method:
+  - If q-grid is evenly spaced, a fast cosine transform (FCT) or FFT-based approach with zero-padding can speed the computation.
+  - If q-grid is irregular, use numerical quadrature (e.g., trapezoidal rule) for each z.
+- Normalization:
+  - Normalize by the integral of I(q) over the q-range to obtain a dimensionless P(z).
+  - If an absolute scale is required, preserve the total scattering power rather than naively normalizing to unity.
+- Units:
+  - q is typically in Å⁻¹; z is in Å or nm, consistent with the experimental setup.
+  - Be consistent across I(q) and z when performing transforms.
+- Artifacts and limitations:
+  - Finite q-range leads to smearing and truncation artefacts in P(z).
+  - Instrumental resolution broadens features in both I(q) and P(z).
+  - Background, incoherent scattering, and multiple scattering can bias the transform; handle as part of data preprocessing.
+- Inverse transforms:
+  - Inverse transformation (recovering I(q) from P(z)) is ill-posed without regularization. Use smoothing, prior information, or model-based fitting to stabilize.
+
+## Example: Gaussian I(q) → SESANS P(z)
+
+- Suppose I(q) = I0 * exp(- (q σ)^2 / 2 ), a simple Gaussian.
+- The cosine transform yields G(z) ∝ exp(- z^2 / (2 σ^2)).
+- The resulting P(z), after normalization, will be a Gaussian-shaped polarization curve with width determined by σ.
+- This provides an intuition: narrow features in q-space map to broad features in z-space and vice versa.
+
+Python-like pseudocode (illustrative):
+
+- Given q = array of q-values, I = array of I(q)-values, and z = array of desired z-values:
+
+  import numpy as np
+  
+  def sans_to_sesans(q, I, z, normalize=True):
+      q = np.asarray(q)
+      I = np.asarray(I)
+      z = np.asarray(z)
+      # Basic normalization
+      I0 = np.trapz(I, q)
+      if I0 == 0:
+          raise ValueError("I(q) has zero integral; cannot normalize.")
+      # Compute P(z) via cosine transform
+      P = np.zeros_like(z, dtype=float)
+      for i, zz in enumerate(z):
+          P[i] = np.trapz(I * np.cos(q * zz), q)
+      if normalize:
+          P = P / I0
+      return P
+
+- Example usage:
+
+  q = np.linspace(0.001, 0.5, 500)  # Å⁻¹
+  I = np.exp(- (q * 0.3)**2 / 2)    # arbitrary Gaussian
+  z = np.linspace(0, 600, 200)      # Å
+  P = sans_to_sesans(q, I, z, normalize=True)
+  # P now represents the normalized SESANS polarization as a function of z
+
+- If you want to plot:
+  import matplotlib.pyplot as plt
+  plt.plot(z, P)
+  plt.xlabel('z (Å)')
+  plt.ylabel('P(z)')
+  plt.title('SESANS polarization from Gaussian I(q)')
+
+Note: For performance with large datasets or uniform q-grids, consider FFT-based cosine transforms (with proper zero-padding and sampling) to accelerate the computation.
+
+## CLI and API Considerations
+
+If sans_to_sesans is exposed as a CLI tool or module, typical flags might include:
+
+- Input I(q) file path
+- Output P(z) file path
+- z-range specification (z_min, z_max, n_z)
+- Normalization option (e.g., normalize to P(0))
+- Optional: background subtraction, q-range masking, or resolution broadening
+
+API sketch (Python):
+
+- sans_to_sesans.compute_pz(q, I, z=None, normalize=True) -> P(z)
+- sans_to_sesans.inverse_transform(P, q_grid, z_grid) -> I(q) (requires regularization)
+
+Common pitfalls:
+- Using mismatched q and I units between input and transform.
+- Forgetting to normalize, which can bias P(z) amplitudes.
+- Ignoring finite q-range artefacts, which can distort features in z-space.
+
+## Example Workflow with Realistic Data
+
+1. Load SANS data: read q and I(q) from a data file (e.g., a two-column text file or a standard data format).
+2. Preprocess:
+   - Subtract background if provided.
+   - Apply a rough calibration to set the scale (if necessary).
+3. Choose z-grid:
+   - Example: z from 0 to zmax, where zmax ≈ π / (q_max - q_min) or simply a domain chosen by the experimental z-range.
+4. Compute P(z):
+   - Use the cosine transform as described above.
+5. Validate:
+   - If SESANS data on P(z) is available, compare against the computed P(z).
+   - Assess sensitivity to q-range and noise via simple tests (e.g., add synthetic noise to I(q) and observe P(z) stability).
+
+## Documentation Scope and Extensibility
+
+- This sans_to_sesans.rst focuses on the forward SANS-to-SESANS transform and basic normalization.
+- The inverse transform, regularization strategies, and more advanced kernels (e.g., including resolution kernels, 3D anisotropy, or non-isotropic samples) can be added in future extensions.
+- If your data includes instrument resolution functions, consider incorporating a convolution of I(q) with the resolution in the transform to produce more realistic P(z).
+
+## References and Further Reading
+
+- SESANS theory and the SANS-to-SESANS transformation concepts (autocorrelation interpretation, normalization conventions, and practical considerations).
+- Instrument-specific papers detailing how resolution and background affect P(z) and G(z).
+- General references on Fourier transforms in scattering, including how finite data range affects inverse transformations.
+
+This documentation provides a practical foundation for implementing and using SANS-to-SESANS conversion in sans_to_sesans.rst. It emphasizes the core forward transform, normalization, and data-handling considerations essential for developers working with sasmodels-based tooling.

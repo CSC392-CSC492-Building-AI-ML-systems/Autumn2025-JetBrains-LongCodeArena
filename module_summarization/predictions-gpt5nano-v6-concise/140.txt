@@ -1,0 +1,155 @@
+Short overview of Dask best practices
+======================================
+
+This note provides a concise, developer-focused overview of practical Dask best practices for working with dask.dataframe, dask.array, and related APIs. It highlights common patterns, explains why they matter, and shows minimal, reproducible examples.
+
+Key principles
+--------------
+- Laziness and composition
+  - Build end-to-end pipelines with lazy operations. Defer computation until you truly need results.
+  - Break complex work into per-partition steps using map_partitions or apply, then combine results with high-level ops like concat/reduce.
+
+- Partitioning and data shape
+  - Dask operates on partitions. Favor sensible partition sizes (not too many tiny partitions, not a single giant one) to balance parallelism and scheduling overhead.
+  - When possible, align partitioning with the operation (e.g., per-partition joins, groupbys, or transforms).
+
+- Meta information
+  - Dask operations often infer output dtypes from a sample of data (meta). If inference is expensive or ambiguous, provide a meta skeleton explicitly to avoid repeated planning work.
+
+- Data types and categoricals
+  - Keep dtypes consistent across partitions. Mismatched dtypes or categoricals can cause errors or costly re-partitioning.
+  - When combining categoricals from multiple partitions, ensure a consistent category universe (use utilities like union_categoricals when needed).
+
+- IO and memory
+  - Be mindful of memory: read in chunks, limit in-memory footprint, and use blocksize for reads where available.
+  - Use persist() to cache expensive intermediate results if you reuse them in multiple steps.
+
+- Performance patterns
+  - Prefer vectorized operations and per-partition processing (map_partitions) over Python loops across partitions.
+  - Use small, targeted metadata (meta) to accelerate planning and avoid unnecessary type inference.
+
+Practical patterns with examples
+---------------------------------
+
+1) Concatenation and edge-case handling
+- When concatenating multiple DataFrames/Series, use dd.concat with options tuned for common edge-cases (empty partitions, categoricals, and identical schemas).
+
+Code example:
+.. code-block:: python
+
+    import pandas as pd
+    import dask.dataframe as dd
+
+    df1 = dd.from_pandas(pd.DataFrame({"A": [1, 2]}), npartitions=1)
+    df2 = dd.from_pandas(pd.DataFrame({"A": [3, 4]}), npartitions=1)
+
+    # If all inputs share the same columns and dtypes, you can hint this
+    res = dd.concat([df1, df2], axis=0, uniform=True)
+
+2) Using meta to speed up map_partitions
+- When applying custom per-partition functions, provide a meta skeleton to avoid expensive inference and improve startup performance.
+
+Code example:
+.. code-block:: python
+
+    import pandas as pd
+    import dask.dataframe as dd
+
+    def add_power(pdf, power=2):
+        pdf = pdf.copy()
+        pdf["A2"] = pdf["A"] ** power
+        return pdf
+
+    ddf = dd.from_pandas(pd.DataFrame({"A": [1, 2, 3]}), npartitions=2)
+
+    # Meta skeleton: define the expected output schema
+    meta = pd.DataFrame({"A": pd.Series(dtype="int64"), "A2": pd.Series(dtype="int64")})
+
+    res = ddf.map_partitions(add_power, power=2, meta=meta)
+
+3) Managing categoricals across partitions
+- If you work with categoricals that originate from different sources or partitions, ensure a consistent category universe. Use union-like approaches to align categories when needed.
+
+Code example (conceptual, depending on your exact data and needs):
+.. code-block:: python
+
+    import pandas as pd
+    import dask.dataframe as dd
+    from dask.dataframe import union_categoricals
+
+    # Example: align categories across two inputs before a join/concat
+    s1 = pd.Series(pd.Categorical(['a', 'b'], categories=['a', 'b']))
+    s2 = pd.Series(pd.Categorical(['b', 'c'], categories=['a', 'b', 'c']))
+
+    # Align categories (resulting union of categories)
+    aligned_categories = union_categoricals([s1.cat, s2.cat], sort_categories=True)
+
+    # You would typically apply this alignment inside a per-partition function
+    # or during a preprocessing step before a join/concat.
+
+4) Per-partition transforms with small, explicit meta
+- For typical per-partition transforms (e.g., feature engineering), define a small meta and rely on per-partition operations instead of row-wise Python loops.
+
+Code example:
+.. code-block:: python
+
+    import pandas as pd
+    import dask.dataframe as dd
+
+    def normalize(pdf, cols=None):
+        if cols is None:
+            cols = pdf.columns
+        pdf = pdf.copy()
+        for c in cols:
+            pdf[c] = (pdf[c] - pdf[c].mean()) / pdf[c].std()
+        return pdf
+
+    ddf = dd.from_pandas(pd.DataFrame({"A": [1, 2, 3], "B": [4, 5, 6]}), npartitions=2)
+
+    # Simple meta: both A and B are float64 after normalization
+    meta = pd.DataFrame({"A": pd.Series(dtype="float64"), "B": pd.Series(dtype="float64")})
+
+    res = ddf.map_partitions(normalize, cols=["A", "B"], meta=meta)
+
+5) IO and memory-conscious reads
+- When reading large datasets, control partition size through blocksize (where supported) or rely on Dask’s default partitioning. This helps balance memory use and parallelism.
+
+Code example:
+.. code-block:: python
+
+    import dask.dataframe as dd
+
+    # Read multiple CSVs with controlled partitioning
+    ddf = dd.read_csv("data-*.csv", blocksize="64MB")
+
+6) Compute strategies: compute vs persist
+- Use persist() to keep intermediate results in memory for reuse in subsequent computations.
+- Use compute() only when you need the final result.
+
+Code example:
+.. code-block:: python
+
+    final = res.persist()  # keeps in memory for reuse
+    # … later …
+    out = final.compute()  # materialize the result
+
+Advanced notes
+--------------
+
+- The Dispatch-based API pattern
+  - The code uses a dispatch mechanism (Dispatch objects) to select implementations for different input types (e.g., different backends or data structures). This enables clean extension for new data types or backends without changing call sites.
+  - When implementing custom behavior, register a dispatcher function for your type, and use the corresponding dispatch point (for example, in concat, is_categorical_dtype, union_categoricals, etc.).
+
+- Handling unknown backends
+  - If you add a new data-like backend, provide a registered implementation for key operations (concat, meta handling, etc.) to integrate smoothly with existing Dask workflows.
+
+- Testing and meta correctness
+  - Provide representative meta data for new operations to ensure correct planning and to avoid surprises in large-scale runs.
+
+References to the code
+----------------------
+- Dispatch-based helpers: make_meta_dispatch, meta_nonempty, union_categoricals_dispatch, etc.
+- Core patterns: concat, is_categorical_dtype, categorical_dtype, make_meta, union_categoricals.
+- Primary usage patterns: per-partition transforms via map_partitions, cautious meta handling, robust concatenation.
+
+If you need a shorter or more detailed version, or want examples tied to a concrete dataset, I can tailor the sections accordingly.

@@ -1,0 +1,117 @@
+How Mitogen Works
+==================
+
+Overview
+--------
+
+Mitogen enables efficient remote execution and orchestration by embedding a lightweight bootstrap implementation into each slave context and communicating through a small, typed message protocol. A central broker/router mediates communication between a master (or parent) process and one or more slave contexts, routing requests, results, and control messages as needed. A bootstrap module is sent to each new slave to establish the user-space runtime and wiring for subsequent messages.
+
+Core Concepts
+-------------
+
+- Master/Slave model: A controlling process (master) talks to remote contexts (slaves) via channels established by a broker/router. Communication is driven by small, typed messages.
+- Message-based protocol: All operations are expressed as messages with explicit types. The code defines a compact set of message type identifiers (integers) that drive the protocol.
+- Routing table: The broker maintains routes between endpoints. Routes can be added or removed to control how messages are delivered to their destinations.
+- IDs and modules: Remote actions are performed against remote objects identified by IDs allocated by the broker. Modules can be loaded or forwarded to remote contexts as needed.
+- Bootstrap: The same bootstrap implementation is sent to every new slave context to initialize communication and provide the minimal runtime required for further messaging.
+
+Key Message Types (protocol)
+--------------------------------
+
+The following message types are defined and used by the broker/router to drive remote operations:
+
+- GET_MODULE (100): Retrieve a module’s information or code from the remote side.
+- CALL_FUNCTION (101): Invoke a function on the remote side, identified by an assigned ID.
+- FORWARD_LOG (102): Forward log messages from the remote side back to the master.
+- ADD_ROUTE (103): Add a routing entry mapping a destination to a channel.
+- DEL_ROUTE (104): Remove a routing entry.
+- ALLOCATE_ID (105): Allocate a new remote-side identifier for a module, object, or operation.
+- SHUTDOWN (106): Gracefully shut down a remote context.
+- LOAD_MODULE (107): Load a Python module into the remote context.
+- FORWARD_MODULE (108): Forward module code or metadata to the remote context to enable execution.
+- DETACHING (109): Notify that a context or route is detaching (cleanup signal).
+- CALL_SERVICE (110): Invoke a service-like call on the remote side (a specialized form of CALL_FUNCTION).
+- STUB_CALL_SERVICE (111): A stub/pub-sub variant for service calls.
+
+Special sentinel: IS_DEAD
+-------------------------
+
+IS_DEAD (value 999) is used in reply fields to indicate the sender can no longer route or process a message. It signals disconnection or an inability to reach a destination and typically triggers cleanup logic in the router or related handlers.
+
+Data Encoding and I/O
+---------------------
+
+- LATIN1_CODEC: The module uses a Latin-1 codec reference for efficient, byte-safe encoding/decoding when transferring data that should remain 8-bit clean.
+- Pickle-based serialization: Serialization on the wire is performed with Python’s pickle (via py_pickle / pickle aliases), enabling complex Python objects to be transmitted between master and slave.
+- Buffering and IO sizing: A default I/O buffer size of 128 KiB is used for Side.read/Side.write operations and for buffers created by create_socketpair. This size reflects a balance between throughput and memory usage on typical systems.
+
+Bootstrap and Runtime
+----------------------
+
+- Bootstrap module: The core functionality of Mitogen is implemented in a bootstrap module that is sent to every new slave context. This bootstrap keeps the essential code small and fast to start, while the bulk of Mitogen’s features live in the surrounding package.
+- Self-contained bootstrap: The bootstrap implementation is designed to establish communication, load remote modules, and begin routing messages with minimal overhead.
+
+Performance and Configuration Considerations
+---------------------------------------------
+
+- The 128 KiB default buffer size is chosen as a practical compromise. Too small a buffer increases CPU usage due to more I/O iterations; too large a buffer can consume more RAM and increase per-message zeroing costs.
+- Kernel and platform differences (e.g., pipe buffer sizes, TTY limits) influence optimal buffer sizing; Mitogen provides a reasonable default but may be tuned for specific environments.
+- Compatibility shims: The code includes guards for Python 2 vs Python 3 (e.g., PY3, PY24 flags) to maintain broad compatibility. This impacts how objects are serialized/deserialized and how certain built-ins behave across versions.
+
+Lifecycle and Failure Modes
+----------------------------
+
+- Routing cleanup: When a message cannot be delivered or a remote context is torn down, IS_DEAD is used to signal the need to remove routes and clean up associated handlers.
+- Detach and teardown: DETACHING messages indicate a partner is detaching, prompting cleanup of local state and routes related to that partner.
+- Shutdown behavior: SHUTDOWN enables a graceful termination of a remote context and the associated IO and routing infrastructure.
+
+Practical Workflow (high level)
+-------------------------------
+
+1) Establish channels between master and slave contexts via a broker/router.
+2) Master allocates a new remote ID (ALLOCATE_ID) for a forthcoming operation or module.
+3) Master forwards or loads a module remotely (LOAD_MODULE / FORWARD_MODULE) to ensure the code is present on the slave.
+4) Master invokes remote functionality (CALL_FUNCTION) using the allocated ID.
+5) Remote side may emit log messages (FORWARD_LOG) back to the master.
+6) When work is complete or a context is no longer needed, master/shutdown signals (SHUTDOWN, DETACHING) are exchanged, and routes are cleaned up (DEL_ROUTE, etc.).
+7) If a destination becomes unreachable, IS_DEAD propagates to trigger cleanup.
+
+Illustrative example (concise sequence)
+---------------------------------------
+
+- Master allocates an ID for a function to run remotely: ALLOCATE_ID
+- Master loads the target module on the remote side: LOAD_MODULE
+- Master forwards module code if needed: FORWARD_MODULE
+- Master calls the function remotely: CALL_FUNCTION
+- Any logs flow back: FORWARD_LOG
+- Master closes the session or detaches: SHUTDOWN / DETACHING
+- Any broken route triggers IS_DEAD handling and route cleanup: IS_DEAD
+
+Reference to Implementation Details
+-----------------------------------
+
+- The protocol is driven by numeric constants (e.g., 100–111) representing message types.
+- The IS_DEAD sentinel (999) is used to indicate disconnection or routing failures.
+- The bootstrap module is intentionally lightweight to optimize startup of new slave contexts.
+- Serialization relies on Python’s pickle, with explicit aliases for compatibility.
+- The codebase includes careful handling of Python 2/3 differences to support diverse environments.
+
+Where this maps in the code
+---------------------------
+
+- Message type constants: GET_MODULE, CALL_FUNCTION, FORWARD_LOG, ADD_ROUTE, DEL_ROUTE, ALLOCATE_ID, SHUTDOWN, LOAD_MODULE, FORWARD_MODULE, DETACHING, CALL_SERVICE, STUB_CALL_SERVICE.
+- Sentinel: IS_DEAD = 999.
+- Latency-friendly encoding: LATIN1_CODEC.
+- Default IO buffer sizing note: 128KiB described in the module’s documentation block.
+- Bootstrap behavior: The module is described as the “bootstrap implementation sent to every new slave context.”
+- Serialization: py_pickle (alias for pickle) and BytesIO usage patterns.
+- Compatibility guards: PY24, PY3, and related type aliases (BytesType, UnicodeType, etc.).
+
+Notes for contributors
+-----------------------
+
+- When extending the protocol, add new message type constants in the same numeric range and document their semantics clearly.
+- Maintain the IS_DEAD semantics to ensure robust cleanup on disconnections.
+- Keep bootstrap lightweight and ensure any new features still work when the bootstrap is the only code present in the slave.
+
+This documentation covers how Mitogen works at a high level and explains the core concepts developers need to understand to work with the codebase effectively.

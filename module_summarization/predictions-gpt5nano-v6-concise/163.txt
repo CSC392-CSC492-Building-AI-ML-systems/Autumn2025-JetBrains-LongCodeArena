@@ -1,0 +1,144 @@
+Tensor Attributes
+=================
+
+Overview
+--------
+
+Tensor Attributes provide a compact, portable way to attach tensor metadata or literal tensor data to MLIR operations in dialects like OneFlow. They can represent constant tensors used as op attributes, shape/layout hints, or other tensor-centric metadata that should travel with the operation across passes and transformations.
+
+Key ideas
+- A Tensor Attribute encodes information about a tensor, including its element type, shape (static or dynamic), optional layout, and (when used as a literal) the tensor data.
+- They are used as op attributes to convey constant tensors, weights, biases, or shape/layout hints without materializing a full SSA value.
+- They integrate with existing MLIR attribute systems (element attributes, tensor types, and dialect-specific helpers).
+
+Conceptual model
+- Element type: the scalar dtype of the tensor (e.g., f32, i64).
+- Shape: a ranked, possibly partially dynamic shape. Dynamic dimensions are represented in a dialect-specific manner (e.g., -1/dyn or a dedicated dynamic marker).
+- Data payload (optional): a literal tensor embedded in the attribute, typically as a dense representation.
+- Layout (optional): hints about memory layout or channel/feature ordering, used by backends for optimization.
+- Reference vs. inline data: a Tensor Attribute can either inline data (a literal tensor) or reference a pre-declared symbol/tensor constant stored elsewhere.
+
+Structure and representation
+----------------------------
+
+- Array of fields commonly supported by Tensor Attributes:
+  - dtype/element type
+  - shape (with potential dynamic dimensions)
+  - optional strides or layout hints
+  - optional data payload for constant tensors
+
+- Textual representation (illustrative):
+  - A constant 2x3 f32 tensor payload:
+    tensor_attr<2x3xf32> { data = [ [1.0, 2.0, 3.0],
+                                    [4.0, 5.0, 6.0] ],
+                              layout = "row_major" }
+  - A shape-only hint (no data payload):
+    tensor_shape_attr<2x3xi64>
+
+Note: The exact textual form of a Tensor Attribute depends on the dialect and the MLIR lowering/printing utilities you are using. The important part is the semantic content (shape, dtype, optional data, and optional layout).
+
+Creating Tensor Attributes
+--------------------------
+
+- In MLIR C++ APIs (conceptual):
+  - For a constant tensor attribute:
+    - Create a tensor type: tensor<2x3xf32>
+    - Provide a data payload matching the type (dense elements)
+    - Construct a Tensor Attribute that pairs the type, data, and optional layout
+  - For a shape-only attribute (no data):
+    - Construct a tensor shape attribute describing the static/dynamic shape and element type
+
+- In MLIR textual form (illustrative):
+  - Constant tensor attribute:
+    tensor_attr<2x3xf32> { data = [ [1.0, 2.0, 3.0],
+                                   [4.0, 5.0, 6.0] ],
+                              layout = "row_major" }
+  - Shape hint only:
+    tensor_shape_attr<2x3xi64>
+
+Accessing Tensor Attributes
+---------------------------
+
+- From an op attribute, cast to the Tensor Attribute type and query:
+  - element type
+  - shape (and dynamic dimensions)
+  - whether a data payload exists
+  - the data payload (if present)
+  - layout hints
+
+- Typical usage patterns:
+  - Use as a constant source of weights in a kernel or fused operation
+  - Propagate shape/layout information to a lowering pass
+  - Validate that the attribute’s tensor type matches the operand/result types
+
+Examples
+--------
+
+1) Embedding a constant weight tensor as an op attribute
+
+- MLIR-like pseudocode:
+  def ConvolutionOp : op<...> {
+    operands: input, ...
+    attributes: { weights = tensor_attr<2x3xf32> { data = [[0.1, 0.2, 0.3],
+                                                           [0.4, 0.5, 0.6]] ,
+                                       layout = "row_major" } }
+  }
+
+- Purpose: The kernel can read the weights directly from the attribute without materializing a separate SSA value.
+
+2) Using a shape hint for a dynamically shaped tensor
+
+- MLIR-like pseudocode:
+  def SomeOp : op<...> {
+    operands: input
+    attributes: { shape_hint = tensor_shape_attr<2x3xi64> { dynamic_dims = [1, -1] } }
+  }
+
+- Purpose: Enable early shape propagation without embedding data.
+
+3) Optional: referencing an external tensor constant
+
+- MLIR-like pseudocode:
+  def SomeOp : op<...> {
+    operands: input
+    attributes: { weight_ref = symbol_ref @weight_tensor }  // references a declared tensor constant
+  }
+
+- Purpose: Keeps data in a central constant region while op attributes carry the reference.
+
+Validation and constraints
+--------------------------
+
+- The element type of the tensor attribute payload (if present) must be consistent with the declared tensor type.
+- Shapes must be valid for the given rank and compatible with the operands/results if the attribute is used for shape inference.
+- If dynamic dimensions are present, their positions and semantics must be clearly defined by the dialect (e.g., a placeholder like -1 or a dialect-specific dynamic marker).
+- Layout hints, if provided, must be recognized by the backend or lowering passes; they should not change the semantic meaning of the tensor unless explicitly supported.
+
+Migration and interoperability
+------------------------------
+
+- Tensor Attributes are often used as a replacement for embedding dense data as op attributes in places where a separate SSA value would be unnecessary or expensive to carry.
+- When migrating from DenseElementsAttr or plain arrays to Tensor Attributes:
+  - Move constant tensors from op operands/attributes into Tensor Attributes.
+  - Preserve dtype and shape; ensure dynamic dimensions remain correctly represented.
+  - If layout hints were previously absent, consider adding a layout attribute to enable backend optimizations.
+
+Best practices
+--------------
+
+- Prefer Tensor Attributes for small, frequently-reused constant tensors (weights, biases) to avoid creating extra SSA values.
+- Use shape hints when exact shapes are unknown at compile time but are instrumental for early optimization or verification.
+- Document any layout hints inside the Tensor Attribute to avoid ambiguity across backends.
+- Keep Tensor Attributes immutable after op creation to simplify reasoning in passes.
+
+See also
+--------
+
+- DenseElementsAttr and DenseIntElementsAttr for inline data representations
+- TensorType and related shape/dtype handling in MLIR
+- Generic attribute utilities for building and querying attributes in dialects
+
+Notes
+-----
+
+- The precise syntax and available fields for Tensor Attributes can be dialect-specific. Adapt the examples to your dialect’s conventions and the MLIR printer/parser you are using.

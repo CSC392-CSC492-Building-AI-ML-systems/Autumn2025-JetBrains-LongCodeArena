@@ -1,0 +1,239 @@
+w_red.rst
+=========
+
+Overview
+--------
+
+w_red implements RED (Rate Exponential Decomposition) corrections for rate constants
+derived from weighted ensemble (WESTPA) simulations. It provides a small API to
+construct RED corrections from kinetics data stored in HDF5 files and to apply
+these corrections to rate evolution estimates.
+
+Key concepts
+------------
+
+- DurationCorrector: Builds a histogram of event durations from kinetics data and
+  computes a normalization-corrected RED factor. It exposes:
+  - event_duration_histogram: f_tilde, the normalized histogram of event durations.
+  - cumulative_event_duration_histogram: the first integral of f_tilde with respect
+    to tau.
+  - correction(iters, freqs=None): returns a correction factor for a given set of
+    iterations and optional frequency weights.
+- get_raw_rates: fetches the raw (uncorrected) rate constants from the kinetic data.
+- calc_avg_rate: computes either the raw or RED-corrected mean rate for a given
+  state pair, with optional callbacks to access the correction factor.
+- calc_rates: (utility) computes raw and RED-corrected rate constants across
+  iterations (faster than repeated calls to calc_avg_rate).
+
+API
+
+DurationCorrector
+-----------------
+
+Purpose
+- Encapsulates the duration-based RED correction calculation using kinetics data.
+
+Static constructors
+- from_kinetics_file(directh5, istate, fstate, dtau, n_iters=None)
+
+  Creates a DurationCorrector from a kinetics file or an open H5File-like object.
+
+  Parameters
+  - directh5: path to an HDF5 file or an opened H5File containing a dataset named
+    'durations' with fields 'istate', 'fstate', 'weight', and 'duration'.
+  - istate: initial state index to filter durations.
+  - fstate: final state index to filter durations.
+  - dtau: duration bin width; if None, dtau is inferred from the duration grid.
+  - n_iters: number of iterations to consider (slice for 'durations').
+
+  Behavior
+  - Filters durations by istate, fstate, and positive weights.
+  - Masks off irrelevant flux by zeroing weights for non-matching entries.
+  - Returns a DurationCorrector initialized with the filtered durations and
+    weights, and the dtau used.
+
+Constructor
+- __init__(self, durations, weights, dtau, maxduration=None)
+
+  Parameters
+  - durations: array-like of observed event durations.
+  - weights: array-like of weights associated with each duration entry.
+  - dtau: duration bin width.
+  - maxduration: optional maximum duration to consider (in units of tau); if None,
+    uses the maximum observed duration.
+
+  Behavior
+  - Stores copies of durations/weights as NumPy arrays.
+  - If dtau is None, infers a suitable dtau from the unique durations observed.
+  - Builds an internal mapping (taugrid and f_map) used by correction().
+
+Internal reduction map
+- _build_map(self)
+
+  - Builds:
+    - taugrid: an array of bin centers from 0 to maxduration with step dtau.
+    - f_map: an index map from each duration to a taubin index (initialized to -1).
+
+Properties
+- event_duration_histogram(self)
+- cumulative_event_duration_histogram(self)
+
+  Return the internal histograms f_tilde and its cumulative integral f_int1.
+
+Core computation
+- correction(self, iters, freqs=None)
+
+  Computes the RED correction factor for a set of iterations.
+
+  Arguments
+  - iters: array-like of iteration indices to include in the correction.
+  - freqs: optional array of weights per iteration; defaults to uniform weights.
+
+  Returns
+  - A scalar correction factor. If the computed integrals vanish, returns 0.0.
+
+Notes
+- The correction is defined so that f_tilde(tau) is proportional to the total
+  weight of durations in [tau, tau+dtau) normalized by (maxduration - tau + 1),
+  and then normalized to integrate to 1 (with respect to tau and dtau). The
+  returned value is proportional to maxduration divided by the integral of the
+  integrated f_tilde.
+
+get_raw_rates
+-------------
+
+Purpose
+- Retrieve the raw (uncorrected) rate evolution for a specified state pair.
+
+Parameters
+- directh5: HDF5 file handle or path; must contain a dataset 'rate_evolution'
+  with a shape that allows indexing [iteration, istate, fstate].
+- istate: initial state index.
+- fstate: final state index.
+- n_iters: number of iterations to consider (default: all available iterations).
+
+Return
+- The raw rate value (average/expected rate) for the given state pair.
+
+calc_avg_rate
+-------------
+
+Purpose
+- Compute the (optionally RED-corrected) average rate for a given state pair.
+
+Parameters (via kwargs)
+- directh5_path: path to the HDF5 file containing rate evolution data.
+- istate: initial state index.
+- fstate: final state index.
+- n_iters (kwargs): number of iterations to consider (default: full history).
+- report_interval (kwargs): interval in steps for rate evolution data; default 20.
+- n_steps_iter (kwargs): number of steps per iteration; used to compute dtau.
+- callback (kwargs): optional callback invoked with a dictionary containing
+  the correction factor under the key "correction".
+- red (kwargs): if True, apply RED correction via DurationCorrector.
+
+Returns
+- The (possibly RED-corrected) rate constant for the specified state pair.
+
+Usage pattern
+- If red is True, a DurationCorrector is constructed from the kinetics file, and
+  its correction factor is applied to the raw rate.
+
+Example
+- See Usage section below for concrete code samples.
+
+calc_rates
+----------
+
+Purpose
+- Compute raw and RED-corrected rate constants across iterations for a given
+  state pair (efficient, relative to repeated calls to calc_avg_rate).
+
+Parameters
+- directh5_path: path to the kinetics HDF5 file.
+- istate: initial state index.
+- fstate: final state index.
+- Additional keyword arguments compatible with calc_avg_rate.
+
+Usage examples
+--------------
+
+Example 1: Read raw rate for a given state pair
+
+.. code-block:: python
+
+   from w_red import get_raw_rates
+   directh5_path = "path/to/direct_kinetics.h5"
+   istate = 0
+   fstate = 1
+   raw_rate = get_raw_rates(directh5_path, istate, fstate)
+
+Example 2: Compute RED-corrected average rate
+
+.. code-block:: python
+
+   from w_red import calc_avg_rate
+   directh5_path = "path/to/direct_kinetics.h5"
+   istate = 0
+   fstate = 1
+   rate = calc_avg_rate(directh5_path, istate, fstate,
+                        n_iters=1000,
+                        report_interval=20,
+                        n_steps_iter=1000,
+                        red=True)
+
+Example 3: Obtain raw and RED-corrected rates across iterations
+
+.. code-block:: python
+
+   from w_red import calc_rates
+   directh5_path = "path/to/direct_kinetics.h5"
+   istate = 0
+   fstate = 1
+   raw_rates, red_rates = calc_rates(directh5_path, istate, fstate,
+                                     n_iters=1000,
+                                     report_interval=20,
+                                     n_steps_iter=1000,
+                                     red=True)
+
+Important considerations and edge cases
+---------------------------------------
+
+- dtau handling:
+  - If dtau is None when constructing DurationCorrector, it is inferred from the
+    observed durations to determine a suitable bin width.
+- n_iters:
+  - If not provided, the full dataset is used. Ensure the slice bounds align with
+    your analysis goals.
+- Weight masking:
+  - Durations are masked to relevant istate/fstate pairs and positive weights.
+  - Weights for non-matching entries are zeroed to avoid contaminating the RED
+    histogram.
+- Normalization:
+  - f_tilde is normalized to integrate to 1 with respect to tau (and dtau). The
+    final correction factor is derived from the integral of the integrated f_tilde.
+- Callback usage:
+  - A callback can be supplied to observe the correction factor (via a dict
+    with the key "correction") without altering computation flow.
+- Numerical stability:
+  - If the integral used to compute the RED factor (integral2 in code) is zero,
+    the function returns 0.0 to indicate an invalid or degenerate correction.
+
+Appendix: File format expectations
+----------------------------------
+
+- The kinetics data must provide a dataset named 'durations' with fields:
+  - 'istate', 'fstate', 'weight', 'duration'.
+- The rate evolution data must be accessible under 'rate_evolution', with
+  per-iteration, per-state-pair entries containing an 'expected' field for the
+  raw rate.
+
+Notes
+-----
+
+- This documentation reflects the behavior of the w_red module as implemented in the
+  provided source. If you extend the underlying data formats, ensure compatibility
+  with the duration histogram mapping (taugrid and f_map) and the normalization
+  conventions described above.
+
+End of w_red.rst

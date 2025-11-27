@@ -1,0 +1,259 @@
+# Create Cradmin Menu System (crmenu)
+
+This documentation explains how the Cradmin menu system is implemented in crmenu, how to configure and extend it, and provides practical examples for developers integrating menus into Cradmin-based applications.
+
+---
+
+## Overview
+
+The crmenu module provides a set of renderable objects that together form the Cradmin navigation menu. The renderables are designed to:
+
+- Produce HTML with consistent BEM-based CSS classes.
+- Support both simple links and expandable (dropdown) menu items.
+- Allow easy extension and customization by subclassing and configuring renderable classes.
+- Integrate with Django settings to provide a default expandable menu.
+
+Key concepts:
+
+- Renderables produce HTML via templates defined on each renderable.
+- Each renderable can specify its own parent BEM block, element, and variants (e.g., active state).
+- The menu system is designed to be composed of small, reusable renderables (links, separators, toggle buttons, etc.).
+
+---
+
+## Key Components
+
+- get_default_expandable_menu_renderable(**kwargs)
+  - Returns the default expandable menu renderable class instance as configured by the DJANGO_CRADMIN_DEFAULT_EXPANDABLE_MENU_CLASS setting, or None if not configured.
+  - Example: get_default_expandable_menu_renderable(request=request, cradmin_instance=ci)
+
+- BaseMenuLinkRenderable
+  - Base renderable for a menu link item.
+  - Renders using template: `django_cradmin/crmenu/menuitem/link.django.html`
+  - Important properties:
+    - label: text shown in the menu
+    - url: destination URL
+    - is_active: if True, the item is styled as active
+    - parent_bem_block: used for BEM class generation
+  - BEM-related methods:
+    - get_fallback_parent_bem_block()
+    - get_parent_bem_block()
+    - get_bem_element()
+    - get_active_bem_variant_list()
+    - get_bem_variant_list()
+
+- NavLinkItemRenderable(BaseMenuLinkRenderable)
+  - A link item intended for the main menu.
+
+- NavLinkButtonItemRenderable(NavLinkItemRenderable)
+  - A link item styled as a button. Overrides the BEM variants to include a button style.
+
+- ExpandableMenuItem(BaseMenuLinkRenderable)
+  - A link item that resides inside an expandable (dropdown) menu.
+  - Template: `django_cradmin/crmenu/menuitem/expandable-menu-item.django.html`
+  - Provides:
+    - get_fallback_parent_bem_block() -> `'expandable-menu'`
+    - get_bem_element() for the link
+    - get_list_element_bem_element() for the list item
+
+- ExpandableMenuSeparator(renderable.AbstractBemRenderable)
+  - A visual separator inside an expandable menu.
+  - Template: `django_cradmin/crmenu/menuitem/expandable-menu-separator.django.html`
+  - Manages its own parent BEM block with fallback `'expandable-menu'`.
+
+- MenuToggleItemItemRenderable(renderable.AbstractBemRenderable)
+  - A toggle control to expand/collapse the expandable menu.
+  - Template: `django_cradmin/crmenu/menuitem/menutoggle.django.html`
+  - Provides:
+    - get_label() default: “Menu” (translated)
+    - get_fallback_parent_bem_block()
+    - get_parent_bem_block()
+    - get_bem_element()
+    - get_label_css_class()
+    - get_icon_css_class()
+
+- AbstractMenuRenderable(renderable.AbstractRenderableWithCss)
+  - Base class for rendering a menu.
+  - Manages a list of renderables (self.renderable_list) and provides:
+    - iter_renderables()
+    - get_link_renderable_class()
+    - get_separator_renderable_class()
+    - get_button_renderable_class()
+  - Subclasses typically set the classes used for links, separators, and buttons, and populate renderable_list with renderable instances.
+
+---
+
+## How It Works
+
+- Rendering is driven by a composition of renderables. Each renderable knows how to render itself via its template.
+- Active state is handled by is_active on link renderables; this activates the appropriate BEM variant (e.g., adds an `active` class).
+- The BEM block structure is designed to be customizable via:
+  - get_fallback_parent_bem_block()
+  - get_parent_bem_block()
+  - get_bem_element()
+- Expandable menus use a specific block (`expandable-menu`) and dedicated templates for items and separators.
+
+---
+
+## Configuration
+
+- Default expandable menu class
+
+  - Setting: `DJANGO_CRADMIN_DEFAULT_EXPANDABLE_MENU_CLASS`
+  - Value: Python path to a class, e.g. `'myapp.crmenu.MyExpandableMenuRenderable'`
+  - Purpose: When you call `get_default_expandable_menu_renderable(**kwargs)`, this setting determines which class is instantiated.
+
+- Example (settings.py)
+
+  ```python
+  # Use a custom expandable menu renderable by default
+  DJANGO_CRADMIN_DEFAULT_EXPANDABLE_MENU_CLASS = (
+      'myapp.crmenu.CustomExpandableMenuRenderable'
+  )
+  ```
+
+---
+
+## Practical Examples
+
+### 1) Simple static main menu
+
+Python
+
+```python
+from django.urls import reverse
+from django_cradmin.crmenu import (
+    NavLinkItemRenderable,
+    NavLinkButtonItemRenderable,
+    ExpandableMenuSeparator,
+    ExpandableMenuItem,
+    AbstractMenuRenderable
+)
+
+class MyMainMenu(AbstractMenuRenderable):
+    link_renderable_class = NavLinkItemRenderable
+    separator_renderable_class = ExpandableMenuSeparator
+    button_renderable_class = NavLinkButtonItemRenderable
+
+    def __init__(self, request, cradmin_instance=None):
+        super().__init__(request, cradmin_instance)
+        self.renderable_list = [
+            NavLinkItemRenderable(
+                label='Dashboard',
+                url=reverse('admin:index'),
+                is_active=True
+            ),
+            NavLinkItemRenderable(
+                label='Users',
+                url=reverse('admin:auth_user_changelist')
+            ),
+            ExpandableMenuSeparator(),
+            ExpandableMenuItem(
+                label='Reports',
+                url=reverse('admin:reports_changelist')
+            ),
+        ]
+```
+
+Template usage (example):
+
+```django
+{# In your template #}
+{% for item in menu.iter_renderables %}
+  {% include item.template_name with renderable=item %}
+{% endfor %}
+```
+
+View usage:
+
+```python
+def some_view(request):
+    menu = MyMainMenu(request, cradmin_instance=None)
+    return render(request, 'some_template.html', {'menu': menu})
+```
+
+### 2) Using the default expandable menu
+
+Python
+
+```python
+from django_cradmin.crmenu import get_default_expandable_menu_renderable
+
+def some_view(request, cradmin_instance=None):
+    default_menu = get_default_expandable_menu_renderable(
+        request=request,
+        cradmin_instance=cradmin_instance
+    )
+    # You can then pass `default_menu` to your template and render its items.
+    return render(request, 'template.html', {'default_menu': default_menu})
+```
+
+Configuration example (as above) enables you to swap the default class globally.
+
+---
+
+## Template Structure
+
+Each renderable provides its own template:
+
+- Link items: `django_cradmin/crmenu/menuitem/link.django.html`
+- Expandable menu item: `django_cradmin/crmenu/menuitem/expandable-menu-item.django.html`
+- Expandable menu separator: `django_cradmin/crmenu/menuitem/expandable-menu-separator.django.html`
+- Menu toggle: `django_cradmin/crmenu/menuitem/menutoggle.django.html`
+
+These templates rely on the renderable’s attributes (label, url, is_active, etc.) and the BEM classes generated by the renderable methods.
+
+---
+
+## Extending and Customizing
+
+- Subclass AbstractMenuRenderable to create bespoke menus.
+- Override:
+  - link_renderable_class, separator_renderable_class, button_renderable_class
+  - Methods to customize BEM blocks, element names, and active state handling.
+- Create new renderable classes by subclassing existing ones (e.g., add new item types or new templates) and wiring them into your menu subclass.
+
+Examples of customization points:
+
+- Change the parent BEM block for items:
+  - Override get_fallback_parent_bem_block() in a renderable subclass.
+- Introduce new item types with unique templates and BEM elements.
+- Add more sophisticated active-state logic by extending get_bem_variant_list().
+
+---
+
+## API Reference (Summary)
+
+- get_default_expandable_menu_renderable(**kwargs)
+  - Returns the default expandable menu renderable instance based on DJANGO_CRADMIN_DEFAULT_EXPANDABLE_MENU_CLASS, or None if not configured.
+
+- BaseMenuLinkRenderable
+  - Template: link item
+  - Core properties: label, url, is_active, parent_bem_block
+  - Key methods: get_fallback_parent_bem_block(), get_parent_bem_block(), get_bem_element(), get_active_bem_variant_list(), get_bem_variant_list()
+
+- NavLinkItemRenderable
+  - Simple main menu link item.
+
+- NavLinkButtonItemRenderable
+  - Link item styled as a button; overrides button styling.
+
+- ExpandableMenuItem
+  - Link item intended for expandable menus.
+  - Provides specialized BEM element handling for expandable menus.
+
+- ExpandableMenuSeparator
+  - Visual separator inside an expandable menu.
+
+- MenuToggleItemItemRenderable
+  - Toggle to expand/collapse the expandable menu.
+  - Includes label, icon, and CSS class helpers for styling.
+
+- AbstractMenuRenderable
+  - Base class for rendering a menu.
+  - Manages renderable_list and provides iteration and class-getting helpers.
+  - Subclasses specify which renderable classes to use for links, separators, and buttons.
+
+---
+
+If you need a concrete starter project or a ready-to-adapt example for your app, I can tailor a minimal menu implementation to your Cradmin setup.

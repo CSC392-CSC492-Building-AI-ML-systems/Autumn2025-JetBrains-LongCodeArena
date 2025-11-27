@@ -1,0 +1,145 @@
+Markov Chain Monte Carlo (MCMC) Framework
+=========================================
+
+Overview
+--------
+This module provides a framework for equilibrium sampling from a given thermodynamic state
+of a biomolecule using a Markov chain Monte Carlo (MCMC) scheme. It currently offers support
+for:
+- Langevin dynamics (assumed to be free of integration error; use at your own risk)
+- hybrid Monte Carlo (HMC)
+- generalized hybrid Monte Carlo (GHMC)
+- Monte Carlo barostat moves
+
+These moves can be combined through SequenceMove and WeightedMove classes. By default, the MCMC moves use the fastest OpenMM platform available and a shared global ContextCache to minimize OpenMM context creation. The accompanying examples show how to configure these aspects.
+
+References
+----------
+Jun S. Liu. Monte Carlo Strategies in Scientific Computing. Springer, 2008.
+
+Key Components
+--------------
+- MCMCMove (abstract base class)
+  - An abstract representation of a Markov chain Monte Carlo move. Concrete moves must implement:
+    - apply(thermodynamic_state, sampler_state)
+  - The instance can maintain internal statistics (e.g., number of attempts, acceptance rate).
+
+- MCMCSampler
+  - The driver for performing MCMC iterations.
+  - Parameters
+    - thermodynamic_state: openmmtools.states.ThermodynamicState
+        The initial thermodynamic state.
+    - sampler_state: openmmtools.states.SamplerState
+        The initial sampler state.
+    - move_set: container of MCMCMove objects
+        Moves to attempt during MCMC run. If a list/tuple, all moves are run each iteration in the specified sequence (e.g., [move1, move2, move3]). If a dict, unnormalized weights are used (e.g., {move1: 0.3, move2: 0.5, move3: 0.9}).
+  - Behavior
+    - If a single move is provided, it is used for every iteration.
+    - If a sequence is provided, moves are applied in order each iteration.
+    - If a weighted dict is provided, a move is selected according to the weights.
+  - Convenience
+    - Examples show composing moves with SequenceMove and WeightedMove, and using GHMCMove, LangevinDynamicsMove, etc.
+
+- Move composition helpers (examples)
+  - SequenceMove: combine multiple moves to be applied in a defined order each iteration.
+  - WeightedMove: select among moves with specified probabilities.
+
+- Context caching (OpenMM)
+  - By default, moves use a global ContextCache that creates a Context on the fastest available OpenMM platform.
+  - The default platform can be configured prior to the run:
+    - cache.global_context_cache.platform
+    - cache.global_context_cache.time_to_live
+  - This improves performance by reusing OpenMM Context objects.
+
+- Random seeds
+  - _RANDOM_SEED_MAX: maximum random number seed value used for reproducibility facilities.
+
+Usage
+-----
+Basic usage with a single GHMC move:
+
+.. code-block:: python
+
+    from simtk import unit
+    from openmmtools import testsystems, cache
+    from openmmtools.states import ThermodynamicState, SamplerState
+
+    # Create the initial state (thermodynamic and microscopic) for an alanine dipeptide system in vacuum
+    test = testsystems.AlanineDipeptideVacuum()
+    thermodynamic_state = ThermodynamicState(system=test.system,
+                                            temperature=298*unit.kelvin)
+    sampler_state = SamplerState(positions=test.positions)
+
+    # Create an MCMC move to perform at every iteration of the simulation
+    ghmc_move = GHMCMove(timestep=1.0*unit.femtosecond, n_steps=50)
+    langevin_move = LangevinDynamicsMove(n_steps=10)
+    sampler = MCMCSampler(thermodynamic_state, sampler_state, move=ghmc_move)
+
+Combining moves in sequence or with weights:
+
+.. code-block:: python
+
+    # Sequence: first GHMC, then Langevin
+    sequence_move = SequenceMove([ghmc_move, langevin_move])
+    sampler = MCMCSampler(thermodynamic_state, sampler_state, move=sequence_move)
+
+    # Weighted random choice between moves
+    weighted_move = WeightedMove([(ghmc_move, 0.5), (langevin_move, 0.5)])
+    sampler = MCMCSampler(thermodynamic_state, sampler_state, move=weighted_move)
+
+Configuring the default platform and caching behavior (global ContextCache):
+
+.. code-block:: python
+
+    reference_platform = openmm.Platform.getPlatformByName('Reference')
+    cache.global_context_cache.platform = reference_platform
+    cache.global_context_cache.time_to_live = 10  # number of read/write operations
+
+Minimize and run the simulation for a few iterations:
+
+.. code-block:: python
+
+    sampler.minimize()
+    sampler.run(n_iterations=2)
+
+Using local caches (no global cache):
+
+.. code-block:: python
+
+    local_cache1 = cache.ContextCache(capacity=5, time_to_live=50)
+    local_cache2 = cache.ContextCache(platform=reference_platform, capacity=1)
+    sequence_move = SequenceMove([HMCMove(), LangevinDynamicsMove()],
+                                 context_cache=local_cache1)
+    ghmc_move = GHMCMove(context_cache=local_cache2)
+
+Using a cache that does not persist (no caching at all):
+
+.. code-block:: python
+
+    dummy_cache = cache.DummyContextCache(platform=reference_platform)
+    ghmc_move = GHMCMove(context_cache=dummy_cache)
+
+Details
+-------
+- MCMCMove is an abstract interface that must be implemented by concrete moves. Implementations may modify:
+  - The thermodynamic_state (e.g., adjusting temperature, pressure)
+  - The sampler_state (e.g., positions, velocities)
+  - Both, depending on the design of the specific move.
+- MCMCSampler supports:
+  - A single move, a sequence of moves, or a weighted mixture of moves.
+  - Optional per-move context caches to control OpenMM Context creation overhead.
+- Context caching:
+  - The global ContextCache helps reuse Context objects to reduce OpenMM initialization overhead.
+  - Cache can be configured to target a specific OpenMM platform (e.g., Reference, CPU, GPU) and to control the Time-To-Live (TTL) for caching behavior.
+  - If per-move customization is required, local caches can be provided to individual moves or to SequenceMove/WightedMove wrappers.
+- Random seeds:
+  - The module defines a maximum random seed value (_RANDOM_SEED_MAX) to support reproducible randomness when needed.
+
+Notes
+-----
+- The framework is designed to be extensible: to add a new MCMC move, implement a subclass of MCMCMove and define the apply method.
+- The documentation examples reference concrete move classes (e.g., GHMCMove, LangevinDynamicsMove, HMCMove) that are provided by the broader openmmtools package; these are shown for usage illustration.
+
+Output
+------
+The content above is intended for the mcmc.rst documentation file, providing an overview, key components, usage examples, and implementation details for the Markov chain Monte Carlo framework.

@@ -1,0 +1,146 @@
+# w_red
+
+A documentation page for the w_red command, which computes RED-corrected rate constants from kinetic data stored in HDF5 files.
+
+## Overview
+
+The w_red command provides RED (Rate-Elementary-Decay) corrected rate constants using duration and rate-evolution data embedded in a WestPA HDF5 kinetics file. The implementation centers around the DurationCorrector class, which constructs f_tilde and its integrals from observed walker durations and weights, and then derives a correction factor that adjusts raw rate constants.
+
+Key functionality is exposed through:
+- Extraction of raw rates
+- Construction of the RED correction factor from duration data
+- Application of the correction to obtain RED-corrected rates
+
+The core logic relies on the following components:
+- DurationCorrector: builds duration histograms and computes the RED correction.
+- get_raw_rates: retrieves raw rate constants from the rate_evolution dataset.
+- calc_avg_rate: computes the (optionally RED-corrected) average rate for a given state pair.
+- calc_rates: (intended) to return raw and RED-corrected rates across iterations.
+
+The module is designed to work with h5py HDF5 files and integrates with WestPA’s rate-evolution data structures.
+
+## Key Components
+
+- DurationCorrector
+  - Purpose: Build a histogram representation of event durations and compute a RED correction factor.
+  - Construction:
+    - from_kinetics_file(directh5, istate, fstate, dtau, n_iters=None)
+      - directh5: either an opened H5File or a path to an HDF5 file with a 'durations' dataset.
+      - istate, fstate: initial and final state indices to filter durations.
+      - dtau: time resolution (in units matching the durations); if None, inferred from data.
+      - n_iters: number of iterations to consider (slice).
+  - Initialization:
+    - Stores durations, weights, dtau; computes maxduration; determines dtau if not provided.
+    - Builds a map (f_map) linking durations to histogram bins (taugrid).
+  - Properties:
+    - event_duration_histogram: the f_tilde histogram (normalized).
+    - cumulative_event_duration_histogram: the integrated histogram (f_int1).
+  - Methods:
+    - _build_map(): constructs taugrid and f_map based on durations, weights, and dtau.
+    - correction(iters, freqs=None): computes the RED correction factor for a given subset of iterations and optional frequencies per iteration.
+      - Uses f_map, weights, and taugrid to form f_tilde(tau) and its integrals.
+      - Normalizes f_tilde to integrate to 1 (with dtau),
+      - Integrates f_tilde twice to obtain integral2, and returns maxduration / integral2 when integral2 > 0; returns 0 if integral2 == 0.
+      - Supports per-iteration weighting via freqs.
+  - Notes:
+    - The correction factor is designed so that applying it to raw rates yields RED-corrected rates.
+
+- get_raw_rates(directh5, istate, fstate, n_iters=None)
+  - Reads the rate_evolution dataset and returns the 'expected' rate for the specified state pair.
+  - If n_iters is specified, uses that slice; otherwise uses the entire dataset.
+
+- calc_avg_rate(directh5_path, istate, fstate, **kwargs)
+  - Returns the raw or RED-corrected rate constant with a confidence-like interpretation (no explicit CI in this snippet, but provides a correction factor).
+  - Parameters (via kwargs):
+    - n_iters: number of iterations to use (default: full dataset)
+    - report_interval (ntpr): interval of steps used to define dtau
+    - n_steps_iter (nstiter): number of steps per iteration (affects dtau)
+    - callback: optional callback invoked with correction information
+    - red: boolean; if True, compute RED correction using DurationCorrector
+  - Internal logic:
+    - dtau = ntpr / nstiter
+    - If red is True, builds a DurationCorrector via from_kinetics_file and passes it to the callback if provided
+    - Constructs an array of iter indices and computes the correction via dc.correction(iters) or 1.0 if no correction
+    - Returns rate * correction
+
+- calc_rates(directh5_path, istate, fstate, **kwargs)
+  - Intended to return both raw and RED-corrected rates versus iterations.
+  - The provided code shows a description and partial implementation; the exact details depend on usage needs.
+
+## Usage
+
+Examples assume you have a WestPA-generated kinetics HDF5 file (directh5) containing:
+- A 'durations' dataset with fields including 'istate', 'fstate', 'duration', and 'weight'
+- A 'rate_evolution' dataset with per-iteration rate information, including an 'expected' field
+
+- Compute a raw rate:
+  - from your kinetics file, for a given state pair (istate, fstate)
+
+  Example:
+  - raw_rate = get_raw_rates('path/to/directh5.h5', istate=0, fstate=1)
+
+- Compute a RED-corrected rate for a specific number of iterations:
+  - Python usage (illustrative):
+
+  from w_red_module import calc_avg_rate  # replace with the actual module path
+
+  rate = calc_avg_rate(
+      'path/to/directh5.h5',
+      istate=0,
+      fstate=1,
+      n_iters=100,
+      report_interval=20,
+      n_steps_iter=1000,
+      red=True
+  )
+
+- Obtain a correction factor directly via DurationCorrector (optional, advanced):
+  - You can instantiate and compute a per-iteration correction:
+
+  from h5py import File as H5File
+  with H5File('path/to/directh5.h5', 'r') as f:
+      dc = DurationCorrector.from_kinetics_file(f, istate=0, fstate=1, dtau=dtau, n_iters=100)
+      iters = np.arange(100)
+      correction = dc.correction(iters)
+
+- If you already have a duration histogram object (dc):
+  - Use dc.event_duration_histogram or dc.cumulative_event_duration_histogram
+  - Access dc._f_tilde and dc._f_int1 through the exposed properties:
+    - dc.event_duration_histogram
+    - dc.cumulative_event_duration_histogram
+
+Notes:
+- The dtau value is central to histogram binning. If you do not specify dtau, it is inferred from the observed durations (min nonzero difference between unique duration values).
+- The RED correction factor is computed as maxduration / integral2, where integral2 is the integral of the integrated histogram across taugrid. If this integral is zero, the correction factor is zero.
+
+## Details
+
+- Data handling
+  - The code uses h5py to read HDF5 datasets:
+    - durations: fields 'istate', 'fstate', 'duration', 'weight'
+    - rate_evolution: per-iteration rate data with an 'expected' rate
+  - When constructing the DurationCorrector from a directh5 file path, the implementation opens the file (H5File) and reads:
+    - durations[iter_slice] where iter_slice corresponds to the requested n_iters
+
+- RED correction algorithm (high level)
+  - Build a histogram of durations binned by tau in taugrid = [0, maxduration) with bin width dtau
+  - For each duration, accumulate weights for relevant (istate, fstate) matches
+  - Normalize f_tilde so that its integral over tau (with dtau) equals 1
+  - Compute the double integral of f_tilde to obtain a normalization factor
+  - The correction factor is maxduration divided by this double integral
+  - The correction is applied to raw rates (rate *= correction)
+
+- API notes
+  - calc_avg_rate supports a callback to receive the correction object for external use:
+    - If callback is provided, it is invoked with {"correction": dc}
+  - The code is designed for flexibility: you can compute raw or RED-corrected rates, as needed
+
+## See Also
+
+- DurationCorrector.from_kinetics_file
+- DurationCorrector.correction
+- get_raw_rates
+- calc_avg_rate
+- calc_rates
+
+This page describes the w_red command's functionality and its underlying components, focusing on how RED-corrected rates are computed from duration histograms and how to use the provided Python interfaces to obtain raw or RED-corrected rates.

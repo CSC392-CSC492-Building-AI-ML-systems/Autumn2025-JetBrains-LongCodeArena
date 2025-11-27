@@ -1,0 +1,90 @@
+Memory Alignment
+================
+
+Overview
+--------
+
+Memory alignment describes how data is laid out in memory with respect to the type’s alignment requirement and the CPU’s vectorization expectations. Proper alignment is important for performance (especially when SIMD paths are used) and for correct interoperation with C extensions and low-level routines.
+
+What determines alignment in NumPy
+----------------------------------
+
+- Each NumPy dtype has an alignment requirement accessible via the dtype’s alignment attribute.
+- NumPy arrays expose a flags attribute (array.flags) with an ALIGNED indicator, showing whether the array’s data starts at an address aligned to the dtype’s alignment.
+- NumPy’s runtime may dispatch to SIMD-enabled implementations (e.g., SSE, AVX) based on CPU features detected at build/run time. The alignment and availability of these SIMD paths are tied to the CPU feature set exposed by the build configuration (see the SIMD Extensions in the CONFIG data from alignment.rst’s source file).
+
+Inspecting alignment
+--------------------
+
+- Alignment of a dtype (in bytes):
+  - import numpy as np
+  - dt = np.dtype(np.float64)
+  - print(dt.alignment)  # e.g., 8
+
+- Alignment of an array (whether the first element pointer is properly aligned for its dtype):
+  - a = np.zeros(10, dtype=np.float64)
+  - print(a.flags.aligned)  # True on typical builds
+
+- For structured dtypes, you can ensure proper alignment by enabling C-struct alignment:
+  - dt = np.dtype([('x', np.int32), ('y', np.float64)], align=True)
+  - a = np.zeros(4, dtype=dt)
+  - print(a.flags.aligned)  # True
+
+Enforcing and improving alignment
+---------------------------------
+
+- Ordinary numeric arrays
+  - Alignment is usually provided by NumPy’s allocator and matches the dtype’s alignment.
+  - If you observe misalignment, you can copy to a new array to ensure alignment:
+    - a_aligned = a.copy()
+    - assert a_aligned.flags.aligned
+
+- Structured dtypes
+  - Use align=True to ensure the layout matches C-struct alignment rules, which helps interoperability and SIMD-friendly layouts.
+
+- Interoperability with C extensions
+  - When passing NumPy data to C code (via ctypes, CFFI, or CPython extensions), ensure the array pointer satisfies the required alignment.
+  - Access the pointer via a.ctypes.data and verify it meets the dtype’s alignment.
+
+Relation to build/run-time SIMD
+------------------------------
+
+- The alignment.rst source includes a CONFIG section with SIMD Extensions:
+  - baseline and found/not found lists indicate which CPU features (e.g., SSE, AVX) are available.
+  - When SIMD paths are selected, proper alignment becomes more critical for safe and efficient loads/stores.
+- If you run NumPy on a CPU with SIMD support, ensure your data aligns to the expectations of the active SIMD path to maximize performance and avoid faults.
+
+Examples
+--------
+
+- Check dtype and array alignment:
+
+  import numpy as np
+
+  dt = np.dtype(np.float64)
+  print("dtype alignment:", dt.alignment)
+
+  a = np.zeros(16, dtype=dt)
+  print("array aligned:", a.flags.aligned)
+
+- Use aligned structured dtype:
+
+  dt = np.dtype([('a', np.int32), ('b', np.float64)], align=True)
+  arr = np.zeros(4, dtype=dt)
+  print("structured dtype aligned:", arr.flags.aligned)
+
+- Ensure alignment when interoperating with C:
+
+  import numpy as np
+  import ctypes
+
+  arr = np.zeros(8, dtype=np.float64)
+  ptr = arr.ctypes.data
+  print("pointer aligned to dtype alignment:", ptr % arr.dtype.alignment == 0)
+
+Notes
+-----
+
+- The CONFIG data produced by NumPy’s build system (as shown in alignment.rst’s source) includes SIMD feature information that informs the runtime about available vectorized paths. Alignment expectations are tied to those paths; when SIMD features are unavailable or unused, NumPy may fall back to scalar paths that have less stringent alignment requirements.
+
+- For most users, relying on dtype.alignment and array.flags.aligned suffices to understand and verify memory alignment. Use the struct dtype alignment (align=True) when you need C-compatible layouts.

@@ -1,0 +1,101 @@
+# FleurXMLModifier
+
+Class for organizing and grouping changes to a Fleur input file in a robust, low-level manner.
+
+Overview
+- FleurXMLModifier provides a structured way to collect and apply changes to a Fleur input file (inp.xml) without performing the edits immediately.
+- It acts as a low-level counterpart to higher-level modifiers (e.g., FleurinpModifier in aiida_fleur) by aggregating tasks that correspond to XML setters.
+- Changes are applied in one go via the modify_xmlfile method, returning a new XML tree and any additional files generated during the process.
+- Tasks are defined by names that map to setter methods (xpath-based, schema-dict-based, or NMMPMAT-based setters) and are stored as ModifierTask entries.
+
+Key concepts
+- Task collection: Changes are collected as a list of tasks (ModifierTask) rather than being written directly to disk.
+- Setter dispatch: The class resolves task names to available setter functions from three namespaces:
+  - XPath-based setters
+  - Schema-dict-based setters
+  - NMMPMAT (non-magnetic/magnetic) setters
+- Lazy execution: All collected tasks are executed together when modify_xmlfile is called.
+- Undo support: The class provides an undo mechanism to revert the most recent changes (and a revert_all option to reset all changes).
+- Validation: By default, signature validation is enabled, but can be disabled via the validate_signatures flag.
+
+Public API (high-level)
+- FleurXMLModifier(validate_signatures=True)
+  - Create a modifier instance. By default, enables signature validation.
+- FleurXMLModifier.fromList(task_list, *args, **kwargs)
+  - Instantiate a modifier and immediately populate it with a list of tasks.
+  - task_list: list of (method_name, kwargs_dict) pairs. Each entry maps to a setter method and its keyword arguments.
+- add_task_list(task_list)
+  - Add a list of tasks to the modifier after construction.
+  - Each entry is a tuple: (method_name, kwargs_dict). Unknown methods raise an error.
+- _validate_signature(name, *args, **kwargs)
+  - Deprecated helper that previously validated a single task signature. Use _validate_arguments instead (or rely on the public workflow that validates as part of task dispatch).
+- _get_setter_function_and_prefix(name)
+  - Internal helper that resolves a task name to the corresponding setter function and returns a prefix describing the path used to substitute arguments when modifying the XML structure.
+  - Returns (function, prefix) where:
+    - prefix is a tuple indicating the path context (e.g., ('xmltree',) for xpath, ('xmltree', 'schema_dict') for schema-dict, etc.).
+- modify_xmlfile(input_path)
+  - Apply all collected tasks to the input Fleur XML file.
+  - Returns: (new_xmltree, additional_files)
+
+Internal structure (for reference)
+- _xpath_functions: dictionary of xpath-based setters
+- _schema_dict_functions: dictionary of schema-dict setters
+- _nmmpmat_functions: dictionary of NMMPMAT-related setters
+- _extra_functions: optional extension points for additional, namespaced setters
+- _tasks: list[ModifierTask], where each task records the setter name and its arguments
+
+Notes
+- The public task names correspond to setter methods provided by masci_tools.util.xml.xml_setters_names and related modules.
+- The class is designed to be robust to changes in the underlying XML structure by routing through the established setter interfaces.
+
+Usage examples
+- Basic usage: collect and apply changes to a Fleur input file
+  - Example:
+    ```python
+    from masci_tools.io.fleurxmlmodifier import FleurXMLModifier
+
+    fmode = FleurXMLModifier()
+
+    # Add changes (these methods do not modify a file immediately)
+    fmode.set_inpchanges({'Kmax': 4.0})
+    fmode.shift_value({'Gmax': 5.0})
+
+    # Example of setting species configuration
+    fmode.set_species('all-Fe', {
+        'lo': [
+            {'n': 3, 'l': 's', 'type': 'SCLO'},
+            {'n': 3, 'l': 'p', 'type': 'SCLO'}
+        ]
+    })
+
+    # Apply all changes to the input file
+    new_xmltree, additional_files = fmode.modify_xmlfile('/path/to/input/file/inp.xml')
+    ```
+- Creating from a predefined task list
+  - Example:
+    ```python
+    task_list = [
+        ('set_inpchanges', {'Kmax': 4.0}),
+        ('shift_value', {'Gmax': 5.0}),
+    ]
+
+    fmode = FleurXMLModifier.fromList(task_list)
+    new_xmltree, additional_files = fmode.modify_xmlfile('/path/to/input/file/inp.xml')
+    ```
+
+Notes on extension and customization
+- You can extend the behavior by supplying extra function mappings via FleurXMLModifier._extra_functions for additional task namespaces (xpath, schema_dict, nmmpmat).
+- The class is designed to be forward-compatible with the XML setter interfaces used throughout masci_tools.
+
+Related concepts
+- This module documents a low-level, robust mechanism for batching and applying changes to Fleur input files, complementing higher-level utilities that operate directly on input structures.
+
+Reference
+- See the class docstring and source for detailed behavior and internal dispatch logic:
+  - FleurXMLModifier: manages task collection and dispatch to the appropriate setter functions
+  - ModifierTask: simple NamedTuple representing a single modification task (name, args, kwargs)
+
+End-user guidance
+- Prefer using FleurXMLModifier when you need fine-grained, atomic changes grouped together and applied in a single operation.
+- Use undo() to revert recent changes if your workflow requires tentative edits before finalizing.
+- Use fromList for scenarios where you want to programmatically compose a sequence of edits.

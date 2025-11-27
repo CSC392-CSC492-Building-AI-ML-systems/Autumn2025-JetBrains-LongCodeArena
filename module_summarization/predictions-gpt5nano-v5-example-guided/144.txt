@@ -1,0 +1,116 @@
+# Scheduling policies
+
+The policies govern how the Dask distributed scheduler chooses (a) the preferred worker for executing a given task, and (b) the preferred tasks for a given worker. These policies influence data locality, load balancing, and overall scheduling efficiency. This document describes the core concepts and components related to task preferences and worker preferences as implemented in the scheduling subsystem.
+
+## Overview
+
+- Task preference policy determines which worker should run a particular task, taking into account dependencies, where input data resides, and resource availability.
+- Worker preference policy determines how workers are selected or how work is assigned among workers to balance load and respect data locality.
+- The scheduling stack exposes extensible policy components (extensions) that implement various strategies, including data locality awareness, work-stealing for load balancing, and other scheduling behaviors.
+
+Key idea: the scheduler uses a representation of recommendations and messages to coordinate preferences across clients and workers, accumulating and acting on these preferences when scheduling tasks.
+
+## Key Components
+
+- Extensions that influence scheduling policies
+  - Work stealing (stealing): Implemented via the WorkStealing extension to rebalance work by allowing idle workers to steal tasks from busier workers.
+  - Other policy-related extensions include ReplayTaskScheduler, ShuffleSchedulerPlugin, SpansSchedulerExtension, and more, all configured via the scheduler’s DEFAULT_EXTENSIONS mapping.
+- Policy data structures
+  - Recs: A mapping from task keys to a finish state (TaskStateState). This captures task-level recommendations or intended outcomes regarding where/when a task should be executed.
+  - Msgs: A mapping from worker/client addresses to a list of operation dictionaries. These represent messages exchanged as part of policy coordination between clients and workers.
+  - RecsMsgs: A tuple consisting of (Recs, Msgs, Msgs). This is a compact representation of recommendations and communication related to scheduling decisions.
+- Stimulus mechanism
+  - STIMULUS_ID_UNSET: A sentinel value used to mark a stimulus for scheduling, indicating that a stimulus id has not yet been assigned.
+
+- Core constants and structures
+  - DEFAULT_EXTENSIONS: The set of scheduler extensions loaded by default, including the stealing extension:
+    - "stealing": WorkStealing
+  - ClientState: Represents per-client information used to inform scheduling decisions (e.g., which tasks a client wants to keep in memory).
+
+Code excerpt (illustrative):
+- Policies/extensions enabled by default
+  - The scheduler wires in multiple extensions, including the WorkStealing policy:
+    - DEFAULT_EXTENSIONS = {
+        "locks": LockExtension,
+        "multi_locks": MultiLockExtension,
+        "publish": PublishExtension,
+        "replay-tasks": ReplayTaskScheduler,
+        "queues": QueueExtension,
+        "variables": VariableExtension,
+        "pubsub": PubSubSchedulerExtension,
+        "semaphores": SemaphoreExtension,
+        "events": EventExtension,
+        "amm": ActiveMemoryManagerExtension,
+        "memory_sampler": MemorySamplerExtension,
+        "shuffle": ShuffleSchedulerPlugin,
+        "spans": SpansSchedulerExtension,
+        "stealing": WorkStealing,
+      }
+
+- Representing scheduling state and policy data
+  - Recs and RecsMsgs types give a structured view of recommendations and inter-peer messages used by scheduling decisions.
+    - Recs: {task key -> finish state}
+    - Msgs: {address: [{op: <key>, ...}, ...]}
+    - RecsMsgs: tuple[Recs, Msgs, Msgs]
+
+- Example client state usage
+  - ClientState tracks client_key, wants_what (tasks a client wants kept in memory), and last_seen timestamps. This informs task retention decisions in the context of scheduling and data locality.
+
+Code excerpt (illustrative):
+- DEFAULT_EXTENSIONS and WorkStealing presence
+  - DEFAULT_EXTENSIONS = {
+      ...
+      "stealing": WorkStealing,
+    }
+
+## Usage
+
+- Enabling and configuring scheduling policies
+  - The WorkStealing policy is enabled by default as part of the scheduler extensions. You can verify or customize the extensions included by inspecting or overriding the DEFAULT_EXTENSIONS mapping in the scheduler code or via configuration.
+  - To explicitly ensure stealing behavior is active, ensure the stealing extension is loaded as part of the scheduler extensions:
+    - Example (conceptual):
+      - In your Dask configuration, enable the stealing extension if your setup requires explicit enabling, or rely on the default configuration that includes "stealing": WorkStealing.
+
+- Typical workflow interaction
+  - As tasks are enqueued and workers report their state, the scheduler accumulates Recs and RecsMsgs representing task preferences and cross-worker guidance.
+  - WorkStealing monitors worker occupancy and, if possible, transfers tasks from busy workers to idle ones to improve utilization while respecting data locality.
+
+- Data locality and task preferences
+  - The policy considers where task inputs live and which workers currently hold relevant data, guiding the choice of a preferred worker for execution.
+
+## Details
+
+- Task preference policy
+  - Concept: For a given task, prefer workers that already possess the task's input data or that minimize data transfer. The scheduler can express this via task-level recommendations (Recs) and inter-worker messages (Msgs) to steer execution toward preferred workers.
+  - Mechanism: The Recs structure maps task keys to desired finish states, guiding the scheduler's decision on whether a task should be processed locally, moved to another worker, or scheduled later. The corresponding messaging (Msgs) enables communication of preferences between workers and clients.
+
+- Worker preference policy
+  - Concept: Balance load and improve throughput by dynamically assigning tasks to workers with capacity, while also considering data locality and memory constraints.
+  - Mechanism: The WorkStealing extension provides a concrete implementation: idle workers attempt to steal tasks from other workers. This improves utilization and prevents underutilization of available resources.
+
+- Stimulus and policy coordination
+  - Stimulus IDs provide a way to annotate scheduling events or triggers, enabling more nuanced policy responses. STIMULUS_ID_UNSET indicates that a stimulus has not yet been assigned.
+
+- Extensibility
+  - The scheduler supports multiple policy extensions (e.g., stealing, memory management, shuffling, spans, etc.). These are wired in via DEFAULT_EXTENSIONS, enabling or disabling specific strategies as needed.
+
+- Interaction with other components
+  - The policy system interacts with task state tracking (e.g., TaskState and Recs), client state, and inter-process communication to coordinate where and when tasks run.
+  - The presence of ReplayTaskScheduler and ShuffleSchedulerPlugin indicates that scheduling policies can influence reproducible behavior and task ordering, respectively, in addition to the primary data-locality and load-balancing objectives.
+
+## Examples
+
+- Inspecting the default extensions (illustrative)
+  - The scheduler's policy extensions include:
+    - "stealing": WorkStealing
+  - Other extensions present by default include locks, queues, variables, memory management, and more, illustrating how policy components are layered into the scheduler.
+
+- Simple representation of policy data structures
+  - Recs: {task_key: finish_state}
+  - Msgs: {recipient_address: [{op: key, ...}, ...]}
+  - RecsMsgs: (Recs, Msgs, Msgs)
+
+- Stimulus concept in scheduling
+  - STIMULUS_ID_UNSET is used to indicate that a scheduling stimulus has not yet been assigned, allowing the scheduler to attach a stimulus when needed to coordinate policy adjustments.
+
+If you need concrete integration steps for a particular environment or how to customize policies beyond enabling the stealing extension, I can tailor the guidance to your setup.

@@ -1,0 +1,142 @@
+Autowrap
+==========
+
+Module for compiling codegen output, and wrap the binary for use in Python.
+
+Overview
+--------
+
+This module provides a common interface for different external backends (for example, f2py, fwrap, Cython, SWIG, etc.). Currently, only f2py and Cython are commonly used. The goal is to expose compiled binaries with a one-button user interface, so you can evaluate code quickly without delving into wrapping tool details.
+
+Key ideas:
+- Generate code from a Diofant codegen routine.
+- Compile the generated code with a selected backend.
+- Import the resulting module and obtain a binary Python callable.
+- Attach the binary callable for numerical evaluation (evalf) or lambdify usage.
+
+Examples
+--------
+
+Basic usage (conceptual):
+
+.. code-block:: python
+
+    expr = ((x - y)**25).expand()
+    binary_callable = autowrap(expr)
+    binary_callable(1, 2)  # -> -1.0
+
+Notes:
+- The callable returned by autowrap() is a binary Python function, not a Diofant object.
+- If you want to use the compiled function inside symbolic expressions, prefer binary_function() which returns a Diofant Function object.
+- The binary callable is attached as the _imp_ attribute and is invoked during numerical evaluation (evalf()) or when using lambdify().
+
+.. code-block:: python
+
+    f = binary_function('f', expr)
+    2*f(x, y) + y  # symbolic expression using the binary function
+    (2*f(x, y) + y).evalf(2, subs={x: 1, y: 2}, strict=False)
+
+When is this useful?
+---------------------
+
+- For computations on large arrays where Python loops are too slow and NumPy’s advanced indexing is beneficial.
+- For very long expressions that are evaluated repeatedly; the compiled binary can be significantly faster than Diofant’s evalf().
+- If you generate code with the codegen utility to use in another project; the wrappers let you test the binaries from Diofant immediately.
+- To create customized ufuncs for use with NumPy arrays.
+
+When is this module NOT the best approach?
+------------------------------------------
+
+- If extreme speed or memory optimization is required, you may achieve better results by working directly with the wrapper tools and low-level code. The generated files can still serve as a useful starting point; temporary files are left intact if you supply tempdir="path/to/files/".
+- If array computations can be handled efficiently with NumPy alone and you don’t need the binaries for another project.
+
+Doctest dependencies
+---------------------
+
+The doctests (when enabled) require certain external tools and libraries:
+
+.. code-block:: text
+
+    doctest dependencies:
+      exe: f2py, gfortran, gcc
+      modules: numpy
+
+API Reference
+-------------
+
+Exceptions
+- CodeWrapError: Generic error raised when code wrapping fails.
+
+Core classes
+- CodeWrapper
+  - Base class for code wrappers that generate, compile, and wrap code into a Python callable.
+  - Key attributes:
+    - _filename: base name for generated files (default 'wrapped_code')
+    - _module_basename: base name for the wrapper module (default 'wrapper_module')
+    - _module_counter: class-wide counter for unique module names
+  - Main responsibilities:
+    - Generate code: _generate_code(main_routine, routines)
+    - Wrap code: wrap_code(routine, helpers=[])
+    - Compile and import: _process_files(routine)
+    - Access the wrapped function: _get_wrapped_function(mod, name) (implemented by subclasses)
+
+  - Important properties:
+    - filename: local file name for the generated code, suffixed by the module counter
+    - module_name: Python module name to import, suffixed by the module counter
+    - include_header: whether to include a header (based on filepath)
+    - include_empty: whether to include an empty header (based on filepath)
+
+  - Workflow:
+    - wrap_code(routine, helpers) creates a working directory (temporary or specified by filepath), generates code, prepares any auxiliary files, processes/compiles them, imports the resulting module, and returns the wrapped function by name.
+
+  - Internal behavior:
+    - On success, returns the wrapped function: self._get_wrapped_function(mod, routine.name)
+    - Handles temporary directories cleanup when not using a persistent filepath
+    - Keeps a global module counter to avoid name clashes
+
+- DummyWrapper (CodeWrapper subclass)
+  - Purpose: Testing independent of backends (a lightweight, emulate-backend wrapper).
+  - Core behavior:
+    - _generate_code(main_routine, routines): writes a simple Python module that returns the expression as a string and provides argument handling for demonstration.
+    - _prepare_files(routine): no-op (dummy)
+    - _process_files(routine): no-op (dummy)
+    - _get_wrapped_function(mod, name): returns the function from the dummy module
+  - Template: a Python module skeleton that exposes a function named after the routine and attaches metadata about arguments and return values.
+
+  Usage example (DummyWrapper):
+  .. code-block:: python
+
+      from autowrap import DummyWrapper
+      # routine would be produced by the codegen machinery (not shown here)
+      wrapper = DummyWrapper(generator, filepath=None, verbose=True)
+      wrapped_fn = wrapper.wrap_code(routine)
+      result = wrapped_fn(...)  # demonstration of the dummy function
+
+- CythonCodeWrapper (CodeWrapper subclass)
+  - Purpose: Wrapper that uses Cython to compile the generated code into a Python-callable binary.
+  - Key aspects:
+    - setup_template: template used to generate a setuptools-based setup script for Cython compilation.
+    - The wrapper handles writing C/Cython sources, a setup script, invoking the build process, and importing the resulting module to fetch the wrapped function.
+  - Note: The exact setup details are implemented in the omitted portion of the file; the class is provided to illustrate the Cython backend support.
+
+Backends and extensibility
+--------------------------
+
+- The design supports multiple backends (f2py, Cython, etc.). Each backend is responsible for:
+  - Emitting source code from the code generator
+  - Building/compiling the source into a Python-accessible binary
+  - Importing the module and returning a Python-callable corresponding to the original routine
+
+- The autowrap workflow is designed to provide a one-button experience for turning symbolic expressions into fast numerical callables.
+
+Usage notes
+-----------
+
+- The binary callable is intended for numerical evaluation (evalf) and lambdify usage; it can be attached to symbolic expressions as described in the module docstring.
+- Temporary build directories are created automatically unless you pass a filepath to persist generated sources. When a persistent path is used, the generated files are kept there; otherwise, a temporary directory is cleaned up after wrapping.
+- Do not rely on internal module names across runs—the module counter ensures unique module names for each wrap.
+
+Further reading
+--------------
+
+For detailed behavior and examples, refer to the inline module documentation and doctests (where enabled) that illustrate usage with autowrap, binary_function, and symbolic expressions.

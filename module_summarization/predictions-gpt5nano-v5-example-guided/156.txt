@@ -1,0 +1,165 @@
+# How Mitogen Works
+
+## Overview
+
+Mitogen is a fast, cross-version Python framework for remote execution and orchestration. The howitworks.rst document describes the core runtime behavior encapsulated in the bootstrap module that is sent to every new slave context. This module implements the essential package functionality while keeping non-critical components elsewhere to minimize bootstrapping size. It defines the message protocol, routing primitives, and compatibility shims that enable Mitogen to operate across Python 2 and Python 3 environments.
+
+Key responsibilities demonstrated in the module include:
+- A compact inter-process message protocol used by the broker and remote targets.
+- A bootstrap path that initializes the slave context with the necessary runtime support.
+- Cross-version compatibility utilities and careful handling of IO and encoding to avoid deadlocks.
+- Logging and IO routing hooks to observe and forward activity between processes.
+
+## Key Components
+
+- Message protocol opcodes
+  - The module defines a set of numeric opcodes used for inter-process communication. These constants signal specific operations to the remote agent or broker, such as:
+    - GET_MODULE
+    - CALL_FUNCTION
+    - FORWARD_LOG
+    - ADD_ROUTE
+    - DEL_ROUTE
+    - ALLOCATE_ID
+    - SHUTDOWN
+    - LOAD_MODULE
+    - FORWARD_MODULE
+    - DETACHING
+    - CALL_SERVICE
+    - STUB_CALL_SERVICE
+
+  Example:
+  ```python
+  GET_MODULE = 100
+  CALL_FUNCTION = 101
+  FORWARD_LOG = 102
+  ADD_ROUTE = 103
+  DEL_ROUTE = 104
+  ALLOCATE_ID = 105
+  SHUTDOWN = 106
+  LOAD_MODULE = 107
+  FORWARD_MODULE = 108
+  DETACHING = 109
+  CALL_SERVICE = 110
+  STUB_CALL_SERVICE = 111
+  ```
+
+- Special sentinel for routing and disconnection
+  - IS_DEAD is a sentinel value used to signal disconnection or the inability to route a message. It appears in the reply_to field and usually triggers a Router or ChannelError. It is used when a remote receiver is disconnected, a route is missing, or a teardown is in progress.
+
+  ```python
+  IS_DEAD = 999
+  ```
+
+- Cross-version compatibility and type helpers
+  - The module provides compatibility shims for Python 2 and 3, including type aliases and helpers:
+    - PY24, PY3 flags
+    - BytesType, UnicodeType
+    - FsPathTypes
+    - BufferType
+    - A factory for BufferType using memoryview on Py3
+  - Example (simplified):
+  ```python
+  PY24 = sys.version_info < (2, 5)
+  PY3 = sys.version_info > (3,)
+  if PY3:
+      b = str.encode
+      BytesType = bytes
+      UnicodeType = str
+      FsPathTypes = (str,)
+      BufferType = lambda buf, start: memoryview(buf)[start:]
+      long = int
+  else:
+      b = str
+      BytesType = str
+      FsPathTypes = (str, unicode)
+      BufferType = buffer
+      UnicodeType = unicode
+  ```
+
+- Iteration and import robustness
+  - The code includes a fallback for next() in older contexts and suppresses a deprecation warning for the imp module (which is deprecated in Python >2.5).
+
+  ```python
+  try:
+      next
+  except NameError:
+      next = lambda it: it.next()
+  ```
+
+- Default IO buffering considerations
+  - A carefully chosen default buffer size for Side.read/Side.write and socketpair buffering is documented. The default of 128 KiB aims to balance CPU usage, throughput, and OS-level buffering behavior.
+
+  - Commentary (summarized):
+    - Small buffers cause many IO loop iterations and higher CPU usage.
+    - Large buffers reserve more RAM and can incur higher per-call costs.
+    - Constraints depend on kernel buffers, pipes, and intermediary process behavior (e.g., OpenSSH).
+
+- Logging infrastructure
+  - The module configures loggers (LOG and IOLOG) to enable observing and forwarding activity, with IOLOG set to INFO by default for visibility into IO-related events.
+
+- Bootstrap and slave context bootstrap
+  - The module is designed to be the bootstrap implementation that is shipped to every new slave context. It contains the essential functionality required to initialize and operate in the slave environment, while leaving non-critical components to be loaded later as needed. This minimizes startup size and improves startup speed.
+
+## Usage
+
+- Purpose in practice
+  - This module is not typically used directly by end users. It serves as the bootstrap that the Mitogen framework sends to remote contexts to initialize the runtime environment. The public API is exposed elsewhere in Mitogen; this file concentrates the core protocol, compatibility, and bootstrap logic.
+
+- Typical interaction pattern (high level)
+  - A broker establishes routes and forwards messages to remote targets using the defined opcodes.
+  - The remote side (slave context) interprets the opcodes (e.g., LOAD_MODULE, CALL_FUNCTION) to perform the requested action.
+  - The IS_DEAD sentinel is used to manage disconnections or routing failures and trigger cleanup.
+
+- Example excerpt: protocol constants
+  ```python
+  # Protocol opcodes (example)
+  GET_MODULE = 100
+  CALL_FUNCTION = 101
+  FORWARD_LOG = 102
+  ADD_ROUTE = 103
+  DEL_ROUTE = 104
+  ALLOCATE_ID = 105
+  SHUTDOWN = 106
+  LOAD_MODULE = 107
+  FORWARD_MODULE = 108
+  DETACHING = 109
+  CALL_SERVICE = 110
+  STUB_CALL_SERVICE = 111
+  ```
+
+- Example excerpt: dead signal usage
+  ```python
+  IS_DEAD = 999
+  ```
+
+- Example excerpt: default IO buffer sizing note (high level)
+  ```text
+  Default size for calls to Side.read or Side.write, and the size of buffers configured by create_socketpair. 128KiB is a sweet spot balancing throughput and memory usage. (See code comments in howitworks.rst for rationale.)
+  ```
+
+## Details
+
+- Bootstrap orientation
+  - The module is intentionally lightweight and focused on essential functionality to minimize bootstrap size for new slave contexts. It provides the scaffolding for module loading, function invocation, and routing, which are core to Mitogen’s remote execution model.
+
+- Encodings and IO optimizations
+  - A Latin-1 codec instance is created (LATIN1_CODEC) to optimize certain encoding operations and avoid Python-level import lock contention during encoding on behalf of a thread waiting for module loading or message handling.
+
+  ```python
+  LATIN1_CODEC = encodings.latin_1.Codec()
+  ```
+
+- Logging paths
+  - LOG and IOLOG are configured to capture general and IO-specific events, enabling visibility into both normal operation and IO forwarding in the broker/slave interactions.
+
+- Warning suppression
+  - The module suppresses a warning related to importing after __name__ is set, which can occur during profiling and module loading. This helps avoid noisy logs during startup.
+
+- Version-robust design
+  - The code includes careful conditional logic to support both Python 2 and Python 3 environments, with explicit type definitions and behavior that adapts based on the runtime version.
+
+- Documentation-oriented structure
+  - The constants, sentinel values, and helper constructs shown here form the backbone for the dynamic routing and message handling that enable Mitogen’s fast remote execution across process boundaries.
+
+Notes:
+- The content above focuses on the mechanisms demonstrated in the bootstrap module and the messaging protocol it defines. For typical usage and higher-level orchestration, refer to the public Mitogen APIs documented elsewhere in the project.

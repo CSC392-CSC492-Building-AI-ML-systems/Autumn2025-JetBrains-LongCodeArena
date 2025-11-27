@@ -1,0 +1,114 @@
+Asynchronous queues for coroutines (producer/consumer pattern)
+
+Overview
+- This module provides coroutine-friendly queue abstractions for coordinating producers and consumers without blocking the I/O loop.
+- Similar in spirit to asyncio.queues, Tornado’s queues are designed for cooperative multitasking with coroutines.
+- Important caveat: these queues are not thread-safe. To interact with them from other threads, transfer control to the IOLoop thread first (e.g., via IOLoop.add_callback).
+
+Core types
+- Queue: unbounded or bounded FIFO queue used to coordinate producers and consumers.
+- PriorityQueue: a queue where items are retrieved in priority order.
+- LifoQueue: a stack-like (LIFO) queue.
+- Exceptions:
+  - QueueFull: raised by put_nowait when the queue is full.
+  - QueueEmpty: raised by get_nowait when the queue is empty.
+
+Key concepts
+- Blocking semantics are implemented with Futures. If a put is attempted on a full queue, the producer yields until a consumer takes an item. If a get is attempted on an empty queue, the consumer yields until a new item is available.
+- Timeouts support: put and get can specify a timeout. If the timeout elapses before the operation can complete, a TimeoutError is raised.
+- Task tracking and join:
+  - task_done() should be called by a consumer when a gotten item has finished processing.
+  - join() blocks until all items in the queue have been processed (i.e., the count of unfinished tasks reaches zero).
+- Async iteration:
+  - The queue supports asynchronous iteration: you can use “async for item in queue” to consume items as they become available.
+  - Inside the loop, after finishing work on an item, you should call task_done().
+
+Usage patterns: producer / consumer with coroutines
+
+1) Async for consumer (recommended pattern)
+- Start a consumer coroutine that iterates over the queue as items arrive.
+- For each item, process it, then call q.task_done().
+- Use q.join() to wait for all produced items to be processed.
+
+Example (adapted from the library’s documentation):
+- This example demonstrates a simple producer/consumer workflow using async for.
+
+Code:
+- Explanation: The consumer yields items from the queue, processes them, and marks as done. The producer enqueues several items. The main coroutine starts the consumer in the background, waits for the producer to finish, then waits for all work to complete via join.
+
+Example code (pseudo-repr from docstring):
+- Note: Replace asyncio with Tornado’s IOLoop usage when integrating into a Tornado app.
+
+Example:
+- q = Queue(maxsize=2)
+
+- async def consumer():
+-     async for item in q:
+-         try:
+-             print('Doing work on %s' % item)
+-             await gen.sleep(0.01)
+-         finally:
+-             q.task_done()
+
+- async def producer():
+-     for item in range(5):
+-         await q.put(item)
+-         print('Put %s' % item)
+
+- async def main():
+-     # Start consumer in background
+-     IOLoop.current().spawn_callback(consumer)
+-     await producer()     # Wait for producer to enqueue all items
+-     await q.join()       # Wait for all items to be processed
+-     print('Done')
+
+- asyncio.run(main())  (when using asyncio; for Tornado, run inside the IOLoop)
+
+2) Explicit get with timeout and manual task tracking
+- A consumer repeatedly calls await q.get() (potentially with a timeout).
+- After processing each item, call q.task_done().
+- Use q.join() to wait for all outstanding tasks to be completed.
+
+Example:
+- async def consumer():
+-     while True:
+-         item = await q.get(timeout=5.0)  # optional timeout
+-         try:
+-             process(item)
+-         finally:
+-             q.task_done()
+
+Timeouts
+- put(item, timeout=None): wait for space if the queue is full; timeout after the specified duration.
+- get(timeout=None): wait for an item if the queue is empty; timeout after the specified duration.
+- Timeouts raise gen.TimeoutError when reached.
+- Timeouts are implemented by scheduling a timeout callback on the current IOLoop and canceling it if the operation completes early.
+
+Notes on shutdown and termination
+- The queue itself does not automatically terminate consumers. To stop a consumer using async for, you typically cancel the consumer task or send a sentinel value to signal completion.
+- For explicit shutdown patterns, consider:
+  - Enqueue a sentinel value that your consumer recognizes as a stop signal.
+  - Cancel the consumer task(s) if you have a long-running background consumer.
+
+Implementation highlights (conceptual)
+- Internal state:
+  - _getters: futures waiting for items to be available.
+  - _putters: (item, future) pairs waiting for space to enqueue.
+  - _unfinished_tasks and _finished: support join() semantics.
+- Async iteration is backed by a helper that yields items via queue.get().
+- Not thread-safe: interact with the queue from the IOLoop thread; use IOLoop.add_callback or similar mechanisms when crossing threads.
+
+Practical tips
+- Use maxsize=0 for unbounded queues; set a finite maxsize to apply backpressure between producers and consumers.
+- Prefer async for consumption when you want a simple, linear consumer loop that processes items as they arrive.
+- Use q.put(item) with optional timeout to avoid indefinite waiting in high-load scenarios.
+- Use q.join() to synchronize producers and consumers, ensuring all enqueued work is completed.
+
+References to the code
+- Core API: Queue, PriorityQueue, LifoQueue, QueueFull, QueueEmpty
+- Methods: put, put_nowait, get, join, task_done, qsize, empty, full, maxsize
+- Async iteration: “async for item in q” support via internal _QueueIterator
+- Timeouts: _set_timeout helper integrates with the IOLoop
+- Thread-safety warning and transfer to IOLoop thread when used from other threads
+
+For detailed examples, refer to the module’s embedded usage snippet demonstrating an asynchronous producer/consumer pattern with async for.

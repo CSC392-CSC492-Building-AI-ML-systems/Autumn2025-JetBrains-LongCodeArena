@@ -1,0 +1,143 @@
+fields.rst
+
+Fields: Core concepts, examples, and usage
+==========================================
+
+This section documents the base Field type used by the ORM and illustrates practical patterns for defining, extending, and using fields. The Field class is designed to be extended via Python type mixins, supports per-database overrides, and provides hooks for converting values to and from the database representation.
+
+Key concepts
+------------
+
+- Field base class: The core building block for model attributes. It carries metadata (nullability, default, primary key, indexing, etc.) and defines the conversion hooks to/from the database.
+- field_type: Determined automatically by the metaclass (_FieldMeta) from the second base class when you define a field as Field with an additional Python type mixin. This sets the Python type that the field should behave as.
+- Per-database overrides: You can customize attributes or methods for a specific database dialect by providing an inner class named _db_<dialect> (e.g., _db_sqlite, _db_mysql). This allows database-specific SQL types or conversion behavior.
+- Conversion hooks:
+  - to_db_value(value, instance): Convert a Python value to a value suitable for the database.
+  - to_python_value(value): Convert a database value to the appropriate Python value.
+- Common attributes you can override per field:
+  - SQL_TYPE: The SQL column type (e.g., VARCHAR(255), INTEGER).
+  - GENERATED_SQL: SQL expression used to generate the value (when allows_generated is True).
+  - indexable, has_db_field, skip_to_python_if_native, allows_generated, function_cast: Advanced behaviors for how the field interacts with SQL, casting, and native type handling.
+
+Usage patterns
+--------------
+
+1) Create a concrete field type using a Python type mixin
+   The metaclass automatically sets field_type when you create a field by combining Field with a Python type.
+
+   Example: a string field type backed by Python str
+
+   class CharField(Field, str):
+       SQL_TYPE = "VARCHAR(255)"
+
+   class User(Model):
+       name = CharField(null=False)
+
+   Notes:
+   - The second base class (str) defines the Python type for the field.
+   - You can define more complex field types by using multiple mixins (the metaclass will set field_type accordingly).
+
+2) Basic field with common options
+   You can configure nullability, defaults, primary key, indexing, etc.
+
+   class CharField(Field, str):
+       SQL_TYPE = "VARCHAR(100)"
+       index = True
+       null = False
+       default = "N/A"
+
+   class User(Model):
+       username = CharField(null=False, unique=True, index=True)
+
+3) Custom field with per-dialect overrides
+   Use the inner _db_<dialect> class to customize behavior for a specific database.
+
+   class ScoreField(Field, int):
+       SQL_TYPE = "INTEGER"
+
+       class _db_sqlite:
+           # SQLite stores numbers as NUMERIC in some cases
+           SQL_TYPE = "NUMERIC"
+           def function_cast(self, term: Term) -> Term:
+               # Example cast override for SQLite
+               from pypika import functions
+               return functions.Cast(term, "NUMERIC")  # illustrative
+
+   class Game(Model):
+       high_score = ScoreField(default=0)
+
+   Notes:
+   - The inner dialect class can override SQL_TYPE and other attributes.
+   - You can also provide a dialect-specific implementation of function_cast (or other methods) if needed.
+
+4) A small JSON-like field with custom conversion
+   You can override to_python_value and/or to_db_value to handle serialization/deserialization.
+
+   import json
+
+   class JSONField(Field, dict):
+       SQL_TYPE = "TEXT"
+
+       def to_db_value(self, value, instance):
+           if value is None:
+               return None
+           if isinstance(value, (dict, list)):
+               return json.dumps(value)
+           return value
+
+       def to_python_value(self, value):
+           if value is None:
+               return None
+           if isinstance(value, (dict, list)):
+               return value
+           try:
+               return json.loads(value)
+           except (TypeError, ValueError):
+               return value  # fallback
+
+   class Document(Model):
+       data = JSONField(null=False)
+
+5) Alias a database column name with source_field
+   Use source_field to map the model attribute name to a specific DB column name.
+
+   class CharField(Field, str):
+       SQL_TYPE = "VARCHAR(64)"
+
+   class User(Model):
+       username = CharField(source_field="user_name", null=False)
+
+   This allows your Python field name to differ from the actual column name in the database.
+
+6) Primary key and indexing notes
+   - If you mark a field as pk=True, the system will also set index=True and unique=True.
+   - You can define a field as a primary key on the model by setting pk=True in its constructor.
+
+   class User(Model):
+       id = CharField(pk=True, SQL_TYPE="VARCHAR(36)")
+
+   In the absence of an explicit primary key, a default id field may be generated by the ORM.
+
+How conversion works (to_db_value and to_python_value)
+----------------------------------------------------
+
+- Default behavior:
+  - to_db_value(value, instance): If value is None or already of the field_type, it is returned as-is; otherwise, it attempts to cast using field_type(value).
+  - to_python_value(value): If value is None or already of the field_type, it is returned as-is; otherwise, it attempts to cast using field_type(value).
+
+- Overriding:
+  - You can override to_db_value and/or to_python_value in your custom field to implement complex or custom conversions (e.g., JSON serialization, date parsing, or protocol-specific transformations).
+
+Notes
+-----
+
+- Field validation and constraints are enforced at initialization (e.g., you cannot mix non-indexable fields with unique/index flags that imply indexing).
+- The field_type is provided by the _FieldMeta metaclass based on the mixin you supply when declaring a concrete field type.
+- Per-dialect overrides enable database-specific optimizations or compatibility shims without changing the high-level model definitions.
+
+See also
+--------
+
+- The Field constructor parameters (source_field, generated, pk, null, default, unique, index, description) for configuring field behavior.
+- The per-dialect inner class mechanism (_db_<dialect>) for database-specific overrides.
+- to_db_value and to_python_value for custom value transformations.

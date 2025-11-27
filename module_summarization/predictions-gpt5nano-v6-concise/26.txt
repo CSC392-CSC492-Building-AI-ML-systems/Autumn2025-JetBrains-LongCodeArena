@@ -1,0 +1,119 @@
+# w_kinavg: Kinetics Averaging (trace mode)
+
+This document describes the w_kinavg command, its behavior, inputs/outputs, and usage patterns. The w_kinavg implementation in this repository is a compatibility shim that delegates to a newer, recommended interface (w_direct). The command is deprecated in favor of w_direct, and developers should migrate accordingly.
+
+Note on deprecation
+- The shim class WKinAvg is a backward-compatible wrapper around the modern w_direct workflow.
+- Running w_kinavg emits a deprecation warning directing users to use w_direct instead.
+- Migration guidance and typical usage are provided in this document.
+
+Overview
+- Command name: w_kinavg
+- Subcommand/module: trace
+- Purpose: compute average state-to-state rates and associated confidence intervals from weighted-ensemble data.
+- Typical inputs: assignments file and kinetics data file (usually kintrace.h5 or kinmat.h5).
+- Typical outputs: kinavg.h5 containing averaged rates and, in trace mode, fluxes. When evolution mode is requested, additional datasets describing rate evolution are produced.
+- Default files:
+  - Kinetics input: kintrace.h5
+  - Output: kinavg.h5
+
+Key components (implementation details)
+- WKinAvg (shim)
+  - Subcommand: trace
+  - help_text: “averages and CIs for path-tracing kinetics analysis”
+  - default_kinetics_file: kintrace.h5
+  - default_output_file: kinavg.h5
+- WDirect (modern path)
+  - Prog: w_kinavg
+  - Subcommands: [WKinAvg]
+  - Subparsers title: direct kinetics analysis schemes
+  - Description: describes the process of computing average rates and errors from weighted-ensemble data, with guidance on required input files (assignments.h5, kintrace.h5/kinmat.h5).
+- Entry point behavior
+  - The entry_point() function warns that w_kinavg is deprecated and delegates to WDirect.
+  - It ensures a default subcommand of trace if not provided by the user.
+
+Output format (datasets)
+In trace mode, the kinavg output file (default kinavg.h5) contains:
+- /avg_rates [state,state]
+  - A structured dataset giving state-to-state rates aggregated over the selected iteration window.
+
+If --evolution-mode is specified, additional datasets become available:
+- /rate_evolution [window][state][state]
+  - State-to-state rates evaluated over windows of varying width.
+  - Evolution modes:
+    - cumulative: windows begin at --start-iter and grow by --step-iter for each element.
+    - blocked: windows have width --step-iter (last may be shorter), starting at --start-iter.
+- In trace mode, the following are also produced:
+  - /target_flux_evolution [window,state]
+  - /conditional_flux_evolution [window,state,state]
+  - These mirror the corresponding rate_evolution datasets but for flux quantities.
+
+Common data structure for all evolution-type datasets:
+- iter_start (Integer): Iteration where the averaging window begins (inclusive).
+- iter_stop (Integer): Iteration where the averaging window ends (exclusive).
+- expected (Floating-point): Mean rate within the window, in units of inverse time (1/tau).
+- ci_lbound (Floating-point): Lower bound of the confidence interval for the rate in this window.
+- ci_ubound (Floating-point): Upper bound of the confidence interval for the rate in this window.
+- corr_len (Integer): Correlation length of the rate within this window, in units of tau.
+
+Dataset attributes (present on each of the above datasets):
+- mcbs_alpha (Floating-point): Alpha value for the bootstrap confidence intervals.
+- mcbs_nsets (Integer): Number of bootstrap datasets used to generate the confidence intervals.
+- mcbs_acalpha (Floating-point): Alpha value used for determining correlation lengths.
+
+Input requirements and guidance
+- Required input files:
+  - assignments.h5 (or equivalent path-structured file): path assignment data.
+  - kintrace.h5 or kinmat.h5: kinetics data generated previously (e.g., by w_kinetics/trace-mode workflows).
+- Typical usage sequence: generate assignments and kinetics data first, then run w_kinavg trace to obtain averages and errors.
+- For evolution-mode outputs, you must specify --evolution-mode and related windowing options:
+  - --start-iter: first iteration to include in the first window.
+  - --step-iter: window increment (or fixed window size for blocked mode).
+  - --evolution-mode: cumulative or blocked.
+
+Command-line usage and examples
+- Basic usage (deprecated shim, forwards to modern workflow)
+  - w_kinavg trace
+  - This will use the default kinetics file kintrace.h5 and the default output kinavg.h5.
+- Specify custom input/output files
+  - w_kinavg trace -i 0 -o kinavg_custom.h5
+  - The -o/--output option selects the output HDF5 file; the default is kinavg.h5.
+- Enable evolution-mode to inspect rate evolution
+  - w_kinavg trace --evolution-mode cumulative --start-iter 0 --step-iter 10 -o kinavg_evo.h5
+  - In cumulative mode, windows begin at iter 0 and grow by 10 iterations for each successive element.
+  - In blocked mode:
+    - w_kinavg trace --evolution-mode blocked --start-iter 0 --step-iter 10 -o kinavg_evo_blocked.h5
+    - All windows have width 10 (the last may be shorter), starting at iter 0.
+- Notes on deprecation and migration
+  - Since w_kinavg is deprecated, migrate to using w_direct directly:
+    - w_direct trace (or w_direct <subcommand> as appropriate)
+  - The internal structure and outputs are equivalent under the modern interface; use w_direct for new workflows and maintenance.
+
+Migration guidance (developers)
+- Replace references to w_kinavg with w_direct:
+  - w_kinavg trace -> w_direct trace
+- Ensure the default input/output filenames remain consistent with your workflow, or override via -i/--kinetics-file and -o/--output as needed.
+- If your automation or scripts rely on the deprecation warning, keep the warning for a transitional period, but plan to switch to the w_direct invocation in your pipelines.
+
+Relation to other tools
+- w_assign: produces the assignments.h5 input used by w_kinavg.
+- w_kinetics: relates to generating kintrace.h5 or kinmat.h5 used by w_kinavg.
+- w_direct: the modern command framework that supersedes w_kinavg; provides the same underlying functionality in a consolidated interface.
+
+Internal implementation notes (for developers)
+- The w_kinavg module defines:
+  - WKinAvg: a subclass of DKinAvg with subcommand='trace', default input/output, and descriptive help text.
+  - WDirect: WESTMasterCommand + WESTParallelTool wrapper that exposes the w_kinavg command as an alias/interface to w_direct.
+- Entry point:
+  - entry_point() emits a deprecation warning and routes to WDirect. It also ensures a default subcommand of trace is present if not supplied.
+- This structure preserves backward compatibility with existing scripts while guiding users toward the unified w_direct interface.
+
+See also
+- w_direct (modern direct kinetics interface)
+- w_assign, w_kinetics (input data preparation)
+- kintrace.h5, kinavg.h5 (example input/output files)
+
+Appendix: output data semantics
+- All rate-related datasets report rates in inverse time units (1/tau).
+- Confidence intervals reflect bootstrap-derived uncertainty (mcbs_alpha, mcbs_nsets) and include a lower/upper bound as ci_lbound/ci_ubound.
+- Correlation lengths (corr_len) provide a rough scale for the statistical dependence of the rate estimates within each window.

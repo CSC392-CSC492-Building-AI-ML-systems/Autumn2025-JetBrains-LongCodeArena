@@ -1,0 +1,108 @@
+# Dataset loading utilities (datasets.rst)
+
+This section documents the dataset loading utilities used by the OpenML-based dataset fetcher. It explains how datasets are downloaded, cached, decompressed, retried on transient errors, and exposed to callers. The utilities are implemented as internal helpers (names starting with an underscore) and a public entry point (fetch_openml) that returns a dataset in a convenient structure.
+
+## Overview
+
+- Enables loading datasets from OpenML with robust networking and caching behavior.
+- Caches downloaded/OpenML resources under a configurable data home directory.
+- Handles gzip-encoded responses transparently and ensures atomic cache updates.
+- Provides retry logic for transient network failures and a clean-cache retry mechanism.
+- Exposes OpenML-specific error handling (e.g., HTTP 412) via a dedicated exception.
+
+## Core concepts
+
+- data_home and caching
+  - Cached OpenML resources are stored under `<data_home>/openml.org/OPENML_PATH.gz`.
+  - If data_home is None, no caching is performed and resources are downloaded on demand.
+  - The caching strategy uses atomic moves via a temporary directory to avoid partial writes and ensure thread-safety.
+
+- gzip handling and decompression
+  - OpenML responses may be gzip-encoded (Content-Encoding: gzip).
+  - The downloaded file is cached as a gzip file.
+  - When reading from the cache (or the network stream), the data is exposed via gzip.GzipFile, which transparently decompresses the content.
+  - If the server does not send gzip, the data is compressed locally and then decompressed on read, ensuring consistent output while keeping the cache content size small.
+
+- retry and cache-cleaning behavior
+  - Transient network errors trigger automatic retries with a configurable delay.
+  - If a download fails after a previous successful cache, the local cached file is removed and the download is retried (via _retry_with_clean_cache).
+  - A specific exception can be configured to avoid retrying in certain error cases.
+
+- OpenML API surface
+  - Endpoints used (constructed with a base URL):
+    - data/list: search by dataset name
+    - data/{id}: information about a dataset
+    - data/features/{id}: feature metadata
+    - data/qualities/{id}: dataset quality metrics
+    - data/v1/download/{id}: dataset file download
+
+- error handling
+  - A dedicated OpenMLError is raised for OpenML-specific issues (e.g., HTTP 412).
+  - Network errors are retried with informative messages.
+  - JSON content retrieval from the API is centralized to provide consistent error handling.
+
+## Public and internal interfaces
+
+- Public entry point
+  - fetch_openml: public API to fetch a dataset from OpenML (returns a Bunch-like structure with data, target, etc.).
+
+- Internal helpers (underscore-prefixed)
+  - _get_local_path(openml_path, data_home): compute the local cache path.
+  - _retry_with_clean_cache(openml_path, data_home, no_retry_exception=None): decorator to retry with cache clean-up on failure.
+  - _retry_on_network_error(n_retries=3, delay=1.0, url=""): decorator to retry on network errors with a delay.
+  - _open_openml_url(openml_path, data_home, n_retries=3, delay=1.0): fetch a resource from OpenML, applying caching and gzip handling.
+  - OpenMLError: specialized exception for OpenML-related errors.
+  - _get_json_content_from_openml_api(url, error_message, data_home, n_retries=3, delay=1.0): helper to fetch and parse JSON responses from the OpenML API with error handling.
+
+## Implementation notes
+
+- Caching strategy
+  - When data_home is provided, the loader ensures the cache directory exists and downloads are written atomically to a temporary location before being moved to the final cache path.
+  - The cached file is kept as a gzip file (path ends with .gz). The code wraps the local file with gzip.GzipFile for decompression on read, regardless of the server’s Content-Encoding.
+
+- Network resilience
+  - Retries are performed for URLError and TimeoutError, with a configurable delay.
+  - HTTPError with status code 412 is treated as a non-retriable OpenML error.
+  - If a retry is triggered and a local cache exists, the cache is removed to avoid serving stale data.
+
+- JSON API access
+  - JSON content is retrieved via the OpenML API, with the option to pass a custom error message for clearer exceptions.
+  - The helper consolidates common error handling for JSON API endpoints.
+
+## Usage patterns
+
+- Basic flow
+  - Call fetch_openml with a dataset name (and optional version, data_home, and parameters).
+  - The function returns a Bunch-like object containing dataset attributes (e.g., data, target, feature_names, etc.).
+
+- Offline mode
+  - Set data_home to a local cache directory to enable caching between runs. If you disable caching (data_home=None), datasets are downloaded each time, useful for offline testing or ensuring the latest data.
+
+- Handling OpenML-specific errors
+  - OpenML-related errors (e.g., generic data errors) surface as OpenMLError with informative messages.
+
+## Examples
+
+- Basic usage (public API)
+  - Load the Iris dataset from OpenML (you may specify name and version as supported by the wrapper):
+    - python
+      from sklearn.datasets import fetch_openml
+      X, y = fetch_openml(name="iris", version=1, as_frame=True, return_X_y=True)
+      print(X.shape, y.shape)
+
+- With caching
+  - Enable caching by specifying data_home:
+    - python
+      X, y = fetch_openml(name="iris", version=1, data_home="/path/to/cache", as_frame=True, return_X_y=True)
+
+- Offline/dependency management
+  - Disable caching to force network fetch on every call (not typical for production use):
+    - python
+      X, y = fetch_openml(name="iris", version=1, data_home=None, as_frame=True, return_X_y=True)
+
+## Developer notes
+
+- These utilities are designed for internal, robust OpenML-backed dataset loading. The underscore-prefixed functions are intended for internal use and may change without public API compatibility.
+- The design emphasizes deterministic cache updates, transparent gzip handling, and resilient network access to improve reproducibility in data science workflows.
+
+If you need additional examples (e.g., loading a specific dataset by ID, inspecting cache contents, or debugging cache misses), let me know and I can add targeted snippets.

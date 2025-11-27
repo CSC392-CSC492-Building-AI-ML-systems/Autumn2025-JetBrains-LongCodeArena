@@ -1,0 +1,121 @@
+# w_bins
+
+## Overview
+The w_bins command provides information about binning in a WEST simulation and can also modify (rebalance) the binning for the current iteration. It exposes two subcommands:
+- info: display binning information and statistics
+- rebin: rebuild the current iteration using a (potentially) new binning
+
+Key components include a data reader for WEST data, a bin-mapping component for bin definitions, and integration with the WEST driver to perform rebins.
+
+## Key Components
+- WBinTool
+  - Program: w_bins
+  - Subcommands:
+    - info: display information about binning
+    - rebin: rebuild current iteration with new binning
+  - Collaborators:
+    - WESTDataReader: reads simulation data, target states, and iteration groups
+    - BinMappingComponent: manages bin mapping and binning arguments
+    - write_bin_info: prints per-bin information and statistics
+- Data flow
+  - info:
+    - Reads target states and the current/specified iteration
+    - Bins initial point coordinates (pcoords) for that iteration
+    - Maps initial points to bins and prints per-bin statistics
+  - rebin:
+    - Uses the WEST driver to create a new iteration with a possibly updated bin mapper
+    - Bins the new iteration’s initial points, prints results, and optionally persists changes to HDF5
+- Entry point
+  - entry_point() defines the tool entry, with WBinTool().main referenced as the entry point
+
+Code excerpts (highlights)
+- Printing bin information during info:
+  write_bin_info(mapper, assignments, weights, n_target_states, detailed=self.args.detail)
+- Rebinning workflow (simplified view):
+  we_driver = westpa.rc.get_we_driver()
+  data_manager = self.data_reader.data_manager
+  segments = data_manager.get_segments(self.n_iter, load_pcoords=True)
+  last_iter_segments = data_manager.get_segments(self.n_iter - 1, load_pcoords=False)
+  we_driver.new_iteration(...)
+  we_driver.assign(segments, initializing=True)
+  we_driver.rebin_current(parent_segments=last_iter_segments)
+  weights = np.array([segment.weight for segment in we_driver.next_iter_segments])
+  assignments = np.fromiter(we_driver.next_iter_assignments, dtype=int, count=len(weights))
+  write_bin_info(mapper, assignments, weights, n_target_states, detailed=self.args.detail)
+
+  if self.args.confirm:
+      data_manager.prepare_iteration(self.n_iter, list(we_driver.next_iter_segments))
+      data_manager.save_iter_binning(...)
+      data_manager.update_initial_states(...)
+      data_manager.flush_backing()
+
+- Guard against rebining the first iteration:
+  if self.n_iter == 1:
+      sys.stderr.write('rebin is not supported for the first iteration; reinitialize with w_init instead\n')
+      sys.exit(1)
+
+## Usage
+- Display information about binning for a specific iteration (default: current iteration)
+  - w_bins info
+  - w_bins info -n 5
+  - w_bins info --detail
+  - w_bins info -n 3 --detail
+- Rebuild the current iteration using a (potentially) updated binning
+  - w_bins rebin
+  - w_bins rebin -n 4 --detail
+  - w_bins rebin --confirm --detail -n 2
+  - Note: rebining first iteration is not supported; use w_init for initialization
+
+Notes:
+- The info command relies on the current or specified iteration to map initial points to bins and print per-bin statistics.
+- The rebin command uses the WEST driver to form a new set of next-iteration segments, re-bin on initial points, and optionally persist the changes to the HDF5 backing store if --confirm is provided.
+
+## Details
+- Arguments
+  - info:
+    - -n, --n-iter: consider initial points of segment N_ITER (default: current iteration)
+    - --detail: display detailed per-bin information in addition to summary
+    - BinMappingComponent arguments (as added by self.binning.add_args)
+  - rebin:
+    - --confirm: commit the revised iteration to HDF5; without this, only calculation and printing occur
+    - --detail: display detailed per-bin information in addition to summary
+    - -n, --n-iter: consider initial points of segment N_ITER (default: current iteration)
+    - BinMappingComponent arguments (with suppression of --bins-from-file)
+    - --bins-from-file is suppressed as rebins create a fresh binning
+    - add_target_count_args: specify target counts per bin
+- Behavior
+  - info prints bin counts and weights for the iteration’s initial points
+  - rebin creates a new iteration with the current bin mapper and target counts, bins initial points, and prints the resulting binning; if --confirm is provided, it saves the new binning and updates state accordingly
+- Entry point
+  - def entry_point():
+      WBinTool().main
+
+Code references:
+- WBinTool class and its methods (add_args, process_args, go, cmd_info, cmd_rebin)
+- Interaction with Weston components: WESTDataReader, BinMappingComponent, write_bin_info
+- Interaction with we_driver and data_manager during rebins
+
+```python
+# Example usage snippets from the source
+
+# Printing bin information for an iteration
+weights = iter_group['seg_index']['weight']
+write_bin_info(mapper, assignments, weights, n_target_states, detailed=self.args.detail)
+
+# Rebin workflow (high-level)
+we_driver = westpa.rc.get_we_driver()
+data_manager = self.data_reader.data_manager
+segments = data_manager.get_segments(self.n_iter, load_pcoords=True)
+last_iter_segments = data_manager.get_segments(self.n_iter - 1, load_pcoords=False)
+
+we_driver.new_iteration(
+    initial_states=avail_initial_states, bin_mapper=mapper, bin_target_counts=self.binning.bin_target_counts
+)
+we_driver.assign(segments, initializing=True)
+we_driver.rebin_current(parent_segments=last_iter_segments)
+
+weights = np.array([segment.weight for segment in we_driver.next_iter_segments])
+assignments = np.fromiter(we_driver.next_iter_assignments, dtype=int, count=len(weights))
+write_bin_info(mapper, assignments, weights, n_target_states, detailed=self.args.detail)
+```
+

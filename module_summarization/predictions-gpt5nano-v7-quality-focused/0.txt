@@ -1,0 +1,161 @@
+Working with assignments and allocations
+=======================================
+
+Introduction
+------------
+This document describes how to work with assignments and allocations through the session
+interface provided by the ftrack API. The Session manages authentication, caching,
+plugin discovery, and operation tracking for changes such as assignments and allocations.
+
+Prerequisites
+-------------
+- A running ftrack server you can connect to.
+- API credentials (server URL, API key, and API user). If you do not provide them
+  explicitly, the Session will attempt to read them from environment variables:
+  - FTRACK_SERVER for the server URL
+  - FTRACK_API_KEY (and optionally FTRACK_APIKEY for backwards compatibility)
+  - FTRACK_API_USER (or fall back to the current user via getpass)
+
+Session setup
+-------------
+Create a Session to interact with the server. The following parameters are available:
+
+- server_url: URL to the ftrack server (including port if needed)
+- api_key: API key for authentication
+- api_user: username in ftrack used for operations
+- auto_populate: if True, missing entity attributes are fetched automatically on access
+- plugin_paths: list of paths to search for plugins
+- cache: a cache object implementing the ftrack_api.cache interface (or a callable returning None)
+- cache_key_maker: key maker used to generate cache keys
+- auto_connect_event_hub: if True, embeds an event hub connection in the background
+- schema_cache_path: path to store schema cache files (False disables schema caching)
+- plugin_arguments: mapping of arguments passed to plugin registration
+
+Code example (minimal)
+----------------------
+import ftrack_api
+
+# Session will read credentials from environment variables if not provided
+session = ftrack_api.Session()
+
+Explicitly providing credentials
+-------------------------------
+session = ftrack_api.Session(
+    server_url='https://your.ftrack.server',
+    api_key='YOUR_API_KEY',
+    api_user='your_username',
+)
+
+Operational model: assignments and allocations
+----------------------------------------------
+- The session maintains a record of pending operations in
+  session.recorded_operations (an Operations instance). This represents changes
+  you intend to apply to the server, such as assignments or allocations.
+
+- The session uses a flag session.record_operations to control whether new
+  operations are recorded automatically. Set to True to enable recording, or
+  False to temporarily disable it.
+
+- Pending operations are accumulated and can later be synchronized with the server
+  (the exact commit/push mechanism is handled by the underlying API as part of
+  the session lifecycle).
+
+Examples
+--------
+Inspecting and controlling operation recording:
+
+.. code-block:: python
+
+    import ftrack_api
+
+    session = ftrack_api.Session(
+        server_url='https://your.ftrack.server',
+        api_key='YOUR_API_KEY',
+        api_user='your_username'
+    )
+
+    # Disable automatic recording of operations (e.g., assignments/allocations)
+    session.record_operations = False
+
+    # ... perform actions that would normally create operations ...
+
+    # Re-enable operation recording
+    session.record_operations = True
+
+Notes on caching
+----------------
+- The session accepts a cache implementing ftrack_api.cache.Cache or a callable that
+  returns None if a suitable cache cannot be configured. When provided, the session
+  adds the given cache to a layered cache with a MemoryCache at the top level.
+  This helps improve performance for repeated lookups related to assignments and allocations.
+
+- cache_key_maker controls how object keys are generated for storage in the cache. If not provided, a StringKeyMaker is used by default.
+
+Code example (cache)
+--------------------
+.. code-block:: python
+
+    from ftrack_api.cache import MemoryCache, StringKeyMaker
+    import ftrack_api
+
+    cache = MemoryCache()
+    session = ftrack_api.Session(
+        server_url='https://your.ftrack.server',
+        api_key='YOUR_API_KEY',
+        api_user='your_username',
+        cache=cache,
+        cache_key_maker=StringKeyMaker(),
+    )
+
+Schema caching
+--------------
+- You can enable schema caching by providing a path to store cache files via
+  schema_cache_path. If not set, the environment variable FTRACK_API_SCHEMA_CACHE_PATH
+  is used. If neither is specified, a temporary directory is used. Set schema_cache_path
+  to False to disable schema caching entirely.
+
+Plugin discovery and configuration
+----------------------------------
+- plugin_paths allows you to specify additional locations to search for plugins.
+- plugin_arguments provides optional arguments to plugin registration. If a plugin does
+  not accept a given argument, the discovery mechanism will drop such arguments and log a warning.
+
+Code example (plugins)
+----------------------
+.. code-block:: python
+
+    session = ftrack_api.Session(
+        server_url='https://your.ftrack.server',
+        api_key='YOUR_API_KEY',
+        api_user='your_username',
+        plugin_paths=['/path/to/custom/plugins'],
+        plugin_arguments={'argument1': 'value1'}
+    )
+
+Auto-population behavior
+------------------------
+- When auto_populate is True (default), accessing entity attributes that are not yet
+  loaded triggers a fetch from the server. This is useful when working with assignments
+  and allocations where related data may be loaded on demand.
+
+- You can disable this by passing auto_populate=False to the Session constructor.
+
+Code example (auto_populate)
+----------------------------
+.. code-block:: python
+
+    session = ftrack_api.Session(auto_populate=False)
+
+What to do next
+---------------
+- Use the session to retrieve entities and perform operations related to assignments
+  and allocations, leveraging the pending-operations mechanism to batch changes
+  before sending them to the server.
+- Tune caching and schema caching for performance in environments with frequent
+  reads of assignment/allocation data.
+
+Tips
+----
+- Ensure environment variables are correctly set if you rely on implicit credential loading.
+- For large projects, consider configuring a dedicated cache and appropriate cache key strategy
+  to avoid excessive server round-trips during assignment/allocation workflows.

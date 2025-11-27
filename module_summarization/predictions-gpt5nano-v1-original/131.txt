@@ -1,0 +1,107 @@
+Verification scheme for FITS data
+=================================
+
+Purpose
+--------
+This verification scheme provides a uniform framework to validate values in FITS data
+structures and to report or fix issues in a controlled way. It is implemented by
+the _Verify base class and the accompanying _ErrList error container. The behavior
+is designed to integrate with Astropy’s warning and exception handling, and it
+references the general :ref:`astropy:verify` documentation for broader context.
+
+Key components
+--------------
+
+- VerifyError, VerifyWarning
+  - Custom exception and warning types raised or emitted during verification.
+
+- VERIFY_OPTIONS
+  - A list of valid option strings controlling reporting and fixing behavior:
+    ignore, warn, exception, fix, silentfix, fix+ignore, fix+warn, fix+exception,
+    silentfix+ignore, silentfix+warn, silentfix+exception.
+
+- _Verify
+  - Shared verification logic:
+    - run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+      Execute the verification with a selected option. Returns a pair (fixable, text) describing
+      whether the issue is fixable and the text to report.
+    - verify(option="warn")
+      Run all verifications for an instance. Accepts a string option that may be
+      a combination of fix-related and reporting-related modifiers (see below).
+      The method validates the option, delegates to a _verify implementation
+      to collect errors, and then reports or raises based on the chosen option.
+
+- _ErrList
+  - A nested list structure that holds error messages produced by verifications.
+    - __str__ prints the flattened, human-readable messages.
+    - iter_lines(filter=None, shift=0) iterates over messages, yielding
+      (fixable, line) tuples for top-level messages and recursively for nested
+      structures, with indentation controlled by shift and a unit header when appropriate.
+
+Option semantics
+----------------
+When calling verify(option), the option is normalized to lowercase and must be one of VERIFY_OPTIONS.
+
+- If opt == "ignore": verification is skipped entirely.
+- Otherwise, the verification results are produced by self._verify(opt) (not shown here) and stored as errs.
+
+Option splitting and reporting vs. fixing
+- If "+" appears in the option, it is split into:
+  - fix_opt: the part before the "+"
+  - report_opt: the part after the "+"
+- If opt is "fix" or "silentfix": fix_opt = opt, report_opt = "exception"
+- Otherwise: fix_opt = None, report_opt = opt
+
+Special-cases
+- If fix_opt == "silentfix" and report_opt == "ignore": nothing is reported.
+- If fix_opt == "silentfix": only unfixed (unfixable) errors are reported.
+  This is achieved by filtering lines to those where fixable is False.
+- If fix_opt == "fix" and report_opt == "ignore": only fixable errors are reported.
+  This is achieved by filtering lines to those where fixable is True.
+
+Output handling
+- Messages are collected from errs.iter_lines(line_filter) and prefixed with
+  "Verification reported errors:" plus a note about zero-based indexing.
+- If silentfix is used and there are no unfixable errors, verification returns without reporting.
+- If reporting is enabled (warn) or fixes were applied and there are no unfixable errors, a
+  warning is emitted for each message. Otherwise, a VerifyError is raised with the
+  joined messages.
+
+Usage pattern
+-------------
+- Subclass _Verify and implement _verify(self, option) to produce an _ErrList of
+  errors (nested as needed) for the data being verified.
+- Call v.verify(option) to perform verification with the desired reporting/fixing
+  behavior.
+
+Example
+-------
+class MyVerifier(_Verify):
+    def __init__(self, data):
+        self.data = data
+
+    def _verify(self, option):
+        errs = _ErrList(unit="Value")
+        # Populate errs with messages like:
+        # errs.append((True, "Value is out of range"))
+        # or nest groups with _ErrList([...], unit="Group")
+        return errs
+
+v = MyVerifier(fits_data)
+# Warn on issues
+v.verify("warn")
+# Fixable issues are fixed, then a fix-related report is shown as warnings
+v.verify("fix+warn")
+# Only fixable issues are reported, and reports are ignored
+v.verify("fix+ignore")
+
+Notes
+-----
+- The verification output includes a header and a note that all indexing in
+  the error messages uses zero-based indexing.
+- The exact structure of errors is designed to support nested categories
+  via _ErrList, enabling grouped reporting of related issues.
+
+Reference
+---------
+See the broader verifications documentation here: :ref:`astropy:verify` for more info.

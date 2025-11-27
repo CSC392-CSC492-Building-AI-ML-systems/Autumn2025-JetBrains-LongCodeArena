@@ -1,0 +1,95 @@
+# Transforming the prediction target
+
+## Overview
+This documentation covers transforming the prediction target (y). The encoding infrastructure in preprocessing_targets.rst focuses on transforming input features (X) using encoders like OneHotEncoder and OrdinalEncoder. Transforming the target is typically handled separately from feature preprocessing, using dedicated utilities and patterns in scikit-learn.
+
+Key idea:
+- Encoders defined in this module operate on X (features) and compute categories_ per feature during fit.
+- Target transformation is performed with separate tools (e.g., LabelEncoder, dictionary mapping, or TransformedTargetRegressor for regression).
+
+## Key Components
+- OneHotEncoder
+  - Encodes categorical features into a one-hot numeric format.
+  - Works on 2D feature matrices (X) and preserves per-column data types when used with pandas DataFrames.
+  - Fit/transform flow resembles: fit(X) -> transform(X).
+
+- OrdinalEncoder
+  - Encodes categorical features as integers, preserving the order of categories when appropriate.
+  - Also operates on X and uses a per-feature categories_ mapping learned at fit time.
+
+- _BaseEncoder
+  - Internal base class that handles input validation, per-feature processing, and category management.
+  - Examples from the code:
+    - _check_X(X, force_all_finite=True) validates and splits X into per-column arrays to preserve dtype information.
+    - _fit(...) computes self.categories_ for each feature and may return category_counts when requested.
+    - _transform(...) constructs integer-encoded representations based on the learned categories_.
+
+Note: The following code excerpts illustrate internal flow for feature encoding (not target encoding):
+- Per-feature handling during fitting:
+  - X_list, n_samples, n_features = self._check_X(X, force_all_finite=force_all_finite)
+  - self.categories_ is populated per feature with the discovered or provided categories.
+- Transforming features:
+  - X_list, n_samples, n_features = self._check_X(X, force_all_finite=force_all_finite)
+  - _transform uses the learned categories_ to produce encoded output.
+
+## Usage
+To transform the feature set X using these encoders (not the target y), you typically proceed as follows:
+
+- OneHotEncoder example:
+```
+from sklearn.preprocessing import OneHotEncoder
+
+# X contains categorical features
+enc = OneHotEncoder(handle_unknown="ignore")
+X_encoded = enc.fit_transform(X)
+```
+
+- OrdinalEncoder example:
+```
+from sklearn.preprocessing import OrdinalEncoder
+
+enc = OrdinalEncoder()
+X_encoded = enc.fit_transform(X)
+```
+
+- If you need to transform the target (y) itself, use a target-specific transformer:
+  - For classification with string labels:
+```
+from sklearn.preprocessing import LabelEncoder
+
+y = ["cat", "dog", "cat"]
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+# y_encoded -> array([0, 1, 0])
+```
+  - To apply a consistent mapping across train/test splits, fit on training data and apply to test data:
+```
+y_test_encoded = le.transform(y_test)
+```
+  - Alternative with pandas:
+```
+import pandas as pd
+y = pd.Series(["spam", "ham", "spam"])
+codes, uniques = pd.factorize(y)
+# codes -> array([0, 1, 0]); uniques -> Index(['spam', 'ham'], dtype=object)
+```
+
+- For regression tasks where you want to apply a transformation to the target after prediction, use TransformedTargetRegressor:
+```
+from sklearn.compose import TransformedTargetRegressor
+from sklearn.ensemble import RandomForestRegressor
+import numpy as np
+
+reg = TransformedTargetRegressor(
+    regressor=RandomForestRegressor(),
+    func=np.log1p,
+    inverse_func=np.expm1
+)
+```
+
+## Details
+- Transforming targets is optional and task-dependent:
+  - Classification with discrete labels often benefits from mapping labels to integers, especially for certain estimators that require numeric y.
+  - Regression may use TransformedTargetRegressor to stabilize variance or meet model assumptions.
+- When using pipelines or cross-validation, ensure target transformers are fitted only on training data and applied consistently to validation/test data.
+- The internal encoders (OneHotEncoder, OrdinalEncoder) are designed to preserve dtype information per DataFrame column during validation and transformation, as seen in _BaseEncoder._check_X, which creates a separate array per feature to maintain metadata.

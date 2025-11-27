@@ -1,0 +1,119 @@
+w_multi_west
+============
+
+Overview
+--------
+w_multi_west is a WESTPA tool designed to combine multiple WESTPA simulations while accounting for reweighting. It builds a consolidated, reweighted dataset (default output file multi.h5) from one or more WEST HDF5 result files, while optionally aggregating auxiliary datasets and ibstates.
+
+Key Components
+--------------
+- WMultiWest (class)
+  - Subclasses WESTMultiTool and serves as the main entry point for the w_multi_west command.
+  - Core attributes include a progress indicator and state-tracking fields.
+  - Essential methods:
+    - __init__: initializes internal state for tracking trials, states, and simulations.
+    - add_args(parser): defines command-line arguments for input/output, auxiliaries, and reweighting options.
+      - Evidence (excerpt):
+        .. code-block:: python
+           def add_args(self, parser):
+               self.progress.add_args(parser)
+               iogroup = parser.add_argument_group('input/output options')
+               iogroup.add_argument('-o', '--output-file', default='multi.h5', help='''The name of the output file to store results in.''')
+               iogroup.add_argument(
+                   '-W',
+                   '--west',
+                   '--WEST_H5FILE',
+                   default='west.h5',
+                   help='''The name of the main.h5 file inside each simulation
+                                    directory''',
+               )
+               iogroup.add_argument('-a', '--aux', action='append', help='''Names of additional auxiliary datasets to be combined''')
+               iogroup.add_argument('-aa', '--auxall', action='store_true', help='''Combine all auxiliary datasets. Default: False''')
+               iogroup.add_argument('-nr', '--no-reweight', action='store_true', help='''Do not reweight. Default: False''')
+               iogroup.add_argument(
+                   '-ib', '--ibstates', action='store_true', help='''Attempt to combine ibstates dataset. Default: False'''
+               )
+    - open_files(): opens the output HDF5 file (via h5io.WESTPAH5File) and stamps creator data; prepares input WEST HDF5 files for merging.
+      - Evidence (excerpt):
+        .. code-block:: python
+           def open_files(self):
+               self.output_file = h5io.WESTPAH5File(self.output_file, 'w', creating_program=True)
+               h5io.stamp_creator_data(self.output_file)
+               opened_files = self.generate_file_list([self.west])
+               self.westH5 = opened_files[self.west]
+    - process_args(args): maps parsed command-line arguments to internal state (e.g., output_file, west file, auxiliaries, reweight flag, ibstates flag).
+      - Evidence (excerpt):
+        .. code-block:: python
+           def process_args(self, args):
+               self.progress.process_args(args)
+               self.output_file = args.output_file
+               self.output_file_name = args.output_file
+               self.west = args.west
+               self.sims = args.sims
+               self.aux = args.aux
+               self.auxall = args.auxall
+               self.reweight = args.no_reweight
+               self.ibstates = args.ibstates
+    - total_number_of_walkers(): computes the total number of walkers across the merged simulations.
+    - go(): orchestrates the main processing loop with a progress indicator.
+      - Evidence (excerpt):
+        .. code-block:: python
+           def go(self):
+               pi = self.progress.indicator
+               self.istates = True  # Assume serendipitously istates is same between runs...
+               with pi:
+                   pi.new
+
+- get_bin_mapper (function)
+  - Retrieves a bin mapper by hash from a HDF5 file under the /bin_topologies group, unpickling the mapper when found. Raises KeyError if not available.
+  - Important for reweighting/bin mapping logic during merge.
+
+- create_idtype_array (function)
+  - Creates a new array with istate_dtype, copying over existing fields and resetting basis_auxref to empty bytestrings. Used when aligning/rewriting istate data between inputs.
+
+- Supporting data structures
+  - ci_dtype: dtype for cluster information fields used in conditional indexing or related statistics.
+  - Segment (inner class)
+    - Lightweight container for per-segment attributes: weight, iteration, simid, recycled_in.
+
+Usage
+-----
+Basic usage to merge WESTPA results with reweighting enabled (default):
+
+.. code-block:: none
+
+   w_multi_west -o multi.h5 -W west.h5
+
+Options (defined in add_args):
+- -o, --output-file: Name of the output file to store results in (default: multi.h5)
+- -W, --west, --WEST_H5FILE: Name of the main west.h5 file inside each simulation directory (default: west.h5)
+- -a, --aux: Names of additional auxiliary datasets to be combined
+- -aa, --auxall: Combine all auxiliary datasets
+- -nr, --no-reweight: Do not reweight (default: reweight)
+- -ib, --ibstates: Attempt to combine ibstates dataset
+
+Example with auxiliaries:
+.. code-block:: none
+
+   w_multi_west -o merged.h5 -W west.h5 -a d1 -a d2
+
+Notes
+- The tool relies on theWESTMultiTool base and reads multiple input simulations to produce a single output HDF5 file.
+- Reweighting is performed by default unless -nr/--no-reweight is specified.
+- The -ibstates option enables combining ibstates data if present.
+
+Details
+-------
+- The WMultiWest tool is designed to coordinate merging of several WESTPA runs, leveraging a common interface provided by WESTMultiTool. It initializes a progress indicator and tracks several state counters (e.g., ntrials, niters) to manage the merge process.
+- The tool uses the following workflow:
+  - Parse command-line arguments (add_args)
+  - Open and stamp the output file (open_files)
+  - Determine input simulations to merge (generate_file_list)
+  - Compute total walkers across inputs (total_number_of_walkers)
+  - Execute the merge with progress tracking (go)
+- Internals:
+  - get_bin_mapper loads and returns the appropriate bin mapper for reweighting based on a hash value found in the input data.
+  - create_idtype_array ensures istate data from inputs conforms to istate_dtype, preserving data and resetting the basis_auxref field.
+- Output:
+  - The merged results are stored in the specified output HDF5 file (default multi.h5), including reweighted statistics and optionally combined auxiliary datasets.
+

@@ -1,0 +1,113 @@
+Computational Performance
+=========================
+
+This document describes the computational performance considerations for the components in the provided code, with an emphasis on how parallelism, cloning/fit orchestration, and multioutput handling impact runtime and memory usage. It also covers versioning guidance used to achieve predictable performance in benchmarks and CI.
+
+Overview
+--------
+
+- The module implements multioutput meta-estimators that wrap a base estimator to handle multiple targets.
+- Core performance levers are:
+  - The base estimator’s own training time and parallelization strategy.
+  - The n_jobs parameter exposed by meta-estimators to control parallelism.
+  - The cost of cloning estimators (via clone) and the overhead of orchestration (routing, checks).
+  - Memory usage associated with creating and maintaining multiple estimator instances (especially in multioutput settings).
+- Dependency version anchors are defined to ensure compatibility and performance characteristics of compiled extensions (NumPy, SciPy, Cython) and toolchains (pytest, mypy, docs tooling).
+
+Key Dependency and Performance Context
+--------------------------------------
+
+- The script specifies minimum versions for a broad set of packages (numpy, scipy, joblib, threadpoolctl, cython, etc.). Matching or exceeding these versions helps ensure consistent performance characteristics, threaded behavior, and vectorized operations.
+- PyPy users have a higher minimum NumPy version due to compatibility considerations.
+- The dependency mapping supports CI workflows, including a reverse mapping from tags to package specs for min-version reporting.
+
+Performance-Relevant Architecture Details
+-----------------------------------------
+
+- Multioutput Estimators
+  - The module defines abstract base classes for multioutput meta-estimators. These extend single-output estimators to handle multiple targets by wrapping a single base estimator.
+  - The performance impact is largely driven by the base estimator and how the multioutput wrapper orchestrates calls to it.
+
+- Cloning and Fit Orchestration
+  - Helper _fit_estimator(estimator, X, y, sample_weight=None, **fit_params):
+    - Clones the provided estimator to avoid unintended side effects between fits.
+    - Calls fit on the cloned estimator (with optional sample_weight).
+    - Cloning introduces a small, but non-negligible, memory/time overhead when training many sub-estimators or repeated fits, especially in loops or repeated cross-validation.
+  - Helper _partial_fit_estimator(estimator, X, y, classes=None, partial_fit_params=None, first_time=True):
+    - Supports partial_fit by optionally cloning on the first call.
+    - Subsequent calls reuse the existing estimator (no re-cloning), reducing overhead for incremental learning scenarios.
+  - These helpers emphasize correctness (no shared state across fits) while attempting to minimize repeated cloning in iterative workflows.
+
+- Parallelism and n_jobs
+  - The _MultiOutputEstimator base class declares an n_jobs parameter with constraints (n_jobs: Integral or None).
+  - Parallelism is typically achieved by the underlying base estimator or by the orchestration layer in higher-level meta-estimators (via joblib/Parallel mechanisms in sklearn utilities).
+  - Performance implications:
+    - True parallel speedup requires a base estimator and data pipeline that benefit from parallel execution.
+    - The meta-estimator’s own overhead (routing, validation, parameter checks) should be small relative to the base estimator’s cost to realize net gains.
+    - Setting n_jobs > 1 can lead to increased CPU utilization but may also introduce contention or diminished returns if the base estimator is not parallel-safe or if memory overhead becomes substantial.
+  - Threading libraries (threadpoolctl) and joblib versions influence how threads are created and managed. The minimum versions in dependent_packages reflect a baseline that supports modern thread pooling and deterministic behavior in benchmarks.
+
+- Memory Considerations
+  - Cloning estimators for each fit can double memory usage if multiple clones exist simultaneously (e.g., during cross-validation or ensemble training).
+  - Multioutput scenarios may require storing multiple dedicated estimator instances, multiplying memory footprint with the number of outputs/targets.
+  - Users should consider batch processing, streaming data, or incremental learning (partial_fit) when operating under memory constraints.
+
+- Numerical and Scientific Libraries
+  - Performance is sensitive to the compatibility and optimization levels of NumPy/SciPy/Cython. The code comments indicate alignment with pyproject.toml and the oldest-supported NumPy version for minimum Python support, which can affect emission of optimized code paths and vectorized operations.
+  - Staying within recommended version ranges helps avoid regressions or slow paths in numerical computations.
+
+Practical Guidance and Examples
+-------------------------------
+
+- Example: Wrapping a base estimator with multioutput support and enabling parallelism
+  .. code-block:: python
+
+     from sklearn.multioutput import MultiOutputRegressor
+     from sklearn.ensemble import RandomForestRegressor
+
+     base = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=4)
+     mor = MultiOutputRegressor(base)
+
+     mor.fit(X_train, y_train)  # training time depends on base estimator and data
+
+- Example: Using partial_fit for incremental learning to reduce per-step overhead
+  .. code-block:: python
+
+     from sklearn.linear_model import SGDRegressor
+
+     base = SGDRegressor(loss="squared_loss", max_iter=1, tol=0.0)
+     mor = MultiOutputRegressor(base)
+
+     # First call may clone the estimator
+     mor.partial_fit(X_batch1, y_batch1, classes=None)
+
+     # Subsequent partial_fit calls reuse the existing estimator (no re-clone)
+     mor.partial_fit(X_batch2, y_batch2, classes=None)
+
+- Performance benchmarking suggestions
+  - Compare training times with and without multioutput wrappers on representative workloads.
+  - Use the n_jobs flag to explore parallel efficiency of the base estimator.
+  - Monitor memory usage when scaling to many targets or large base estimators.
+
+Notes on CI, Versioning, and Baselines
+--------------------------------------
+
+- The code includes a helper for obtaining minimum dependency versions via the command line:
+  - Run the script with a package name to retrieve its minimum required version.
+  - This is intended for CI metadata generation and ensures the environment provides consistent performance characteristics.
+- Maintain alignment with the minimum versions to avoid regressions in performance-critical code paths (NumPy/SciPy/Cython optimizations, threading behavior).
+
+Performance Pitfalls to Avoid
+-----------------------------
+
+- Overusing parallelism: If the base estimator is not parallel-friendly, increasing n_jobs may yield little or no speedup and can worsen contention.
+- Excessive cloning: Repeated full copies of large estimators can dramatically increase memory usage and latency.
+- Ignoring memory constraints in multioutput setups: Training many targets with large models can exhaust RAM; consider incremental learning or dimensionality reduction where appropriate.
+- Mismatched library versions: Using NumPy/SciPy versions outside the recommended ranges can affect performance (e.g., slower linear algebra paths or slower array operations).
+
+Summary
+-------
+
+- Computational performance for these multioutput components hinges on the base estimator’s efficiency, the degree of parallelism leveraged via n_jobs, and the overheads introduced by cloning and orchestration.
+- Proper versioning (as encoded in the dependency map) helps ensure stable performance characteristics across environments.
+- When optimizing, prioritize the base estimator’s speed and parallelism first, then consider memory implications of multioutput wrapping and incremental learning strategies to mitigate overhead.

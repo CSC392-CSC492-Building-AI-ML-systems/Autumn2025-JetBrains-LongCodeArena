@@ -1,0 +1,195 @@
+Utilities for Developers
+=========================
+
+Overview
+--------
+
+This module provides compatibility shims and internal utilities to maintain stable behavior across different versions of Python, NumPy, SciPy, and related libraries. It exposes a mix of public-facing wrappers and private helpers used throughout the project to smooth over API changes and performance considerations (e.g., threadpool control, sparse matrix handling, and importlib.resources backports).
+
+Public API and Key Components
+-----------------------------
+
+Note: Many items are intended for internal use (prefixed with an underscore) but are useful to understand for developers contributing to or debugging the project.
+
+- Sparse container type registries
+  - CSR_CONTAINERS
+  - CSC_CONTAINERS
+  - COO_CONTAINERS
+  - LIL_CONTAINERS
+  - DOK_CONTAINERS
+  - BSR_CONTAINERS
+
+  Purpose:
+  - Collects the container types used to represent sparse matrices across SciPy versions.
+  - When SciPy 1.8+ introduces sparse arrays (csr_array, csc_array, etc.), these helpers are extended to recognize them as valid containers.
+
+  Version notes:
+  - Introduced/extended to support SciPy 1.8+ sparse arrays.
+  - Useful for isinstance checks that should work with both classic sparse matrices and modern sparse array types.
+
+  Future plan:
+  - The containers are kept as a compatibility layer; a note in the code mentions removing this container approach when sparse matrices are deprecated in favor of newer representations.
+
+- Object NaN check helper
+  - _object_dtype_isnan(X)
+
+  Purpose:
+  - A tiny helper that returns a boolean mask for NaNs in object-dtype arrays (X != X).
+
+- Percentile compatibility shim
+  - _percentile(a, q, *, method="linear", **kwargs)
+  - percentile (imported from numpy when available)
+
+  Purpose:
+  - NumPy < 1.22 used the parameter name interpolation; NumPy >= 1.22 uses method.
+  - The code provides a backward-compatible path:
+    - For NumPy < 1.22: _percentile redirects to numpy.percentile with interpolation=method.
+    - For NumPy >= 1.22: percentile is imported directly from numpy.
+
+  Version notes:
+  - Introduced to bridge the change in NumPy’s percentile API.
+  - Targeted for environments where NumPy < 1.22 may be in use.
+  - Intended to be removed when the minimum supported NumPy version reaches 1.22 or higher.
+
+- Thread pool compatibility and utilities
+  - _get_threadpool_controller()
+  - threadpool_limits(limits=None, user_api=None)
+  - threadpool_info()
+
+  Purpose:
+  - Provides a compatibility layer for thread pool control across threadpoolctl versions.
+  - Historically, threadpoolctl established a global controller on first use. This module caches a controller in sklearn._sklearn_threadpool_controller to preserve that behavior and speed up repeated calls.
+  - threadpool_limits wraps the controller’s limit method when a controller is available; otherwise it falls back to threadpoolctl.threadpool_limits.
+  - threadpool_info similarly uses a cached controller when available, otherwise defers to threadpoolctl.threadpool_info.
+
+  Version notes:
+  - Supports threadpoolctl >= 3.0.0 behavior and older versions by falling back to the standard threadpool_limits/threadpool_info calls.
+  - The caching mechanism (sklearn._sklearn_threadpool_controller) is introduced to avoid repeatedly inspecting loaded libraries.
+
+  Examples:
+  - Limiting threads for a section of code:
+    - with threadpool_limits(limits=2):
+        # code that should run with at most 2 threads
+  - Querying current threadpool info:
+    - info = threadpool_info()
+
+- Deprecated import path for delayed (compatibility shim)
+  - @deprecated(...) def delayed(function)
+
+  Purpose:
+  - Maintains a stable import path for delayed until a future removal, pointing developers to the new location:
+    sklearn.utils.parallel.delayed
+
+  Migration note:
+  - The helper is a thin wrapper that imports the canonical implementation from sklearn.utils.parallel.
+  - The decorator message indicates the deprecation path and removal timeline (1.5 target in the message).
+
+- Mode compatibility shim
+  - _mode(a, axis=0)
+
+  Purpose:
+  - Wraps scipy.stats.mode to handle API and behavior differences across SciPy versions.
+  - For SciPy >= 1.9.0, uses mode with keepdims=True and handles a specific shape change introduced in SciPy 1.10+ when axis=None.
+  - Falls back to scipy.stats.mode for older SciPy versions.
+
+  Version notes:
+  - Provides a stable interface across SciPy releases, with a targeted path for a known shape-change regression.
+
+- Constrained Conjugate Gradient compatibility
+  - _sparse_linalg_cg(A, b, **kwargs)
+
+  Purpose:
+  - Normalizes the call signature for cg across SciPy versions:
+    - If SciPy >= 1.12.0, use scipy.sparse.linalg.cg directly.
+    - Otherwise, remap rtol to tol and provide a default atol="legacy" if not supplied, then call cg.
+
+  Version notes:
+  - Ensures consistent behavior of the conjugate gradient solver across older SciPy versions.
+
+- Python 3.9+ importlib.resources backport helpers
+  - _open_text(data_module, data_file_name)
+  - _open_binary(data_module, data_file_name)
+  - _read_text(descr_module, descr_file_name)
+  - _path(data_module, data_file_name)
+
+  Purpose:
+  - Backports Python 3.9 importlib.resources API to older Python versions:
+    - For Python >= 3.9, uses resources.files(...).joinpath(...).open/read as appropriate.
+    - For older Python versions, uses the earlier API (resources.open_text, resources.open_binary, resources.read_text).
+  - _path returns a path-like object for the data file when Python >= 3.9, enabling file-path-based access while preserving compatibility.
+
+  Version notes:
+  - These helpers are specifically for backporting Python 3.9’s importlib.resources API.
+  - Use of the newer API is preferred on Python 3.9+, with graceful fallback on older interpreters.
+
+Implementation and Design Notes
+-----------------------------
+
+- Version-aware branching
+  - The module uses version parsing and comparisons (parse_version) to select implementations depending on the installed NumPy/SciPy versions.
+  - This approach minimizes runtime errors by selecting the most compatible path for a given environment.
+
+- Backward compatibility strategy
+  - Prefer thin wrappers or small shims over duplicating logic in multiple places.
+  - Centralize compatibility concerns to one module to simplify maintenance and testing.
+
+- Deprecations and migration
+  - The delayed function is kept for backward compatibility with a clear deprecation message directing developers to the new import path.
+  - The percentile shim documents how NumPy’s API change affects callers and provides a single, version-conditional location for the compatibility layer.
+
+- Future maintenance notes
+  - The code contains explicit TODOs noting potential removal of container lists when sparse matrices are deprecated and a note that certain compatibility blocks may be simplified once minimum supported versions reach future thresholds.
+  - Documentation should be updated in tandem with minimum supported versions to reflect removals or consolidations.
+
+Versioning and Maintenance Guidance
+-----------------------------------
+
+- How to annotate fixes
+  - If you add content or fixes here, include the package version at which the fix is no longer needed (e.g., when the minimum supported NumPy/SciPy becomes high enough that the shim is unnecessary).
+
+- Suggested upgrade path for maintainers
+  - When minimum supported versions reach a threshold where a particular compatibility path is unused, mark the code for removal and update the documentation accordingly.
+
+Usage Examples (Developer-Focused)
+----------------------------------
+
+- Using threadpool limits
+  - from sklearn.utils import threadpool_limits
+  - with threadpool_limits(limits=4):
+      perform_intensive_computation()
+
+- Accessing percentile in a NumPy-version-agnostic way
+  - import numpy as np
+  - from sklearn.utils import percentile
+  - arr = np.array([0.1, 0.5, 0.9])
+  - p50 = percentile(arr, 50)
+
+- Using the mode compatibility helper
+  - import numpy as np
+  - from sklearn.utils import _mode
+  - result = _mode(np.array([1, 1, 2, 3]), axis=0)
+
+- Conjugate gradient compatibility
+  - from scipy.sparse.linalg import cg
+  - from sklearn.utils import _sparse_linalg_cg
+  - x, info = _sparse_linalg_cg(A, b, tol=1e-6)
+
+- Python 3.9+ style importlib.resources access (via helper)
+  - from sklearn.utils import _open_text
+  - with _open_text(SomeDataModule, "data.txt") as f:
+      content = f.read()
+
+Notes for Contributors
+----------------------
+
+- This file is central to cross-version compatibility. Changes should be accompanied by:
+  - A clear rationale for the change
+  - Version-specific notes (Introduced / Removed) when relevant
+  - Tests that cover the different version paths (e.g., simulated environments or version guards)
+
+- When upstream libraries drop support or a minimum version increases, consider:
+  - Removing obsolete branches
+  - Simplifying container registries and related logic
+  - Updating the documentation with the new minimum versions
+
+This documentation provides developers with a clear understanding of the utilities available for compatibility, the rationale behind each shim, and guidance for maintenance and evolution as dependencies evolve.

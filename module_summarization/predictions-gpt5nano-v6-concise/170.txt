@@ -1,0 +1,163 @@
+# Handling Large Datasets
+
+This section covers techniques for processing large spectral cubes without loading the entire dataset into memory. It explains the available moment computation strategies, when to use each, and practical usage patterns with the code in big_data.rst.
+
+## Overview
+
+Computing moment maps (0th, 1st, and higher-order moments) often requires aggregating data along a chosen axis (typically the spectral axis). For very large datasets, loading the whole cube into memory is impractical or impossible. The moment computation utilities in this codebase support multiple data-access strategies:
+
+- cubewise: operate on the entire cube at once (memory-intensive)
+- slicewise: process one plane (slice) at a time along a given axis
+- raywise: process one ray (line of sight) at a time along a given axis
+- auto: automatically select a strategy based on cube characteristics and memory constraints
+
+The function moment_auto chooses the strategy via iterator_strategy and dispatches to the corresponding implementation.
+
+Key internal helpers you may encounter:
+- moment_slicewise: slice-by-slice processing
+- moment_raywise: ray-by-ray processing
+- moment_cubewise: full-cube processing
+- _slice0, _slice1: specialized implementations for 0th and 1st moments (slice-wise)
+- _moment_shp, _pix_size_slice, _pix_cen: helpers used by the moment computations
+
+The public API focuses on:
+- moment_auto(cube, order, axis)
+- moment_slicewise(cube, order, axis)
+- moment_raywise(cube, order, axis)
+- moment_cubewise(cube, order, axis)
+
+Note: The code assumes a 3D cube with axes (y, x, axis) in numpy convention. The axis parameter refers to the axis along which you collapse to form the moment map.
+
+## Strategies for Handling Large Datasets
+
+- cubewise
+  - Description: Compute moments using the entire data array in memory.
+  - When to use: Small to moderately sized cubes that fit in memory.
+  - Pros: Simple, fast for small data.
+  - Cons: High memory usage; not suitable for very large datasets.
+  - Example: moment_cubewise(cube, order, axis)
+
+- slicewise
+  - Description: Process data one slice along the given axis at a time.
+  - When to use: Large cubes where a single plane can be loaded, processed, and discarded.
+  - Pros: Lower memory footprint than cubewise; can handle larger datasets.
+  - Cons: Requires careful handling of per-slice statistics (e.g., weights).
+  - Example: moment_slicewise(cube, order, axis)
+
+- raywise
+  - Description: Iterate over rays (lines of sight) along the chosen axis, processing one ray at a time.
+  - When to use: Extremely large cubes or when per-ray access patterns are preferable (e.g., I/O optimization).
+  - Pros: Minimal memory usage; great for streaming data access.
+  - Cons: Potentially higher per-ray overhead; dependent on efficient ray iteration.
+  - Example: moment_raywise(cube, order, axis)
+
+- auto
+  - Description: Select a strategy automatically based on the cube and axis characteristics.
+  - When to use: General workflows when you want sensible defaults without manual tuning.
+  - Pros: Convenience; adapts to data size and memory availability.
+  - Example: moment_auto(cube, order, axis)
+
+## API Reference (Moment Computations)
+
+- moment_auto(cube, order, axis)
+  - Automatically selects and uses the best strategy (cubewise, slicewise, or raywise) to compute the moment map of specified order along the given axis.
+  - Returns: a 2D moment map with shape matching the non-collapsed axes.
+
+- moment_cubewise(cube, order, axis)
+  - Compute the moment by operating on the entire cube at once.
+  - Returns: the moment map computed from the full data.
+
+- moment_slicewise(cube, order, axis)
+  - Compute the moment by accumulating slice by slice along the specified axis.
+  - Returns: the moment map.
+
+- moment_raywise(cube, order, axis)
+  - Compute the moment by accumulating one ray at a time along the specified axis.
+  - Returns: the moment map.
+
+- Private helpers (for reference)
+  - _moment_shp(cube, axis): shape of the resulting moment map when collapsing axis.
+  - _slice0, _slice1(cube, axis): specialized 0th and 1st moment implementations for slice-wise processing.
+
+## How It Works
+
+- The cube interface provides:
+  - _get_filled_data(fill=…, view=…): retrieve data with a given fill value for NaNs or missing data, and a specific view (slice selection)
+  - _pix_size_slice(axis): pixel size along the collapsed axis
+  - _pix_cen(): pixel center coordinates, used for moment computations
+  - _iter_rays(axis): iterate over rays along the given axis
+  - _mask.include(...): determine which data is included by the mask
+  - flattened(slc).value: access flattened data for a given slice
+
+- The auto strategy uses iterator_strategy(cube, axis) to decide among cubewise, slicewise, or raywise. The strategy function encapsulates heuristics based on cube size, available memory, and data access patterns.
+
+## Practical Examples
+
+- Example 1: 0th Moment (Integrated Intensity) along spectral axis (axis=2)
+  - Assumes a cube with shape (ny, nx, nz)
+  - This computes the integrated intensity along the spectral axis
+  - Code:
+    - result = moment_auto(cube, order=0, axis=2)
+  - Notes: The 0th moment is effectively a weighted sum over the collapsed axis. NaNs and masks are handled according to the implementation (e.g., using nan-aware summation in cubewise).
+
+- Example 2: 1st Moment (Intensity-weighted Coordinate) along spectral axis
+  - Computes the intensity-weighted mean coordinate along the collapsed axis.
+  - Code:
+    - result = moment_auto(cube, order=1, axis=2)
+
+- Example 3: Higher-Order Moments (e.g., order=2)
+  - Useful for velocity dispersion-like metrics.
+  - Code:
+    - result = moment_auto(cube, order=2, axis=2)
+
+- Example 4: Manual Strategy Selection
+  - Force slice-wise processing for very large datasets:
+    - result = moment_slicewise(cube, order=0, axis=2)
+  - Force ray-wise processing:
+    - result = moment_raywise(cube, order=1, axis=2)
+
+- Example 5: NaNs and Masks
+  - The implementation honors missing data and masks; ensure your cube exposes appropriate masking via cube._mask and fill behavior in _get_filled_data.
+
+Code snippet collection:
+- Compute 0th moment using auto strategy:
+  - result = moment_auto(cube, order=0, axis=2)
+- Compute 1st moment using slice-wise strategy explicitly:
+  - result = moment_slicewise(cube, order=1, axis=2)
+- Compute 2nd moment using ray-wise strategy explicitly:
+  - result = moment_raywise(cube, order=2, axis=2)
+
+## Performance and Best Practices
+
+- Memory considerations:
+  - Cubewise: requires memory proportional to the full cube. Suitable only when memory is sufficient.
+  - Slicewise: reduces peak memory to a few slices plus temporary accumulators.
+  - Raywise: minimizes memory by streaming over rays; can incur higher I/O overhead.
+- I/O patterns:
+  - Slicewise and raywise approaches benefit from data access patterns that minimize disk seeks and leverage contiguous reads where possible.
+- Masks and NaNs:
+  - The algorithms are designed to handle NaNs and masks consistently. Ensure your cube’s masking logic is correct for your dataset.
+- Reproducibility:
+  - For large data, run moment_auto on smaller test subsets to verify consistency with explicit cubewise or slicewise implementations on a reduced dataset.
+
+## Extending and Customizing
+
+- Implement a new strategy by adding a function that takes (cube, order, axis) and returns a 2D moment map.
+- Update the iterator_strategy logic to include your new strategy, so moment_auto can select it automatically.
+- Consider cross-validating results between strategies on representative subsets to ensure numerical consistency.
+
+## Diagnostics and Validation
+
+- Compare results across strategies on a small, representative dataset:
+  - If moment_auto yields different results from moment_slicewise or moment_raywise for the same axis and order, investigate data access patterns and masking behavior.
+- Validate shapes:
+  - The resulting moment map shape should be cube.shape[:axis] + cube.shape[axis+1:].
+
+## Notes for Developers
+
+- The public API focuses on ease of use and performance trade-offs. The auto-strategy model is central to handling big data gracefully.
+- The code relies on the cube interface for masking, pixel sizing, and data access; ensure any custom cube subclass implements these methods consistently.
+
+## Summary
+
+Handling large datasets in this codebase is achieved via configurable data-access strategies that balance memory usage and performance. The moment computation utilities provide flexible, efficient methods to compute 0th, 1st, and higher-order moments along any axis, with auto-selection guiding strategy choice for optimal performance on large cubes. Use moment_auto for general use, or select slicewise or raywise explicitly when you need deterministic processing behavior or have specific I/O constraints.

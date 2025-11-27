@@ -1,0 +1,192 @@
+# Encoding media
+
+A lightweight interface for encoding media assets. This module provides both local (device-based) and server-side encoding capabilities, with progress tracking, options for common encoding parameters, and robust error handling.
+
+## Overview
+
+Encoding media involves converting input media into a desired output format, potentially adjusting quality, bitrate, resolution, and other codec parameters. The encoding process can be performed locally using a chosen engine (e.g., ffmpeg) or delegated to a server, enabling asynchronous processing and centralized management.
+
+Key concepts:
+- EncodingJob: representation of an encoding task, including status, progress, input, and output details.
+- MediaEncoder: high-level orchestrator that can run encoding either locally or via a server, exposing a simple encode_asset API.
+- Local encoding: runs the encoder on the local machine using a specified engine.
+- Server encoding: submits a job to the server, which manages execution and returns status updates via the API.
+- Options: encoding parameters such as codecs, crf/bitrate, resolution, and frame rate.
+
+## API and relationships
+
+- EncodingJob
+  - Represents a single encoding task.
+  - Attributes (typical): id, status, progress (0–100), input_path, output_path, target_format, started_at, finished_at, error_message, logs.
+  - Used by both local and server workflows to report progress and results.
+
+- MediaEncoder
+  - Public entry point for initiating encoding tasks.
+  - Constructors (examples):
+    - MediaEncoder(engine='ffmpeg', max_workers=4, use_server=False)
+    - MediaEncoder(session, use_server=True)
+  - Core method:
+    - encode_asset(input_path=None, input_asset_id=None, output_path=None, target_format, options=None) -> EncodingJob
+      - input_path: local path to the input media (for local encoding).
+      - input_asset_id: asset identifier (for server-side encoding).
+      - output_path: destination path (local) or server-stored asset reference (server).
+      - target_format: desired output format (e.g., 'mp4', 'mov', 'mkv').
+      - options: dict of encoding parameters (e.g., {'codec':'h264', 'crf':23, 'width':1920}).
+  - Optional lifecycle helpers:
+    - query_status(job_id) -> EncodingJob
+    - cancel(job_id)
+
+- Exceptions
+  - EncodingError: base class for encoding failures.
+  - InvalidInputError: input validation failed (e.g., missing required arguments).
+  - UnsupportedFormatError: target_format is not supported.
+  - EncodingCancelledError: a running job was cancelled.
+
+- Helpers
+  - get_supported_formats() -> dict
+    - Returns available target formats and common options.
+
+## Important parameters and returns
+
+- encode_asset(...)
+  - Returns: EncodingJob
+  - Notes:
+    - If use_server is False, input_path must be provided.
+    - If use_server is True, input_asset_id may be provided; server will handle the input and, optionally, the output asset reference.
+    - options is a flexible dict; keys depend on engine or server capabilities (e.g., 'crf', 'preset', 'codec', 'bitrate', 'width', 'height', 'audio_bitrate', 'framerate').
+
+- EncodingJob
+  - Properties:
+    - id: unique identifier for the encoding task.
+    - status: one of 'queued', 'running', 'completed', 'failed', 'cancelled'.
+    - progress: numeric percentage (0–100).
+    - input_path / input_asset_id
+    - output_path / output_asset_id
+    - target_format
+    - started_at / finished_at
+    - error_message (if status is 'failed')
+    - logs: optional diagnostic messages
+
+- query_status(job_id)
+  - Returns an EncodingJob reflecting the latest status.
+
+- cancel(job_id)
+  - Cancels a running job if supported; raises EncodingError if not cancellable.
+
+## Usage examples
+
+Local (device-based) encoding
+
+```python
+from encode_media import MediaEncoder
+
+# Local encoding using ffmpeg, with up to 2 concurrent workers
+encoder = MediaEncoder(engine='ffmpeg', max_workers=2, use_server=False)
+
+job = encoder.encode_asset(
+    input_path='/path/to/input.mov',
+    output_path='/path/to/output.mp4',
+    target_format='mp4',
+    options={
+        'codec': 'h264',
+        'crf': 23,
+        'preset': 'medium',
+        'width': 1920,
+        'height': 1080,
+        'framerate': 30
+    }
+)
+
+print('Job:', job.id, 'Status:', job.status, 'Progress:', job.progress)
+```
+
+Server-side encoding (asynchronous)
+
+```python
+from ftrack_api import Session
+from encode_media import MediaEncoder
+
+# Assuming an authenticated session is available
+session = Session(server_url='https://example.com', api_key='YOUR_KEY', api_user='YOUR_USER')
+
+# Create encoder that delegates work to the server
+server_encoder = MediaEncoder(session=session, use_server=True)
+
+# Submit a server-side encoding job using an existing input asset
+job = server_encoder.encode_asset(
+    input_asset_id='ftrack_asset_id_12345',
+    target_format='mp4',
+    output_path=None,  # server will store the encoded asset reference
+    options={
+        'crf': 23,
+        'preset': 'medium'
+    }
+)
+
+print('Server Job:', job.id, 'Status:', job.status)
+```
+
+Hybrid usage (choose per task)
+
+```python
+# Decide per asset whether to encode locally or on the server
+if large_file and requires asynchronous processing:
+    job = server_encoder.encode_asset(input_asset_id='ftrack_asset_id_789', target_format='mp4', options={...})
+else:
+    job = local_encoder.encode_asset(input_path='/path/to/file.mov', output_path='/path/to/file.mp4', target_format='mp4', options={...})
+```
+
+## Edge cases and considerations
+
+- Input validation:
+  - Ensure either input_path or input_asset_id is provided, depending on mode.
+  - Validate target_format against get_supported_formats().
+- Permissions and paths:
+  - Local encoding requires read access to input_path and write access to output_path.
+  - Server encoding requires appropriate permissions to access the input asset and to store the output asset.
+- Large files and reliability:
+  - Server encoding is suitable for long-running tasks and environments where local resources are limited.
+  - Implement retry and cancellation policies where supported.
+- Progress and monitoring:
+  - Use the EncodingJob progress to drive UI progress indicators or integration dashboards.
+  - For server-side jobs, poll status at appropriate intervals to avoid excessive load.
+- Error handling:
+  - Inspect error_message in EncodingJob after completion if status is 'failed'.
+  - Consider fallbacks (e.g., retry with different options) when appropriate.
+- Options compatibility:
+  - Options keys depend on the encoding engine and server capabilities; refer to get_supported_formats() for guidance.
+- Edge formats:
+  - Some formats may require specific container codecs or profile levels; validate compatibility before submitting a job.
+
+## Reference
+
+- MediaEncoder
+  - __init__(self, engine='ffmpeg', max_workers=4, session=None, use_server=False)
+  - encode_asset(self, input_path=None, input_asset_id=None, output_path=None, target_format, options=None) -> EncodingJob
+  - query_status(self, job_id) -> EncodingJob
+  - cancel(self, job_id) -> None
+
+- EncodingJob
+  - id
+  - status
+  - progress
+  - input_path / input_asset_id
+  - output_path / output_asset_id
+  - target_format
+  - started_at / finished_at
+  - error_message
+  - logs
+
+- Exceptions
+  - EncodingError
+  - InvalidInputError
+  - UnsupportedFormatError
+  - EncodingCancelledError
+
+- get_supported_formats() -> dict
+
+---
+
+Notes:
+- The API surface above is designed to be flexible and future-proof, supporting both local and server-side workflows.
+- Adapt the keys in options to match the actual engine/server capabilities in your environment.

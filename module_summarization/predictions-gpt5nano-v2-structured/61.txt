@@ -1,0 +1,123 @@
+# Class Instrumentation and ORM Events (orm.instrumentation)
+
+This document covers SQLAlchemy's internal class instrumentation system as implemented in the instrumentation module. It is primarily intended for contributors and advanced users who need to understand how end-user mapped classes are wired for state tracking, how per-class and per-attribute instrumentation is organized, and how the instrumentation extension can customize behavior.
+
+## Overview
+
+- The instrumentation system registers user-defined classes so that SQLAlchemy can track per-instance state, per-class attributes, and related events.
+- It interacts closely with per-instance state (state.py) and per-attribute instrumentation (attributes.py).
+- The system is designed to be extensible on a per-class or global basis via the external instrumentation extension located in `sqlalchemy.ext.instrumentation`.
+- Historically, instrumentation mechanics were embedded in the ORM; in version 0.8 and later, the external extension provides a richer resolution mechanism and replaces/augments the internal system.
+
+Notes:
+- This module is typically not directly used by application code. Public customization of instrumentation is expected to be performed through the `sqlalchemy.ext.instrumentation` extension.
+
+## Core concepts
+
+- ClassManager
+  - The central data structure that tracks per-class instrumentation state.
+  - Behaves as a dictionary mapping attribute names to `QueryableAttribute` objects.
+  - Extends `EventTarget` and participates in a dispatch system for class- and instance-level events.
+  - Maintains class-level state, initialization hooks, and finalization logic.
+
+- Registry
+  - Maintains a mapping of classes to their corresponding `ClassManager` instances.
+  - Used to coordinate instrumentation across a class hierarchy.
+
+- InstanceEvents
+  - A set of events related to per-instance state, exposed via the manager’s dispatch mechanism.
+  - Integrated with the ORM’s event system to react to lifecycle moments such as initialization and attribute access.
+
+- Expired/Deferred Attributes
+  - Mechanisms for loading and managing attributes that may be loaded lazily or deferred.
+  - Previously known as `deferred_scalar_loader`, now referred to as `expired_attribute_loader` (with a deprecation alias maintained for compatibility).
+
+- Internal hooks
+  - `_update_state`: Applies updates such as mapper, registry, declarative scanning data, and initialization hooks.
+  - `_finalize`: Finalizes instrumentation, enabling the instrumentation hooks to take effect (e.g., instrumenting `__init__`, wiring up event dispatch, etc.).
+
+- Sentinel and protocol types
+  - `DEL_ATTR`: internal sentinel used in attribute deletion semantics.
+  - `_ExpiredAttributeLoaderProto` and `_ManagerFactory`: Protocols describing callable interfaces used by the instrumentation system.
+
+## Public API surface (internal)
+
+The following items are defined in this module and are part of the internal instrumentation machinery. End users should generally interact via the public extension APIs rather than these internals.
+
+- `ClassManager`
+  - Generic class managing instrumentation data for a specific mapped class.
+  - Key attributes include:
+    - `class_`: The Python class being instrumented.
+    - `STATE_ATTR` and `MANAGER_ATTR`: Names of internal attributes used by the instrumentation system.
+    - `init_method` and `original_init`: Hooks related to initialization behavior.
+    - `registry`: Reference to the global or per-collection registry.
+    - `_bases`: Instrumentation managers for base classes, if any.
+  - Methods of interest:
+    - `_update_state(...)`: Apply updates such as mapper, registry, and initialization hooks.
+    - `_finalize()`: Finalize instrumentation, set up initialization, and install instrumentation hooks.
+  - Internal alias for deprecation:
+    - `deferred_scalar_loader` (deprecated alias for `expired_attribute_loader`).
+
+- `DEL_ATTR`
+  - Internal sentinel value used to mark deletion of attributes within the instrumentation process.
+
+- `_ExpiredAttributeLoaderProto`
+  - Protocol describing the signature for loaders that preload or expire attributes.
+
+- `_ManagerFactory`
+  - Protocol describing a factory callable used to create `ClassManager` instances.
+
+- Other internal types and references
+  - The module uses internal typing helpers and references to internal components (e.g., `dispatcher`, `InstanceEvents`, `Mapper`, `MapperConfig`, `InstanceState`).
+
+## How instrumentation works (high level)
+
+- On class definition and mapping configuration, a `ClassManager` is created for each mapped class.
+- The manager aggregates state from base classes and updates its own state to reflect the class’s instrumentation needs.
+- The manager registers itself with the global event/dispatch system to provide per-class and per-instance events (via `InstanceEvents` and `EventTarget`).
+- Initialization hooks are installed. The `_finalize` step ensures the class is instrumented and ready to participate in ORM state tracking.
+- Deferred or lazy attributes are wired through the `expired_attribute_loader` mechanism, enabling efficient loading strategies.
+
+## Customization and extension
+
+- External instrumentation extension
+  - The primary path for customization is the public extension package: `sqlalchemy.ext.instrumentation`.
+  - This extension provides a richer API to customize or replace the default instrumentation strategy without relying on internal internals.
+  - When the extension package is imported, it integrates with SQLAlchemy’s ORM instrumentation to provide more comprehensive resolution mechanics.
+
+- Deprecation and compatibility
+  - The internal attribute formerly named `deferred_scalar_loader` has been renamed to `expired_attribute_loader`.
+  - A deprecated alias is retained for backward compatibility, with a deprecation warning emitted to guide users toward the new name.
+
+## Example usage (internal API, for contributors)
+
+Note: Application code should not rely on internal instrumentation classes. The following is illustrative of how internal components relate to each other.
+
+```python
+# Internal example (not for application code)
+from sqlalchemy.orm.instrumentation import ClassManager
+
+class User:
+    pass
+
+# Create and inspect an internal ClassManager for a class
+mgr = ClassManager(User)
+print(mgr.class_)          # <class '__main__.User'>
+print(mgr._bases)          # List of base class managers, if any
+```
+
+For end users, customization should be done through the public extension:
+- Install and configure `sqlalchemy.ext.instrumentation` to plug in alternative instrumentation strategies.
+- Refer to the extension’s documentation for supported customization points, installation steps, and examples.
+
+## Migration notes
+
+- The internal alias `deferred_scalar_loader` has been renamed to `expired_attribute_loader`. The old name still exists as a deprecated alias to preserve compatibility.
+
+## See also
+
+- SQLAlchemy public instrumentation extension: `sqlalchemy.ext.instrumentation`
+- Core ORM event system and state management: `sqlalchemy.orm.state`, `sqlalchemy.orm.attributes`
+- ORM core event dispatch and `InstanceEvents`
+
+This document focuses on the internal orchestration that enables SQLAlchemy’s class-level instrumentation and its integration with the ORM’s event system. For typical application development, use the public APIs exposed by the ORM and the instrumentation extension rather than interacting with these internal classes directly.

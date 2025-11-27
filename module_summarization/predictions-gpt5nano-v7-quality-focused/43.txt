@@ -1,0 +1,224 @@
+Config usage
+==============
+
+Overview
+--------
+This configuration system extends the standard ConfigParser with defaults, environment-aware values, and an include mechanism. It supports loading defaults, expanding environment variables, and including additional configuration files (including from Zookeeper). Passwords are stored in a dedicated section and referenced from other sections.
+
+Default configuration
+---------------------
+Defaults are defined in a class-level dictionary. Key features:
+
+- general
+  - config_file: read from ASAB_CONFIG environment variable by default
+  - tick_period: 1 (seconds)
+  - var_dir: user home directory path derived from the executable name
+  - changelog, manifest: optional
+  - pidfile: '!' (special meaning to resolve a platform-specific pid file location)
+  - working_dir: '.'
+  - uid, gid: optional
+
+- asab:metrics
+  - native_metrics: "true"
+  - web_requests_metrics: False (default not generated)
+  - expiration: 60
+
+- asab:doc
+  - default_route_tag: "module_name"
+
+- logging
+  - verbose: from ASAB_VERBOSE environment variable
+  - app_name: basename of the executable
+  - sd_id: "sd"
+  - level: "NOTICE"
+  - levels:
+
+- logging:console
+  - format, datefmt: default formats
+
+- logging:syslog
+  - enabled: "false"
+  - address: platform-specific default (e.g., /dev/log or Darwin path)
+  - format: platform-specific
+
+- logging:file
+  - path, format, datefmt
+  - backup_count, backup_max_bytes
+  - rotate_every
+
+- library
+  - azure_cache: "false" or path to cache
+
+- passwords
+  - reserved for securely storing passwords (not shown in defaults)
+
+- house keeping
+  - at, limit, run_at_startup
+
+Dynamic zookeeper defaults
+--------------------------
+If the ASAB_ZOOKEEPER_SERVERS environment variable is present, a default zookeeper server list is inserted under the zookeeper section:
+  - zookeeper.servers defaults to the value of ASAB_ZOOKEEPER_SERVERS
+
+Add defaults at runtime
+-----------------------
+You can inject defaults into a live configuration using add_defaults(dictionary). This merges the provided dictionary into the current configuration without overriding existing keys.
+
+- Method
+  - add_defaults(dictionary: dict) -> None
+
+- Behavior
+  - Creates missing sections as needed
+  - Adds missing keys with provided defaults
+  - Converts non-None values to strings
+  - Expands environment variables in values that contain a dollar sign ($)
+
+Example
+-------
+cfg = ConfigParser()
+cfg.add_defaults(ConfigParser._default_values)
+
+Environment and expansion
+-------------------------
+- General.config_file defaults to ASAB_CONFIG if set; otherwise empty.
+- Logging.verbose defaults to ASAB_VERBOSE if set.
+- When adding defaults, values containing $ are expanded with os.path.expandvars(value).
+- Include paths and glob patterns are expanded with os.path.expandvars.
+
+Includes and file loading
+-------------------------
+The configuration supports including other files:
+
+- Includes are specified in the general.include option.
+- Includes can be file globs; they can be separated by spaces or newlines.
+- Nested includes are supported.
+- Each included file is read only once to avoid cycles.
+- The loading process tracks included files to prevent infinite loops.
+- zookeeper includes are supported when an include starts with zookeeper (handled by _include_from_zookeeper).
+
+Include resolution flow (high level)
+- For each include_glob in the includes list:
+  - Expand environment variables
+  - Resolve file globs
+  - For each resolved file:
+    - If already included, warn and skip
+    - Mark as included
+    - Push the file directory to the load stack
+    - Read the file
+    - Pop the directory from the load stack
+    - Recursively process any includes found in the loaded file
+
+Zookeeper integration
+---------------------
+A special include prefix zookeeper triggers loading configuration from Zookeeper via _include_from_zookeeper. This allows dynamic configuration sources to be used in place of local files.
+
+Passwords handling
+------------------
+Passwords are stored in a dedicated "passwords" section. The intended pattern is:
+  - Use a reference from other sections:
+    - password=${passwords:kafka_password}
+  - Store the actual secret in:
+    - [passwords]
+      kafka_password = <MY_SECRET_PASSWORD>
+
+This approach prevents passwords from being displayed in the generated API documentation or logs.
+
+Common sections and keys for quick reference
+---------------------------------------------
+- general
+  - config_file
+  - tick_period
+  - var_dir
+  - changelog
+  - manifest
+  - pidfile
+  - working_dir
+  - uid
+  - gid
+  - include (used to specify additional files to load)
+
+- asab:metrics
+  - native_metrics
+  - web_requests_metrics
+  - expiration
+
+- asab:doc
+  - default_route_tag
+
+- logging
+  - verbose
+  - app_name
+  - sd_id
+  - level
+  - levels
+
+- logging:console
+  - format
+  - datefmt
+
+- logging:syslog
+  - enabled
+  - address
+  - format
+
+- logging:file
+  - path
+  - format
+  - datefmt
+  - backup_count
+  - backup_max_bytes
+  - rotate_every
+
+- library
+  - azure_cache
+
+- passwords
+  - (arbitrary keys for secrets)
+
+- housekeeping
+  - at
+  - limit
+  - run_at_startup
+
+Practical usage examples
+------------------------
+
+1) Initialize with defaults and load a main config
+- This demonstrates using the defaults and then loading user config as usual.
+
+Code:
+- (pseudo)
+cfg = ConfigParser()
+cfg.add_defaults(ConfigParser._default_values)
+cfg.read('/etc/myapp/app.ini')  # main user config
+# Access values
+level = cfg.get('logging','level')
+
+2) Extend defaults at runtime
+- Add new defaults without overriding existing ones.
+
+Code:
+cfg.add_defaults({
+  'logging': {'level': 'INFO'},
+  'general': {'tick_period': 2}
+})
+
+3) Use includes to compose configuration
+- A minimal include in the main config file:
+[general]
+include = /etc/myapp/conf.d/*.ini
+
+- The loader processes includes recursively, expanding environment variables and resolving globs.
+
+4) Store and reference passwords securely
+- In config.ini:
+[passwords]
+kafka_password = s3cr3t
+
+- In another section:
+password = ${passwords:kafka_password}
+
+Notes
+-----
+- The actual loading lifecycle is driven by internal methods (_load, _traverse_includes). External users typically interact through the public API to set defaults, read files, and access values via the inherited ConfigParser interface.
+- Booleans in defaults may be represented as strings when loaded (e.g., "true"/"false"); the defaults container uses string representation for values.

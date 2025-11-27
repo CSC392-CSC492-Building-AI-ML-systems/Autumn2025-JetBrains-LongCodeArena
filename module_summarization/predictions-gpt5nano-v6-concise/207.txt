@@ -1,0 +1,216 @@
+# Decision Trees
+
+This document describes the Decision Tree machinery exposed by tree.rst, with a focus on the impurity criteria interface used to evaluate splits. It is intended for developers who will extend or integrate custom impurity criteria into the decision-tree learning framework.
+
+---
+
+## Overview
+
+- A Decision Tree partitions the feature space into regions (nodes) by recursively selecting feature thresholds to minimize impurity (or maximize information gain) within each node.
+- The impurity criterion encapsulates how "pure" a node is and how much a potential split would improve purity.
+- The Criterion class defines a common interface for different impurity measures (e.g., Gini, Entropy, MSE). Subclasses implement problem-specific logic for computing impurity, updating statistics as splits are explored, and deriving node values.
+
+---
+
+## Key Concepts
+
+- **Node impurity**: A scalar value representing how mixed the target variable is within the samples designated to a node.
+- **Split improvement**: The gain in purity achieved by splitting a node into left and right children.
+- **Weighted samples**: Each sample may carry a weight; the criterion tracks totals like weighted_n_samples and weighted sums for left/right partitions.
+- **Sample indices**: During split search, a node keeps track of which samples are currently in consideration via sample_indices[start:end]. Some implementations may move samples from right to left as the split position changes.
+- **Missing values**: The criterion provides a hook to initialize and handle missing values; samples with missing feature values can be treated specially (e.g., held out, imputed, or routed to a special branch).
+- **Monotonic constraints**: For some applications, splits must respect monotonic relationships. The middle_value method provides a hook to compute a representative split value under such constraints (implemented by concrete classification or regression criteria).
+
+---
+
+## API Reference: Criterion (Impurity Interface)
+
+The Criterion class defines the required interface and expectations for impurity criteria. Implementations are expected to be memory-safe and efficient (nogil sections, pre-allocated buffers, etc.).
+
+- init(y, sample_weight, weighted_n_samples, sample_indices, start, end)
+  - Initialize the criterion for the samples in the current node.
+  - Returns 0 on success or -1 on failure (e.g., memory allocation error).
+  - Arguments:
+    - y: target values buffer (opaque memoryview for efficiency)
+    - sample_weight: per-sample weights
+    - weighted_n_samples: total weight of samples in scope
+    - sample_indices: indices of samples used in this node
+    - start, end: bounds into sample_indices for the node
+
+- init_missing(n_missing) noexcept nogil
+  - Initialize storage for missing-values handling.
+  - Assumes missing samples are placed at the end of sample_indices.
+
+- reset() except -1 nogil
+  - Reset statistics at the left boundary (start) for a new split evaluation.
+
+- reverse_reset() except -1 nogil
+  - Reset statistics at the right boundary (end) for a new split evaluation.
+
+- update(new_pos) except -1 nogil
+  - Move samples from [pos, new_pos) from the right child to the left child and update statistics accordingly.
+  - This is central to efficiently scanning potential split positions.
+
+- node_impurity() noexcept nogil
+  - Compute the impurity of the current node (samples in sample_indices[start:end]).
+
+- children_impurity(impurity_left, impurity_right) noexcept nogil
+  - Compute impurities for the left and right children given the current split position.
+  - Write results to the provided pointers.
+
+- node_value(dest) noexcept nogil
+  - Compute the node’s predicted value (e.g., class label probability, regression target) and write to dest.
+
+- clip_node_value(dest, lower_bound, upper_bound) noexcept nogil
+  - Optionally clip the node value to a valid range.
+
+- middle_value() noexcept nogil
+  - Compute the “middle” value used for monotonicity constraints.
+  - Implementations are provided in concrete Criteria (e.g., ClassificationCriterion, RegressionCriterion).
+
+- proxy_impurity_improvement() noexcept nogil
+  - Fast proxy for impurity decrease that can be used to prune the search for the best split.
+  - Uses current left/right impurities and counts.
+
+- impurity_improvement(impurity_parent, impurity_left, impurity_right) noexcept nogil
+  - Exact impurity improvement for a candidate split, given parent impurity and child impurities.
+
+Notes
+- The interface is designed to be subclassed. A concrete criterion must implement the core methods (reset, reverse_reset, update, node_impurity, and the children_impurity/ node_value helpers) to define a specific impurity measure.
+- The implementation often operates in nogil blocks for performance; careful management of memory and data layout is essential.
+
+---
+
+## Impurity Criteria Patterns
+
+- Classification criteria (e.g., Gini, Entropy) typically:
+  - Maintain class counts or class-weighted counts per node.
+  - Compute impurity using standard formulas (e.g., Gini = 1 - sum(p_i^2), Entropy = -sum(p_i log p_i)).
+  - Determine the best split by scanning feature-threshold positions and evaluating impurity_left and impurity_right.
+
+- Regression criteria (e.g., MSE) typically:
+  - Maintain sums and sums of squares for target values.
+  - Impurity proportional to variance or mean squared error within a node.
+  - Node value is often the mean of target values in the node.
+
+- Custom criteria:
+  - Subclass Criterion and implement the required methods.
+  - Can incorporate domain-specific losses or constraints (e.g., Poisson-like criteria, robust losses).
+
+---
+
+## Examples
+
+### Skeleton: Custom Gini Criterion (Python-like pseudo-code)
+
+This is a high-level sketch of what a custom criterion subclass might look like. The actual implementation would live in Cython with the interface shown above.
+
+```python
+class GiniCriterion(Criterion):
+    def __init__(self, n_classes):
+        self.n_classes = n_classes
+        self.class_counts_left = None
+        self.class_counts_right = None
+        self.weighted_n_left = 0.0
+        self.weighted_n_right = 0.0
+        self.weighted_n_samples = 0.0
+
+    def init(self, y, sample_weight, weighted_n_samples, sample_indices, start, end):
+        # Allocate and initialize per-class counts for the node
+        # Initialize weighted counts
+        # Return 0 on success
+        pass
+
+    def init_missing(self, n_missing):
+        # Optional: handle missing values
+        pass
+
+    def reset(self):
+        # Reset left/right counts for the new split at start
+        pass
+
+    def reverse_reset(self):
+        # Reset at end
+        pass
+
+    def update(self, new_pos):
+        # Move samples from right to left as split position increases
+        pass
+
+    def node_impurity(self):
+        # Compute Gini impurity of current node
+        pass
+
+    def children_impurity(self, impurity_left_ptr, impurity_right_ptr):
+        # Compute impurities for left/right child, write to pointers
+        pass
+
+    def node_value(self, dest_ptr):
+        # Node prediction; for classification often the argmax class
+        pass
+
+    def clip_node_value(self, dest_ptr, lower_bound, upper_bound):
+        # Optional clipping of node value
+        pass
+
+    def middle_value(self):
+        # For monotonic constraints (if used)
+        pass
+
+    def proxy_impurity_improvement(self):
+        # Optional: fast proxy evaluation
+        return super().proxy_impurity_improvement()
+```
+
+### Minimal Example: How Splits Are Evaluated (Conceptual)
+
+- Start with all samples in the right child; left child is empty.
+- Compute impurity of the parent node.
+- Sweep possible split positions pos from start+1 to end-1:
+  - Move sample_indices[pos-1:pos] from right to left (update()).
+  - Compute left/right impurities (children_impurity).
+  - Compute impurity_improvement or proxy_impurity_improvement.
+  - Track the best split and associated split value.
+
+Note: Real code uses pre-allocated buffers and nogil sections for speed.
+
+---
+
+## How to Extend and Use
+
+- To add a new impurity criterion:
+  - Subclass Criterion.
+  - Implement the required methods: init, reset, reverse_reset, update, node_impurity, children_impurity, node_value, and optionally middle_value, clip_node_value.
+  - Ensure memory management and GIL/nogil constraints are respected.
+
+- To use in a tree:
+  - The tree-building algorithm will instantiate a Criterion (or a concrete subclass) for each node, call init, and iterate over potential splits using reset/reverse_reset/update and impurity computations.
+  - It will leverage proxy_impurity_improvement to quickly prune poor splits before computing exact impurity_improvement.
+
+- Customization tips:
+  - Use weighted_n_samples and sample_weight to support weighted datasets.
+  - If your domain requires handling missing values specially, implement init_missing and integrate with your split logic.
+  - If you have monotonicity constraints, implement middle_value in your concrete criterion and ensure the tree respects it during split selection.
+
+---
+
+## Best Practices
+
+- Prefer pre-allocating buffers for counts and impurities to avoid repeated allocations per node.
+- Keep impurity computations numerically stable (e.g., guard against log(0)).
+- Validate boundary conditions in update to avoid out-of-bounds access when sweeping splits.
+- Write unit tests for:
+  - Correct impurity values on simple synthetic data.
+  - Correct split selection on a small dataset.
+  - Proper handling of missing values (if used).
+  - Monotonic constraint behavior (if used).
+
+---
+
+## Quick Start
+
+- Define a concrete criterion by subclassing Criterion and implementing the required methods.
+- Plug your criterion into the tree-building process (the rest of the tree code will handle node creation, splitting, and recursion).
+- Train on a small dataset to verify that the tree grows as expected and that impurity decreases are tracked correctly.
+
+If you need a concrete, ready-to-run example for your project, I can provide a minimal, fully-implemented Criterion subclass in Cython that compiles against your existing tree module.

@@ -1,0 +1,176 @@
+w_eddist
+=========
+
+Overview
+--------
+
+w_eddist is a WESTPA tool that computes the time-resolved transition-event duration distribution from kinetics results. It post-processes kinetics data to produce a histogram-based representation of durations, binned across one or more dimensions corresponding to the input data. The results are suitable for visualization with plothist or further processing.
+
+Key Components
+--------------
+
+- WEDDist (class)
+  - Inherits from WESTParallelTool.
+  - Primary entry point for the command-line tool (prog: w_eddist).
+  - Defaults to parallel execution and integrates progress reporting via a ProgressIndicatorComponent.
+  - Reads source data from kinetics results (see Source data).
+  - Uses helper components to construct and normalize histograms.
+
+- DurationDataset (class)
+  - A lightweight facade around the underlying per-iteration dataset (dsspec) that applies a mask to select duration samples for each iteration.
+  - get_iter_data(n_iter) returns a 3D array shaped (nsegs, 1, 1) or None if no segments are present for that iteration.
+
+  Example (from the source):
+  .. code-block:: python
+
+     class DurationDataset:
+         '''A facade for the 'dsspec' dataclass that incorporates the mask into get_iter_data method'''
+
+         def __init__(self, dataset, mask, iter_start=1):
+             self.dataset = dataset
+             self.mask = mask
+             self.dtype = dataset.dtype
+             self.iter_start = iter_start
+
+         def get_iter_data(self, n_iter):
+             try:
+                 assert n_iter >= self.iter_start
+                 dset = self.dataset[n_iter - 1][self.mask[n_iter - self.iter_start]]
+             except (AssertionError, IndexError):
+                 raise ValueError("Iteration {} is not within the iteration range".format(n_iter))
+             nsegs = dset.shape[0]
+             if nsegs == 0:
+                 return None
+             else:
+                 return dset.reshape(nsegs, 1, 1)
+
+- _remote_min_max (function)
+  - Computes per-dimension min/max ranges for binning when explicit bin boundaries are not provided.
+  - Attempts to use finite-range info from the dtype; falls back to integer limits if needed.
+  - Iterates over dimensions, updating per-dimension (min, max) from the data slice.
+
+- _remote_bin_iter (function)
+  - Performs per-iteration, per-point histogramming using histnd and weights.
+  - Handles the case where an iteration has no data (returns a zero histogram).
+  - Normalizes to produce a probability distribution across the defined bin bounds.
+
+  Example (from the source):
+  .. code-block:: python
+
+     def _remote_bin_iter(iiter, n_iter, dsspec, wt_dsspec, initpoint, binbounds, ignore_out_of_range):
+         iter_hist_shape = tuple(len(bounds) - 1 for bounds in binbounds)
+         iter_hist = np.zeros(iter_hist_shape, dtype=np.float64)
+
+         dset = dsspec.get_iter_data(n_iter)
+         if dset is None:
+             return iiter, n_iter, iter_hist
+         else:
+             npts = dset.shape[1]
+         weights = wt_dsspec.get_iter_data(n_iter)[:, 0, 0]
+
+         # dset = dset[:,initpoint:,:]
+         for ipt in range(npts - initpoint):
+             histnd(dset[:, ipt, :], binbounds, weights, out=iter_hist, binbound_check=False, ignore_out_of_range=ignore_out_of_range)
+
+         del weights, dset
+
+         # normalize histogram
+         normhistnd(iter_hist, binbounds)
+         return iiter, n_iter, iter_hist
+
+- WEDDist (class)
+  - Core command implementation for w_eddist.
+  - Sets the default work manager to a parallel work manager and wires in a progress indicator.
+  - Maintains state related to kinetics input and state mappings (iversions of kintrace files, istate, fstate, etc.).
+  - References to duration and weight datasets (duration_d, etc.) indicate handling of duration-associated data streams in the background (exact internals are in the surrounding code, which uses the helper components above).
+
+  Snippet from the source (class header and setup):
+  .. code-block:: python
+
+     class WEDDist(WESTParallelTool):
+         prog = 'w_eddist'
+         description = '''\
+     Calculate time-resolved transition-event duration distribution from kinetics results
+     ...
+     '''
+         def __init__(self):
+             super().__init__()
+
+             # Parallel processing by default
+             self.wm_env.default_work_manager = self.wm_env.default_parallel_work_manager
+
+             # Progress reporting
+             self.progress = ProgressIndicatorComponent()
+             self.default_kinetics_file = 'kintrace.h5'
+             self.kinetics_filename = None
+             self.kinetics_file = None  # Kinavg file
+             self.istate = None
+             self.fstate = None
+             # Duration and weight dsspecs
+             self.duration_d
+
+Usage
+-----
+
+General usage
+- w_eddist calculates time-resolved transition-event duration distributions from kinetics results and writes an HDF5 file suitable for histogram plotting.
+
+- Source data
+  - Data is produced by a prior step (w_kinetics trace) and read by w_eddist as described in the Source data section of the command description.
+
+- Output
+  - The output file is specified with -o/--output and defaults to "pdist.h5" if not provided.
+  - The resulting HDF5 file contains:
+    - histograms: Normalized histograms with the first axis as iteration, remaining axes as input dimensions.
+    - /binbounds_0, /binbounds_1, ...: Bin boundaries per dimension.
+    - /midpoints_0, /midpoints_1, ...: Bin midpoints per dimension.
+    - n_iter: Vector of iterations corresponding to stored histograms.
+
+- Binning options (-b/--bins)
+  By default, 100 bins per dimension are used. Bin definitions can be provided in several forms:
+
+  1) A single integer N
+     - N uniformly spaced bins per dimension.
+
+  2) A sequence of integers N1,N2,... (comma-separated)
+     - N1 bins for the first dimension, N2 for the second, etc.
+
+  3) A list of lists [[B11, B12, ...], [B21, B22, ...], ...]
+     - Explicit bin boundaries per dimension. Evaluated with Python's eval, with np available for convenience.
+     - Example: -b [[0,1,2,3], [-0.5, 0, 0.5, 1.0]] defines explicit bin edges for two dimensions.
+
+  Note: The first two forms trigger a data scan to determine min/max values (potentially expensive). The explicit boundaries form avoids this.
+
+- Parallelization
+  - This tool supports parallelized binning and input data reading by default.
+  - For simple cases, serial execution (--serial) may be more efficient.
+
+- Plotting/Downstream
+  - The produced pdist.h5 can be consumed by plothist to generate plots or other processed outputs.
+
+Examples
+--------
+
+Minimal
+- Compute and write to the default output file:
+  w_eddist
+
+With explicit output file
+- w_eddist -o pdist.h5
+
+2D binning (counts per dimension)
+- w_eddist -o pdist2d.h5 -b 100,100
+
+Explicit bin boundaries (2D)
+- w_eddist -o pdist_exp.h5 -b [[0,1,2,3], [-0.5, 0, 0.5, 1.0]]
+
+Serial execution
+- w_eddist --serial -o pdist_serial.h5
+
+Notes
+-----
+
+- Source data: Source data is collected from the results of w_kinetics trace (see w_kinetics trace --help).
+- The implementation uses DurationDataset to apply per-iteration masks to the underlying duration data, ensuring only relevant segments contribute to the histograms.
+- The histogramming relies on westpa.fasthist.histnd and westpa.fasthist.normhistnd for efficient, multi-dimensional binning and normalization.
+- The command-line options are provided by the WESTParallelTool framework; the documentation highlights the primary concepts (binning, output, source data, parallelization, and downstream usage).

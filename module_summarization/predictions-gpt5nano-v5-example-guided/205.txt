@@ -1,0 +1,113 @@
+Stochastic Gradient Descent (SGD)
+==================================
+
+Overview
+--------
+This module provides high-performance components used to implement stochastic gradient descent
+variants (SAG/SAGA) for classification tasks, with support for both 32-bit and 64-bit floating
+types through fused typing. The implementation is designed for fast numerical computation and
+numerical stability, leveraging Cython to expose optimized routines to Python.
+
+Key Components
+--------------
+- MultinomialLogLoss{{name_suffix}} (for each data type variant)
+  - Purpose: Compute the multinomial logistic (softmax) loss and its gradient for a single sample.
+  - Variants:
+    - MultinomialLogLoss64
+    - MultinomialLogLoss32
+  - Core methods (cdef, nogil):
+    - _loss(prediction, y, n_classes, sample_weight)
+      - Description: Multinomial logistic loss for one sample.
+      - Formula:
+        loss = (logsumexp(prediction) - prediction[y]) * sample_weight
+      - Notes: The logsumexp term is computed in a numerically stable way (see _logsumexp).
+    - dloss(prediction, y, n_classes, sample_weight, gradient_ptr)
+      - Description: Gradient of the multinomial logistic loss with respect to the class scores.
+      - For each class c:
+        - gradient_ptr[c] = exp(prediction[c] - logsumexp(prediction))
+        - If c == y, subtract 1.0
+        - Multiply by sample_weight
+      - Notes: The gradient must be multiplied by the input features to obtain the full parameter gradient.
+  - Internal helper: __reduce__ for pickling support.
+
+- _logsumexp{{name_suffix}}(arr, n_classes)
+  - Purpose: Numerically stable computation of log(sum(exp(arr))).
+  - Approach:
+    - Find vmax = max(arr)
+    - Compute out = sum(exp(arr[i] - vmax)) for all i
+    - Return log(out) + vmax
+  - Notes: Reduces risk of overflow/underflow by performing computations in the log-domain.
+
+- _soft_thresholding{{name_suffix}}(x, shrinkage)
+  - Purpose: Soft-thresholding operator used in regularized SGD updates.
+  - Formula:
+    return max(x - shrinkage, 0) - max(-x - shrinkage, 0)
+
+- Type Variants (fused types)
+  - The module defines two dtype variants to support both 64-bit and 32-bit floating types:
+    - 64-bit: double / np.float64
+    - 32-bit: float / np.float32
+  - This is achieved through template-like code so that the same logic applies to both precisions with separate class names (MultinomialLogLoss64, MultinomialLogLoss32, etc.).
+
+- Utilities
+  - skl_isfinite{{name_suffix}}(value) nogil
+    - Ensures numeric finiteness checks are performed in nogil contexts.
+  - fmax{{name_suffix}}(x, y) noexcept nogil
+    - Inline max helper for the respective precision.
+
+Usage
+-----
+The components are designed to be used within a high-performance SGD training loop. The MultinomialLogLoss classes provide the core loss and gradient computations required by a stochastic optimizer for multinomial logistic regression.
+
+Example (conceptual, not a complete trainer)
+- Choose the appropriate type variant (64-bit or 32-bit) based on the data:
+  - MultinomialLogLoss64
+  - MultinomialLogLoss32
+- For a given sample:
+  - Compute the logsumexp using _logsumexp64/prefixed variant.
+  - Compute the loss with the formula:
+    loss = (logsumexp(prediction) - prediction[y]) * sample_weight
+  - Compute the gradient with the per-class formula:
+    for class_ind in range(n_classes):
+        gradient_ptr[class_ind] = exp(prediction[class_ind] - logsumexp_prediction)
+        if class_ind == y:
+            gradient_ptr[class_ind] -= 1.0
+        gradient_ptr[class_ind] *= sample_weight
+
+Code excerpts (from the source)
+- Loss computation
+  - loss = (logsumexp_prediction - prediction[int(y)]) * sample_weight
+- Gradient computation
+  - for class_ind in range(n_classes):
+      gradient_ptr[class_ind] = exp(prediction[class_ind] - logsumexp_prediction)
+      if class_ind == y:
+          gradient_ptr[class_ind] -= 1.0
+      gradient_ptr[class_ind] *= sample_weight
+- Log-sum-exp helper
+  - cdef {{c_type}} vmax = arr[0]
+  - for i in range(1, n_classes):
+      if vmax < arr[i]:
+          vmax = arr[i]
+  - for i in range(n_classes):
+      out += exp(arr[i] - vmax)
+  - return log(out) + vmax
+
+Details
+-------
+- Performance and safety
+  - Implemented in Cython with nogil blocks to enable release of the Python GIL during computation.
+  - Fused types provide dual precision support (float32 and float64) without duplicating logic.
+- Numerical stability
+  - The logsumexp formulation mitigates overflow/underflow when computing softmax-related terms.
+- Dependencies
+  - Built on top of _sgd_fast (LossFunction, Log, SquaredLoss) for core SGD components.
+  - Uses _sgd_fast_helpers.h for finite checks (skl_isfinite) and related utilities.
+- Data structures
+  - Works with SequentialDataset32/SequentialDataset64 for data handling in the SGD workflow.
+- Serialization
+  - __reduce__ implemented for pickling support of the SGD loss class instances.
+
+Notes
+-----
+- This documentation focuses on the core SGD-related components present in the sgd.rst module, particularly the multinomial logistic loss and its gradient, as well as numerically stable utilities used by the SGD implementations.
+- The actual training loop and higher-level SAG/SAGA logic are typically composed around these building blocks in the larger sag_fast codebase.

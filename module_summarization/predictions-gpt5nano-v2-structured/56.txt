@@ -1,0 +1,123 @@
+MixedGLM
+==========
+Bayesian inference for generalized linear mixed models (GLMMs)
+
+Overview
+--------
+This module implements Bayesian GLMMs that support families without additional scale or shape parameters (currently Binomial and Poisson). Two estimation approaches are provided:
+
+- Laplace approximation (maximum a posteriori, MAP)
+- Variational Bayes (mean-field approximation to the posterior)
+
+All realizations of random effects are modeled as independent. The design matrix for the random part is exog_vc. Each column of exog_vc corresponds to an independent random effect realization. The random effects have mean zero and an unknown standard deviation. Standard deviation parameters are constrained to be equal within subsets of the columns, controlled by ident (or by formulas). When formulas are used, columns of exog_vc derived from the same formula share the same standard deviation.
+
+For sparse data, exog_vc may be provided as a scipy.sparse matrix; if a dense array is provided, it is converted to sparse internally. Note that using formulas currently may require creating a temporary dense version of exog_vc.
+
+Model and Parameterization
+--------------------------
+The joint density of data and parameters factors as:
+
+.. math::
+
+    p(y | vc, fep) p(vc | vcp) p(vcp) p(fe)
+
+- p(y | vc, fep): likelihood under the chosen GLM family (Binomial or Poisson).
+- p(vc | vcp): independent Gaussian random effects given variance structure parameters vcp.
+- p(vcp): prior over the log standard deviations of random effects (log-normal on s, where s is the standard deviation of a random effect).
+- p(fe): prior over fixed effects parameters (Gaussian with zero mean).
+
+Key concepts:
+- Fixed effects parameters (fep): coefficients for the exog design (fixed part of the mean structure).
+- Random effects realizations (vc): column-wise random effects corresponding to exog_vc.
+- Variance structure parameters (vcp): parameters governing the standard deviations (via log s) of random effects; priors are Gaussian on the log standard deviations.
+
+Input and Design
+----------------
+- endog: Vector of responses.
+- exog: Design matrix for fixed effects (columns correspond to fep).
+- exog_vc: Design matrix for random effects (each column a separate random effect). May be sparse; conversion to sparse is automatic if a dense input is provided.
+- ident: Integer labels indicating which random terms share the same variance. Length must match the number of columns of exog_vc. Columns with identical ident values have the same standard deviation.
+  - When using formulas, ident is built automatically from vc_formulas, with each formula yielding a distinct label.
+- vcp_p: Prior standard deviation for variance component parameters (the prior on log(s) has this scale).
+- fe_p: Prior standard deviation for fixed effects parameters.
+- family: A statsmodels.genmod.families instance (e.g., Binomial, Poisson). Only these families without extra scale/shape parameters are supported.
+- fep_names: Optional list of names for fixed effects parameters (defaults constructed if None).
+- vcp_names: Optional list of names for variance component parameters (defaults constructed if None).
+- vc_names: Optional list of names for the random effect realizations.
+
+Fitting and Outputs
+-------------------
+- The class provides two fitting methods:
+  - fit_map: Laplace approximation to the posterior (MAP estimate).
+  - fit_vb: Variational Bayes approximation to the posterior (mean-field).
+- Returns a MixedGLMResults object containing the estimated parameters and diagnostics.
+
+Notes
+-----
+- Random effects are modeled as independent Gaussian realizations, with independence across both vc realizations and ident groups.
+- The priors encourage small variance components; vcp_p controls the prior spread (larger values allow larger variability).
+- Posterior components:
+  - fep: fixed effects parameters
+  - vc: random effects realizations
+  - vcp: log-standard-deviation parameters (variance structure)
+- Be aware that very large vcp_p values may make posterior mode finding numerically challenging for some families (e.g., Binomial). A value around 0.5–1.0 is commonly used.
+- When using formulas, the ident grouping is derived from the formula terms, ensuring equal variances for random effects sharing a common formula.
+
+Usage
+-----
+The following sections illustrate typical usage.
+
+Example
+-------
+The following is a representative example showing how to set up and fit a MixedGLM with a Binomial family. Adapt the data generation to your situation.
+
+.. code-block:: python
+
+    import numpy as np
+    from scipy import sparse
+    from statsmodels.genmod.families import Binomial
+    from statsmodels.genmod.mixed_glm import MixedGLM
+
+    np.random.seed(123)
+
+    n = 100
+    endog = np.random.binomial(1, 0.5, size=n)
+
+    # Fixed effects design (intercept + one covariate)
+    exog = np.ones((n, 2))
+    exog[:, 1] = np.random.normal(size=n)
+
+    # Random effects design (two random effects per observation)
+    exog_vc = sparse.csr_matrix(np.random.normal(size=(n, 2)))
+
+    # ident: two random effects share a variance
+    ident = np.array([0, 0])
+
+    model = MixedGLM(endog, exog, exog_vc, ident,
+                     vcp_p=0.5, fe_p=1.0,
+                     family=Binomial())
+
+    results = model.fit_map()  # or results = model.fit_vb()
+    print(results.summary())
+
+Additional notes
+----------------
+- Formulas for defining exog_vc are supported; when formulas are used, the ident construction follows the grouping implied by the formulas.
+- Sparse inputs are encouraged for large exog_vc matrices to improve memory efficiency.
+
+References
+----------
+- UCLA Statistics: Introduction to generalized linear mixed models
+  https://stats.idre.ucla.edu/other/mult-pkg/introduction-to-generalized-linear-mixed-models
+- SAS documentation on mixed models
+  https://support.sas.com/documentation/cdl/en/statug/63033/HTML/default/viewer.htm#statug_intromix_a0000000215.htm
+- Assessment of estimation methods for GLMMs with binary outcomes
+  https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3866838/
+
+Appendix: Mathematical Formulation
+----------------------------------
+- Likelihood: p(y | vc, fep) depends on the GLM family (Binomial, Poisson).
+- Random effects: p(vc | vcp) is an independent Gaussian distribution across vc realizations and ident groups.
+- Priors: p(vcp) is Gaussian on vcp (through log s), inducing log-normal priors on standard deviations; p(fe) is Gaussian with mean 0 and standard deviation fe_p.
+
+For further details, refer to the MixedGLM class documentation and its fitting methods (fit_map, fit_vb).

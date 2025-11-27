@@ -1,0 +1,145 @@
+# MixedGLM: Generalized Linear Mixed Effects Models
+
+A developer-focused overview of the MixedGLM implementation for Bayesian Generalized Linear Mixed Models (GLMMs) in mixed_glm.rst.
+
+## Overview
+
+- MixedGLM provides Bayesian inference for generalized linear mixed models with:
+  - Families without additional scale or shape parameters (currently binomial and Poisson).
+  - Two estimation approaches: Laplace approximation (maximum a posteriori) and variational Bayes (mean-field VB).
+- All realizations of random effects are modeled as independent conditional on variance structure parameters.
+- Random effects are specified via:
+  - exog_vc: design matrix for random effects (columns correspond to independent random effects)
+  - ident: integer labels grouping columns of exog_vc that share the same standard deviation
+- When formulas are used, exog_vc columns derived from the same formula share the same variance.
+
+## Key concepts
+
+- Fixed effects (fep): parameters associated with exog (the mean structure).
+- Random effects (vc): realizations corresponding to columns of exog_vc.
+- Variance components (vcp): standard deviations (on the log scale) of the random effects, with a Gaussian prior on vcp (log standard deviations). The implied priors on standard deviations are log-normal.
+- Prior structure:
+  - p(fe) is Gaussian with mean 0 and standard deviation fe_p.
+  - p(vcp) encodes Gaussian priors on the log standard deviations (leading to log-normal distributions for the standard deviations).
+  - p(vc | vcp) is an independent Gaussian distribution for random effects, with independence across ident and within ident groups.
+- Observations y follow p(y | vc, fep) according to the chosen GLM family (e.g., Poisson, Binomial).
+
+## Model and parameterization
+
+- The joint density factors as:
+  - p(y | vc, fep) p(vc | vcp) p(vcp) p(fe)
+- The vcp parameters control the scale of random effects. Two random effect realizations with the same ident value share the same variance.
+- The random effects distribution assumes independence across columns of exog_vc, across groups defined by ident, and over the realizations themselves.
+- The GLM likelihood p(y | vc, fep) depends on the specific family chosen (e.g., Poisson or Binomial).
+
+## Data structures and input handling
+
+- endog: response vector.
+- exog: fixed-effects design matrix (covariates for the mean structure).
+- exog_vc: random-effects design matrix. May be provided as a sparse matrix; if a dense matrix is provided, it is converted to sparse internally.
+  - Note: when formulas are used, there is an internal temporary dense version of exog_vc during construction.
+- ident: integer labels for the columns of exog_vc, with length equal to the number of columns. Columns with the same ident value share a common standard deviation.
+- vcp_p: prior standard deviation for variance component parameters (the prior on log standard deviations). Controls the spread of the log-standard-deviation priors.
+- fe_p: prior standard deviation for fixed effects parameters.
+- family: a StatsModels GLM family instance (e.g., Poisson, Binomial).
+- fep_names: names for fixed effects (default generated if None).
+- vcp_names: names for variance components (default generated if None).
+- vc_names: names for the random effect realizations.
+
+## Formulas and ident generation
+
+- When using formulas to specify random effects, exog_vc is derived from the formulas, and ident is constructed so that columns from a common formula share a variance parameter.
+- If not using formulas, ident must be supplied and have the same length as the number of columns of exog_vc.
+
+## Estimation methods
+
+- Laplace approximation (fit_map): provides a MAP estimate of the posterior, suitable for faster approximate inference.
+- Variational Bayes (fit_vb): mean-field approximation to the posterior; provides approximate posterior distributions for fep, vc, and vcp.
+
+## Sparsity and performance notes
+
+- exog_vc may be sparse for efficiency; if a dense matrix is passed, it will be converted to a sparse representation.
+- Currently there is no way to avoid creating a temporary dense version of exog_vc when using formulas.
+- The implementation uses Gauss-Legendre quadrature weights for certain integrals (e.g., within the Laplace approximation), as seen in the internal glw table.
+
+## API and usage (developer-oriented)
+
+- Class: MixedGLM (name may appear in the codebase as the primary interface)
+- Initialization parameters (high level):
+  - endog: array-like, response vector
+  - exog: array-like, fixed-effects design matrix
+  - exog_vc: array-like (dense or sparse), random-effects design matrix
+  - ident: array-like of ints, groups for variance sharing
+  - vcp_p: float, prior std for log standard deviations
+  - fe_p: float, prior std for fixed effects
+  - family: GLM family instance
+  - fep_names: list[str], optional names for fixed effects
+  - vcp_names: list[str], optional names for variance components
+  - vc_names: list[str], optional names for random effect realizations
+- Fitting methods:
+  - fit_map(): run Laplace (MAP) estimation
+  - fit_vb(): run variational Bayes approximation
+- Output:
+  - MixedGLMResults: holds estimates, diagnostics, and summaries
+- Example usage (schematic):
+  - Basic Poisson GLMM with two random-effect realizations:
+    - model = MixedGLM(endog, exog, exog_vc, ident, vcp_p=1.0, fe_p=1.0, family=families.Poisson())
+    - res = model.fit_map()
+    - print(res.summary())
+  - VB variant:
+    - res_vb = model.fit_vb()
+- Documentation notes:
+  - When formulas are used, you can derive exog_vc and ident from the formulas; otherwise you must supply exog_vc and ident directly.
+  - For Binomial and Poisson families, ensure the data are appropriate for the chosen GLM link (e.g., log link for Poisson, logit/probit for Binomial as defined by the family).
+
+## Example: Basic Poisson GLMM (array-based specification)
+
+- Setup (conceptual):
+  - endog: count data
+  - exog: fixed-effect design (e.g., intercept and predictors)
+  - exog_vc: random-effect design (each column a separate random effect)
+  - ident: grouping vector for variance sharing
+- Pseudocode:
+  - model = MixedGLM(endog, exog, exog_vc, ident=ident, vcp_p=1.0, fe_p=1.0, family=families.Poisson())
+  - res_map = model.fit_map()
+  - print(res_map.summary())
+
+## Example: Formula-based random effects (conceptual)
+
+- When using patsy formulas to construct exog_vc, the implementation will:
+  - Build exog_vc columns from the formulas
+  - Construct ident so that columns from the same formula share a variance
+- Pseudocode:
+  - model = MixedGLM.from_formula('y ~ 1 + x1 + x2', data, vc_formula='1|group', vcp_p=1.0, fe_p=1.0, family=families.Binomial())
+  - res = model.fit_map()  # or model.fit_vb()
+
+Note: The exact API for formula-based construction depends on the surrounding codebase; the documentation focuses on the conceptual behavior of exog_vc, ident, and the two estimation methods.
+
+## Output and interpretation
+
+- The MixedGLMResults object provides:
+  - Estimates for fixed effects (fep)
+  - Realizations of random effects (vc)
+  - Variance structure parameters (vcp)
+- Interpretation follows standard GLMM practice:
+  - fep: effect sizes for fixed covariates
+  - vc: realized random effect values for each observation unit (as per exog_vc columns)
+  - vcp: standard deviations for random effects by ident group (on the original scale after exponentiation)
+
+## Limitations and caveats
+
+- Currently only GLM families without extra scale or shape parameters are supported (Binomial and Poisson).
+- All random effects are modeled as independent in this implementation.
+- When using formulas, temporary dense representations of exog_vc may be created; the code prefers sparse representations for efficiency.
+- The Laplace approximation and VB are approximate inference methods; results should be interpreted accordingly, with awareness of potential numerical issues for difficult likelihood surfaces.
+
+## References
+
+- Introduction to generalized linear mixed models:
+  https://stats.idre.ucla.edu/other/mult-pkg/introduction-to-generalized-linear-mixed-models
+- SAS documentation on mixed models:
+  https://support.sas.com/documentation/cdl/en/statug/63033/HTML/default/viewer.htm#statug_intromix_a0000000215.htm
+- Assessment of estimation methods for GLMMs with binary outcomes:
+  https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3866838/
+
+If you’d like, I can tailor the examples to a concrete dataset shape or provide a runnable snippet based on a specific fixture in your codebase.

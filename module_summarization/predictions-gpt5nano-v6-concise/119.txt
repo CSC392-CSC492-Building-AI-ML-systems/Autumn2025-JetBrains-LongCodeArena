@@ -1,0 +1,277 @@
+# Config Usage: Generating FV3 Configs
+
+This document describes how to use the high-level configuration classes in the provided code to generate FV3 configuration dictionaries. It covers the main data models, how overlays are applied, how to specify initial conditions and diagnostics, and provides practical usage examples (programmatic and via CLI).
+
+---
+
+## Overview
+
+The module defines lightweight, dataclass-based representations that assemble FV3 configuration dictionaries through a composition of:
+
+- a base FV3 configuration (selected by a base_version),
+- an initial conditions overlay (which can be a URL+timestamp),
+- runtime and physics overlays (supplied by users via YAML),
+- optional Fortran diagnostic overlays and file-based namelist settings,
+- a zooned emulation configuration (zhao_carr_emulation).
+
+Key classes exposed for public use are:
+
+- `FV3Config`
+- `InitialCondition`
+- `HighLevelConfig`
+- (and helper) `to_fv3config`, `to_runtime_config`
+
+The code relies on the FV3 tooling in `fv3config`, `fv3kube`, and related runtime components.
+
+---
+
+## Key Data Models
+
+### FV3Config
+- Purpose: Dataclass representation of all FV3 config fields that are not overridden by `HighLevelConfig`.
+- Fields (with defaults):
+  - `namelist`: default is a simple coupler namelist with `dt_atmos = 900`.
+  - `experiment_name`, `data_table`, `field_table`, `forcing`, `orographic_forcing`, `gfs_analysis_data`.
+- Behavior: `.asdict()` returns a dictionary with only non-None values.
+
+### InitialCondition
+- Purpose: Represents a single initial condition in the format `{base_url}/{timestep}`.
+- Fields:
+  - `base_url: str`
+  - `timestep: str` (YYYYMMDD.HHMMSS)
+  - `restart_categories: RestartCategoriesConfig` (default factory)
+- Behavior:
+  - `.overlay` property returns an overlay configuration via `fv3kube.c48_initial_conditions_overlay(...)`.
+- Notes:
+  - The overlay encodes where in storage the initial field data is read from, and how restart categories map to on-disk categories.
+
+### HighLevelConfig
+- Purpose: A high-level, user-friendly configuration object for prognostic runs. Combines FV3 config with runtime config and conveniences for initial conditions and duration.
+- Base classes: `UserConfig` (runtime config) and `FV3Config` (base FV3 fields).
+- Key fields:
+  - `base_version: str = "v0.5"`
+  - `initial_conditions: Union[InitialCondition, Any] = ""`
+  - `duration: str = ""` (e.g., `"3h"`)
+  - `zhao_carr_emulation: emulation.EmulationConfig = emulation.EmulationConfig()`
+- Core methods:
+  - `_initial_condition_overlay()`: returns an overlay for the initial conditions depending on the type.
+  - `_to_fv3config_specific() -> FV3Config`: materializes an `FV3Config` from this instance.
+  - `to_runtime_config() -> UserConfig`: extracts only the runtime-related fields.
+  - `_physics_timestep() -> timedelta`: computes the physics timestep (`dt_atmos`) by merging base FV3 config with overlays.
+  - `_duration` (private property): parses `self.duration` into a `timedelta` (or `None` if empty) using `pandas.to_timedelta`.
+  - `to_fv3config() -> Any`: translates the high-level config into a final FV3 config dictionary by merging overlays.
+    - This is the central method used to generate the actual FV3 dictionary that will be consumed by FV3 tooling.
+    - Overlays applied include:
+      - Initial condition overlay
+      - Fortran diagnostics overlay (via `_diag_table_overlay(self.fortran_diagnostics)`)
+      - File-config overlays converted to namelist settings
+      - Zhao-Carr emulation settings
+    - If a run duration is specified, it is applied via `fv3config.set_run_duration(...)`.
+
+> Note: `self.fortran_diagnostics` is referenced when building overlays. Ensure this attribute is provided via YAML or otherwise populated in your `HighLevelConfig` instance. The code uses:
+> - `_diag_table_overlay(self.fortran_diagnostics)`
+> - `file_configs_to_namelist_settings(self.fortran_diagnostics, self._physics_timestep())`
+
+---
+
+## How Overlays Work
+
+- Base configuration is loaded via `fv3kube.get_base_fv3config(self.base_version)`.
+- Overlays (deltas) are merged in a deterministic order to produce the final configuration:
+  - initial condition overlay (from `InitialCondition` or a direct dict)
+  - diagnostics-derived namelist settings
+  - other runtime and physics overlays (from `to_runtime_config` and `to_fv3config` inputs)
+  - zhao_carr emulation settings
+- Range warnings in namelist edits can be suppressed with `SUPPRESS_RANGE_WARNINGS`.
+
+This approach enables producing small, focused updates to a base configuration without needing to recompute or manage the entire configuration dictionary directly.
+
+---
+
+## Typical Usage
+
+### Programmatic (Python)
+
+```python
+from datetime import timedelta
+from fv3kube import RestartCategoriesConfig
+
+# Define an initial condition (example)
+ic = InitialCondition(
+    base_url="gs://fv3-data/initial_conditions",
+    timestep="20200101.0000",
+    restart_categories=RestartCategoriesConfig(core="restart_core", surface="restart_sfc")
+)
+
+# Optional: customize emulation
+from runtime.diagnostics import manager as diag_manager
+from emulation import EmulationConfig
+
+emul = EmulationConfig(use_ml=True)
+
+# Build a high-level config
+hlc = HighLevelConfig(
+    base_version="v0.5",
+    initial_conditions=ic,
+    duration="3h",
+    zhao_carr_emulation=emul
+)
+
+# Generate the FV3 config dictionary
+fv3_config = hlc.to_fv3config()
+
+# If you also want the runtime-only config
+runtime_config = hlc.to_runtime_config()
+```
+
+### Inspecting and using results
+
+```python
+# fv3_config is a dict suitable for fv3config usage
+print(fv3_config.keys())
+print(fv3_config.get("namelist", {}).get("coupler_nml", {}).get("dt_atmos"))
+```
+
+### With a YAML-based user config
+
+Assuming you have a YAML file with user overrides, you can instantiate:
+```python
+import yaml
+
+with open("path/to/user_config.yaml", "r") as f:
+    user_config_yaml = yaml.safe_load(f)
+
+# The integration point for this code would typically deserialize the YAML
+# into a HighLevelConfig-like object and then call to_fv3config().
+# The exact deserialization mechanism depends on how your project wires YAML
+# into the dataclass instances.
+```
+
+---
+
+## CLI Usage
+
+The module includes a CLI helper to parse a config update YAML and optional model URL for ML-based updates.
+
+Example usage:
+- Basic:
+  - python your_script.py path/to/user_config.yaml
+
+- With an ML model URL:
+  - python your_script.py path/to/user_config.yaml --model_url https://example.com/model.pkl
+
+Notes:
+- The CLI expects a YAML file containing updates (diffs) relative to a base FV3 config. The exact schema is driven by how `HighLevelConfig` and `FV3Config` fields are exposed to YAML deserialization in your application.
+- The code path uses `_create_arg_parser()` to define arguments; it is intended for internal or script use and may be extended to expose more options as needed.
+
+---
+
+## YAML Schema (Illustrative Examples)
+
+These examples illustrate how you might structure a YAML file that updates the base configuration via overlays. Adapt to your actual deserialization strategy and attribute names.
+
+Minimal example (override only runtime names):
+```yaml
+base_version: "v0.5"
+experiment_name: "my_experiment"
+namelist:
+  coupler_nml:
+    dt_atmos: 900
+```
+
+Initial condition example:
+```yaml
+initial_conditions:
+  base_url: "gs://fv3-data/initial_conditions"
+  timestep: "20200101.0000"
+  restart_categories:
+    core: "core_restart"
+    surface: "surface_restart"
+```
+
+Duration example:
+```yaml
+duration: "3h"
+```
+
+Fortran diagnostics example (structure depends on your diagnostics config):
+```yaml
+fortran_diagnostics:
+  - type: "diag_table"
+    file: "diag_table_prognostic"
+    # additional fields that your overlay expects
+```
+
+Zhao-Carr emulation example:
+```yaml
+zhao_carr_emulation:
+  enabled: true
+  param_a: 1.23
+  param_b: 4.56
+```
+
+Runtime overrides (arbitrary runtime settings):
+```yaml
+# Example: runtime flags or other runtime config fields
+runtime:
+  some_flag: true
+  some_value: 42
+```
+
+---
+
+## Advanced Topics
+
+- Overlays vs. base config:
+  - The base config is loaded from a known version (e.g., `v0.5`).
+  - All updates are represented as overlays (deltas) rather than mutating the entire dictionary.
+  - This makes it easy to compose configurations from modular pieces (initial conditions, diagnostics, model-specific runtime tweaks).
+
+- Physics timestep calculation:
+  - `_physics_timestep()` computes the effective `dt_atmos` by merging the base FV3 config with overlays.
+  - This value is used to determine the appropriate timestep for physics calculations and can influence the resulting runtime configuration.
+
+- Duration handling:
+  - If you specify a `duration`, the code applies `fv3config.set_run_duration(...)` to ensure the run length is encoded in the final configuration.
+
+- Diagnostics integration:
+  - Fortran diagnostics overlays are converted to namelist settings via `file_configs_to_namelist_settings(...)`.
+  - These overlays are merged into the final configuration to ensure diagnostic output is correctly configured.
+
+- Extending:
+  - You can subclass or compose `HighLevelConfig` to introduce additional overlays or convenience properties as needed for your workflow.
+  - Ensure any new attributes used in `to_fv3config()` are serializable to dictionaries (for merging overlays).
+
+---
+
+## Testing and Debugging Tips
+
+- Validate dataclass serialization:
+  - Use `dataclasses.asdict()` on your `HighLevelConfig` instance to inspect the merged dictionary before applying overlays.
+- Inspect overlays:
+  - Print intermediate overlay dictionaries (e.g., initial condition overlay, diag overlay) to verify correctness.
+- Check final FV3 config shape:
+  - Ensure keys like `namelist`, `experiments_name`, `data_table`, etc., exist in the final config dictionary.
+- Time-sensitive fields:
+  - Verify `dt_atmos` reflects the intended base config and overlays by inspecting the value produced by `_physics_timestep()`.
+
+---
+
+## References and Related Tools
+
+- fv3config: core FV3 config packaging and utilities.
+- fv3kube: utilities for merging overlays and generating config dictionaries, base configs, and initial condition overlays.
+- emulation: modeling emulation configuration (e.g., Zhao-Carr).
+- runtime.diagnostics: handling of Fortran file configurations and namelist settings.
+
+---
+
+## Summary
+
+- Use HighLevelConfig (together with InitialCondition and FV3Config) to compose FV3 configuration via overlays.
+- Generate final FV3 dictionaries with `HighLevelConfig.to_fv3config()`.
+- Optionally extract separate runtime config with `to_runtime_config()`.
+- Specify initial conditions, duration, diagnostics, and emulation through YAML or programmatic construction.
+- The system merges base configurations with overlays in a controlled order, enabling modular, reusable configuration workflows.
+
+If you need deeper examples tailored to your project’s exact YAML schema or want a ready-to-run script that reads a YAML file and prints the resulting FV3 config, tell me your YAML schema and I’ll tailor the docs and examples accordingly.

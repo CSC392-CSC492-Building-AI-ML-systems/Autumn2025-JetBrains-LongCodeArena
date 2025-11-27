@@ -1,0 +1,171 @@
+# w_eddist: Time-resolved transition-event duration distribution
+
+Introduction
+------------
+w_eddist computes the time-resolved distribution of transition-event durations from kinetics results produced by WE simulations. It reads source data derived from w_kinetics trace results, bins durations across one or more dimensions, and outputs normalized histograms suitable for plotting (e.g., with plothist).
+
+Key concepts and components
+----------------------------
+- DurationDataset
+  - A lightweight facade that couples a dataset with an associated per-iteration mask.
+  - Purpose: expose per-iteration data filtered by the iteration’s mask when queried via get_iter_data(n_iter).
+  - Usage pattern:
+    - Initialize with a dataset and a mask, optionally an iter_start.
+    - Call get_iter_data(n_iter) to obtain a shape (n_segs, 1, 1) array for that iteration, or None if no data.
+  - Typical behavior:
+    - If the iteration is outside the requested range, a ValueError is raised.
+    - Returns None if no segments are present; otherwise returns a 3D array with a singleton trailing dimension to fit the histogram routines.
+
+- isiterable(x)
+  - Utility to test whether x is iterable.
+  - Returns True for iterable objects, False otherwise.
+
+- _remote_min_max(ndim, dset_dtype, n_iter, dsspec)
+  - Computes per-dimension min/max bounds across an iteration’s data.
+  - Steps:
+    - Determines a per-dimension range using the dset_dtype (float/integer bounds).
+    - Calls dsspec.get_iter_data(n_iter) to fetch the data for the specified iteration.
+    - If there is no data for the iteration (None), returns the current data_range (max/min initialized to type bounds).
+    - Otherwise, updates per-dimension min/max by inspecting the data in each dimension.
+  - Returns: data_range as a list of (min, max) tuples per dimension.
+
+- _remote_bin_iter(iiter, n_iter, dsspec, wt_dsspec, initpoint, binbounds, ignore_out_of_range)
+  - Core per-iteration binning routine executed in parallel.
+  - Procedure:
+    - Creates an empty histogram shaped by the provided bin boundaries.
+    - Retrieves per-iteration duration data via dsspec.get_iter_data(n_iter).
+    - If there is no data for the iteration, returns without altering the histogram.
+    - Retrieves per-segment weights from wt_dsspec for the iteration.
+    - Iterates over segments starting from initpoint, applying histnd to accumulate weighted counts into the histogram.
+    - Normalizes the histogram with normhistnd.
+  - Returns: a tuple (iiter, n_iter, iter_hist) containing the iteration identifiers and the computed histogram.
+
+- WEDDist (main tool)
+  - A WESTParallelTool subclass implementing the w_eddist command.
+  - Purpose: drive the end-to-end computation of time-resolved duration histograms from kinetics data, with parallelized binning.
+  - Important state and behavior:
+    - Uses a default parallel work manager for efficiency on large datasets.
+    - Exposes progress tracking via a ProgressIndicatorComponent.
+    - Parameters related to source data and output:
+      - KinData: Primary kinetics/trace input (default kintrace.h5); the code maintains attributes for kinetics_filename and kin dynamics file handles.
+      - Iteration and masking handling: Uses a DurationDataset-like approach to filter per-iteration data with masks.
+      - Histogram configuration: Default of 100 bins per dimension, overridable via -b/--bins.
+    - The class integrates with the West I/O and histogram utilities:
+      - histnd for multidimensional histogram accumulation.
+      - normhistnd for per-dimension normalization.
+      - The output structure includes histograms, per-dimension bin bounds (and midpoints), and an iteration index array (n_iter).
+
+Output format and data products
+-------------------------------
+The output file (default: pdist.h5) contains:
+- histograms
+  - The normalized time-resolved histograms.
+  - First axis corresponds to iteration; subsequent axes correspond to the input dataset’s dimensions (i.e., duration components).
+
+- /binbounds_0, /binbounds_1, ...
+  - Datasets containing the boundaries for each input dimension’s bins.
+
+- /midpoints_0, /midpoints_1, ...
+  - Datasets containing the midpoints for each dimension’s bins (optional convenience for plotting).
+
+- n_iter
+  - A 1D array listing the iteration numbers corresponding to the stored histograms.
+
+Usage and configuration
+-----------------------
+Source data
+- The tool reads data produced by w_kinetics trace results. The documentation notes that source data for the duration histogram is derived from the kinetics results produced by prior steps in the workflow.
+
+Histogram binning
+- By default: 100 bins per dimension.
+- Options for -b/--bins:
+  - A single integer N: N uniformly spaced bins in every dimension.
+  - A comma-separated sequence N1,N2,...: N1 bins for the first dimension, N2 for the second, etc.
+  - A list of lists [[B11, B12, ...], [B21, B22, ...], ...]: explicit, potentially nonuniform bin boundaries per dimension. Evaluated with Python’s eval, with numpy (np) available.
+- Note: The first two forms trigger a scan of dataset min/max per dimension to determine bounds (potentially expensive for large datasets). The explicit-bounds form avoids this scan.
+
+Output
+- -o/--output FILENAME: Output HDF5 file (default: pdist.h5).
+- The resulting file contains histograms, bin bounds, midpoints, and n_iter as described above.
+
+Parallelization
+- The tool supports parallelized binning and input data reading by default.
+- For simple, smaller datasets, serial execution (--serial) may be more efficient.
+
+Command-line options
+- The documentation string provides a Command-line options section but does not enumerate all flags. The following options are typically relevant:
+  - -o/--output: Output file name (default: pdist.h5)
+  - -b/--bins: Bin specification as described above
+  - --serial: Run in serial (instead of parallel)
+  - Kinetics/source data options: paths to kinetics/trace data (defaults and names are provided by the tool’s internal attributes)
+- See the actual command-line interface in the installed tool for a complete and up-to-date option set.
+
+Edge cases and considerations
+- Iteration with no data
+  - If a given iteration has no eligible segments (dset is None), the corresponding histogram remains zero for that iteration.
+- Mask handling
+  - DurationDataset filters data according to a per-iteration mask. Ensure mask shapes align with iteration counts and dataset shapes.
+- Data type handling
+  - _remote_min_max attempts to use floating-type bounds; if that fails, it falls back to integer bounds.
+- Performance
+  - Parallelization significantly speeds up processing for large kinetics datasets; serial mode can be faster for small datasets or when I/O is a bottleneck.
+- Data integrity
+  - The tool expects data produced by the kintrace/trace workflow. Ensure data provenance and formats match the expectations (mask, per-iteration structure, etc.).
+
+Usage examples
+------------
+Basic usage (default settings)
+```bash
+w_eddist -o pdist.h5
+```
+
+Specify a uniform bin count for all dimensions
+```bash
+w_eddist -o pdist.h5 -b 100
+```
+
+Specify per-dimension bins (nonuniform allowed)
+```bash
+w_eddist -o pdist.h5 -b '[[0,0.1,0.5,1.0], [0,2,4,6]]'
+```
+
+Run in serial (useful for debugging or small datasets)
+```bash
+w_eddist --serial -o pdist.h5
+```
+
+Advanced usage (explicit per-dimension bin boundaries with eval scope)
+```bash
+w_eddist -o pdist.h5 -b '[
+  [0.0, 0.5, 1.0, 2.0],
+  [0.0, 1.0, 2.0, 3.0, 4.0]
+]'
+```
+
+Notes
+-----
+- The tool is designed to output data that plothist can consume for visualization.
+- The default output file name is pdist.h5, but any valid path may be specified with -o/--output.
+- For large systems and high-dimensional data, using explicit bin boundaries can avoid expensive pre-scan operations.
+
+Code references (conceptual)
+```python
+# DurationDataset usage concept
+dur_ds = DurationDataset(dataset=kinetics_dataset, mask=per_iter_mask, iter_start=1)
+dset = dur_ds.get_iter_data(n_iter)  # shape (n_segs, 1, 1) or None
+```
+
+```python
+# Core binning step (high-level)
+iiter, n_iter, iter_hist = _remote_bin_iter(
+    iiter=current_iteration,
+    n_iter=iteration_number,
+    dsspec=duration_dataset_spec,
+    wt_dsspec=weights_dataset_spec,
+    initpoint=0,
+    binbounds=bin_bounds_per_dim,
+    ignore_out_of_range=False
+)
+```
+
+End of documentation.

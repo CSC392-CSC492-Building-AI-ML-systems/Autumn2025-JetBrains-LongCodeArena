@@ -1,0 +1,122 @@
+PyTables File Format
+====================
+
+Introduction
+------------
+This document describes the PyTables file format as it pertains to indexing and the on-disk layout of index structures. It covers the core Index class, how indices are stored, how they are accessed from Python, and related configuration options that influence performance and storage.
+
+Overview
+--------
+- PyTables stores tabular data in HDF5 files and uses dedicated on-disk structures to index columnar data for fast lookups.
+- Each indexed column has an associated Index object that describes how the index is stored (bit width, blocks, filters) and how it is accessed.
+- The on-disk representation uses a naming convention that embeds index datasets inside the table’s group, typically with a segment named starting with _i_ to denote the index dataset.
+
+Key Components
+-------------
+- Index (class)
+  - Purpose: Represents the index of a column in a Table. It is responsible for describing how the index is stored and how it can be accessed for lookups.
+  - Inheritance: NotLoggedMixin, Group, and indexesextension.Index.
+  - Core responsibilities include storing index metadata, providing accessors to related table/column, and exposing runtime properties such as kind, filters, and dirty state.
+- Supporting modules and concepts
+  - idxutils: utilities for calculating chunk sizes and optimization levels.
+  - indexesextension: provides additional indexing functionality and C/Cython-backed performance features.
+  - Group, Table, Column: PyTables data hierarchy; Index is associated with a specific column of a table.
+  - Filters: I/O filters configuration used for index storage.
+  - Lazy attributes and caching: performance-oriented features used by Index.
+
+Index Class API and Behavior
+----------------------------
+Parameters (as defined in the class docstring)
+- parentnode: The parent Group object.
+- name: The node name within its parent.
+- atom: An Atom object describing the on-disk data type for index values (only scalar atoms are supported).
+- title: Optional TITLE attribute for the Index.
+- kind: Desired kind for the index (full, medium, light, ultralight) indicating how much positional information is stored.
+- optlevel: Optimization level for this index.
+- filters: Filters object specifying compression and I/O filters for the index dataset.
+- tmp_dir: Temporary directory used during index operations.
+- expectedrows: User estimate of the number of row slices that will be added to the growable dimension.
+- byteorder: Byte order used on-disk for the index data.
+- blocksizes: Sizes of the primary block components (low-level parameter).
+
+Key Properties and Relationships
+- kind
+  - Read-only property describing the index’s granularity. The value is derived from the internal indsize and maps to:
+    - 1 -> ultralight
+    - 2 -> light
+    - 4 -> medium
+    - 8 -> full
+- filters
+  - Returns the Filters instance applied to this index (compression, shuffle, etc.).
+- dirty
+  - Indicates whether the index is out of sync with the table data.
+  - Getter: True if the DIRTY attribute exists and is truthy; otherwise False.
+  - Setter: Updates DIRTY and notifies the condition cache when the dirty state changes.
+  - Edge case: If the DIRTY attribute is missing, the index is treated as clean.
+- column
+  - Returns the Column object for the indexed column.
+  - Derived by parsing the index pathname to determine the table and column paths, then retrieving the corresponding objects from the file.
+- table
+  - Returns the Table object that owns this index.
+- nblockssuperblock, nslicesblock, nchunkslice
+  - Derived attributes describing the storage geometry of the index:
+    - nblockssuperblock: number of blocks per superblock.
+    - nslicesblock: number of slices per block.
+    - nchunkslice: number of chunks per slice.
+- nsup erblocks
+  - Total number of superblocks in the index storage (implementation-dependent).
+
+Internal helper: _table_column_pathname_of_index
+------------------------------------------------
+- Purpose: Given an index pathname, determine the corresponding table path and the column path within that table.
+- Behavior: Splits the full path and identifies the segment starting with _i_ as the index dataset. Returns (tablepathname, colpathname) by removing the _i_-prefixed segment from the path and adjusting the remainder to point to the table and column.
+- Important note: The function assumes the path contains an index segment typified by a segment starting with _i_. If such a segment is not present, the function may not behave as intended.
+
+On-disk File Format and Path Conventions
+----------------------------------------
+- Index datasets are stored within the same HDF5 file alongside their associated tables and columns.
+- A segment of the path is reserved for the index, named with a prefix _i_ (e.g., _i_<column_name>).
+- The Index object maintains references to its parent table and column via the on-disk path, enabling fast access to the corresponding in-memory objects.
+
+Default Settings and Optimizations
+----------------------------------
+- default_auto_index: Boolean flag indicating whether PyTables should automatically update indices after table append or other index-invalidating operations.
+- default_index_filters: A Filters instance that defines compression and related I/O properties for index storage. The module sets a sensible default (e.g., complevel=1, complib='zlib', shuffle=True, fletcher32=False).
+- opt_search_types: A tuple of numeric types for which optimized search implementations (in C/Cython) exist. Includes common integer and floating-point types.
+- max32: Upper limit for uint32 integers (2**32). Used to bound certain internal computations and ensure compatibility with 32-bit indices.
+
+Usage Considerations and Edge Cases
+-----------------------------------
+- Path handling: The internal helper _table_column_pathname_of_index relies on a path containing an _i_ segment. If a path does not contain such a segment, path resolution may fail.
+- Dirty state: If DIRTY attribute is missing, the index is treated as clean. Dirty indices are not usable for lookups until reindexed.
+- Data layout: The on-disk layout is lower-level and intended for internal use. Public users typically interact with Index via higher-level APIs exposed by Table and Column, not by constructing Index objects directly.
+- Performance: The exact on-disk representation (slices, blocks, superblocks) is tuned for performance; tuning blocksizes and filters can yield significant speed/size trade-offs.
+
+Examples
+--------
+- Mapping indsize to kind (demonstrates the Index.kind property):
+```python
+# indsize values map to index kind as follows:
+# 1 -> ultralight, 2 -> light, 4 -> medium, 8 -> full
+indsize = 4
+kind = {1: 'ultralight', 2: 'light', 4: 'medium', 8: 'full'}[indsize]
+print("Index kind:", kind)
+```
+
+- Resolving table and column paths from an index pathname (internal helper usage):
+```python
+# Internal helper example (not part of public API)
+index_path = "mytable/_i_mycol/column"
+tablepath, colpathname = _table_column_pathname_of_index(index_path)
+print("Table path:", tablepath)
+print("Column path:", colpathname)
+```
+
+Notes
+-----
+- This documentation reflects the internal design of the PyTables file format as embodied by the Index class and related helpers. Public usage typically goes through higher-level APIs (Tables and Columns) while the on-disk format and internal path conventions are handled by PyTables itself.
+
+References
+----------
+- PyTables core modules (idxutils, indexesextension, leaf, atom, and helpers) provide the implementations referenced here.
+- Default settings and type mappings are defined at module scope (default_auto_index, default_index_filters, opt_search_types, max32).

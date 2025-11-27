@@ -1,0 +1,131 @@
+Scheduling policies in Dask distributed (The policies used to select the preference of tasks and to select the preference of workers)
+
+Introduction
+This document describes the policies the distributed scheduler uses to decide:
+- which ready tasks to run next (task selection / task priority)
+- which worker should run a given task (worker selection / data locality)
+
+These policies are designed to maximize data locality, balance load, respect resource limits, and provide hooks for extensibility via scheduler extensions.
+
+Key concepts
+- Task readiness: A task becomes ready when all of its dependencies have finished.
+- Ready queue: The pool of ready tasks that the scheduler may assign to workers.
+- Worker: A scheduler-allocated compute resource (process, core pool, etc.) that can execute tasks.
+- Data locality: Preference for running a task on a worker that already holds the task’s input data or results.
+- Priority: A numeric value associated with a task used to bias scheduling when multiple tasks are ready.
+- Extensions: Plugins that influence scheduling behavior (e.g., WorkStealing, Spans, Active Memory Manager, etc.).
+
+Overview of the policy goals
+- Maximize data locality to minimize data transfer and serialization costs.
+- Balance load across workers to avoid hotspots and idle workers.
+- Respect worker resource constraints (CPU, memory, and other resources).
+- Allow priority to bias scheduling toward important or interactive tasks.
+- Provide extensibility points so users can tailor behavior (e.g., via WorkStealing, memory management extensions, or custom schedulers).
+
+1) Task selection policy (which ready task to run next)
+
+Core ideas
+- Dependency-driven readiness: Only tasks whose dependencies are satisfied enter the ready set.
+- Priority bias: Tasks carry a priority value; higher-priority tasks are favored when multiple ready tasks compete for execution.
+- Data locality bias: Among ready tasks, the scheduler prefers tasks that will require less data transfer from the worker that is about to execute them (e.g., tasks whose inputs reside in memory on that worker or nearby memory pools).
+- Resource-aware tie-breaking: If multiple ready tasks have similar priority and locality, the scheduler considers the resource needs of the task and the current resource state of candidate workers.
+
+What this looks like in practice
+- A low-level view: Each ready task has attributes such as priority and input data locations. The scheduler ranks ready tasks by a combination of priority, potential locality, and resource fit, then assigns the highest-ranked task to a suitable worker.
+- Locality-first when possible: If a worker already has the input data in memory, a ready task depending on that data is preferred for that worker, reducing data shuffles.
+- Fairness and load balancing: When no strong locality advantage exists, the scheduler aims to distribute tasks across workers, often via work-stealing or other balancing strategies.
+
+2) Worker selection policy (which worker should run a given task)
+
+Core ideas
+- Data locality: Prefer the worker that already contains the task’s input data or the data needed to compute it, to reduce data transfer.
+- Memory and resource awareness: Avoid overloading a worker with limited memory or insufficient CPU resources; consider the task’s memory footprint and CPU requirements.
+- Data transfer costs: If no locality advantages exist, the scheduler may place the task on a worker with lower expected transfer costs (e.g., due to interconnect topology or recent data movement).
+- Load balancing: Use mechanisms to prevent persistent imbalances (e.g., work-stealing) so idle workers can help busy workers when appropriate.
+
+What this looks like in practice
+- When a worker requests tasks, the scheduler selects candidates that maximize locality and resource fit.
+- If a worker has little free memory or cannot accommodate a task, it is deprioritized for that task in favor of other workers with more headroom.
+- Work-stealing and similar extensions can help redistribute tasks from busy workers to idle ones to improve overall utilization.
+
+3) Priority, locality, and stimulus in practice
+
+Priority
+- Tasks carry a priority value that biases scheduling when multiple tasks are ready.
+- The scheduler uses this priority in conjunction with locality and resource considerations to choose tasks.
+- Higher-priority work (e.g., user-facing or interactive tasks) is aimed to be scheduled earlier, subject to locality and resource constraints.
+
+Data locality awareness
+- The scheduler tracks where data and results reside (which worker currently holds which keys in memory, etc.).
+- When possible, the scheduler assigns a task to a worker that already has the needed data to minimize transfers and serialization overhead.
+
+Stimulus and external triggers
+- The scheduler can adjust its behavior in response to external events (new data arrival, completion of a heavy task, or memory pressure) via stimulus signals. Extensions and hooks may influence what you see as a “stimulus” that alters task/worker preferences.
+
+4) Extensions that influence scheduling behavior
+
+Key extensions you may encounter
+- WorkStealing: Idle workers steal tasks from busy workers to balance load.
+- Spans: Scheduling-aware placement/stealing policies that consider logical groupings or spans of resources.
+- ActiveMemoryManager (amm): Communicates memory pressure and can cause the scheduler to retire or relocate tasks to stay within memory budgets.
+- ReplayTaskScheduler: Determines scheduling behavior for replay scenarios (useful in debugging or task replay).
+- ShuffleSchedulerPlugin, other extensions: Can influence how tasks are shuffled or redistributed.
+
+How these extensions affect behavior
+- They may modify priority computation, data locality preferences, or when and how tasks are stolen from other workers.
+- They provide knobs to tune scheduling for specific workloads or hardware topologies.
+
+5) Practical guidance and debugging
+
+Observability
+- Scheduler logs and metrics can reveal how tasks are being prioritized and how workers are being selected.
+- You can enable debugging instruments (e.g., pdb hooks on errors) via configuration to diagnose scheduling behavior.
+
+Common tuning knobs (conceptual)
+- Adjust task priorities to reflect workload importance (e.g., interactive vs. batch work).
+- Enable/adjust WorkStealing or Spans-related extensions to improve load balance on your cluster.
+- Leverage ActiveMemoryManager to handle memory pressure gracefully.
+
+6) Examples
+
+Example 1: Favor data-local tasks
+- Scenario: A dataset is distributed across workers W1 and W2. A task depends on data already in memory on W1.
+- Behavior: The scheduler assigns the task to W1 to minimize data transfer, if possible, before considering other workers.
+
+Example 2: Priority bias
+- Scenario: Two ready tasks, A (low depth, high priority) and B (deeper DAG, lower priority). Both are data-local to the same worker.
+- Behavior: The scheduler selects A first due to higher priority, then B, assuming resources allow.
+
+Example 3: Work stealing for balance
+- Scenario: W1 is busy with several tasks; W2 is idle.
+- Behavior: A ready task on W1 may be stolen by W2 if there is no locality advantage and W2 has capacity, improving overall utilization.
+
+Example 4: Memory-aware scheduling
+- Scenario: A worker approaches its memory limit while tasks with large memory footprints are ready.
+- Behavior: The scheduler deprioritizes or delays scheduling memory-heavy tasks on that worker (or retires tasks via the memory manager) to avoid OOM or thrashing.
+
+7) Where to look in the codebase (conceptual pointers)
+
+- TaskState and readiness: Core concepts that determine when a task enters the ready queue.
+- Priority handling: The scheduler uses a numeric priority associated with tasks to bias scheduling decisions.
+- Data locality sources: Mechanisms that track where keys live in memory to guide worker selection.
+- Extensions: Classes like WorkStealing, SpansSchedulerExtension, ActiveMemoryManagerExtension alter scheduling behavior.
+- Replay and shuffle: Plugins that affect how tasks are moved around the cluster or re-ordered.
+- Stimulus: Signals that indicate external events causing rescheduling or policy adjustments.
+
+Appendix: recommended practices for developers
+- When building or debugging scheduling behavior, enable instrumentation around:
+  - Task readiness transitions
+  - Priority-based selection events
+  - Data locality checks (which worker has which keys)
+  - Worker selection decisions (which worker was chosen and why)
+- If you’re tuning a cluster for a specific workload, consider enabling:
+  - WorkStealing for dynamic load balancing
+  - ActiveMemoryManager to handle memory pressure
+  - Spans or other resource-aware extensions to reflect topology and data locality preferences
+
+Notes
+- The scheduling policy is a policy mix: priority, locality, and resource awareness interact, and extensions can tilt the balance for particular workloads or environments.
+- The exact ordering semantics (e.g., whether higher numeric priority means higher or lower scheduling precedence) can be influenced by extensions and configuration; in practice, priority acts as a bias rather than a hard rule.
+
+This documentation is intended for developers integrating with or extending Dask’s distributed scheduler. It provides the high-level design and the common patterns you’ll encounter when working with the scheduling code and its extensions.

@@ -1,0 +1,205 @@
+# w_fork: Fork a WestPA run into a new simulation
+
+This document explains the w_fork command implemented in the w_fork.rst file. It describes the command’s purpose, behavior, data model, command-line interface, and example usage. The command is intended for developers and advanced users who want to create a new WestPA simulation by forking from an existing one at a specified iteration.
+
+Note: This documentation reflects the implementation in the provided code sample. It assumes familiarity with WestPA concepts such as iterations, segments, initial states, target states, and basis states.
+
+---
+
+## 1. Overview
+
+The w_fork command creates a new WestPA HDF5 backing file (the fork) from an existing simulation. It:
+
+- Reads an existing HDF5 file (_input_h5file_).
+- Determines the fork point iteration (n_iter) from the provided argument or from the last complete iteration of the old simulation.
+- Creates a new HDF5 file (the_output_h5file_) containing:
+  - Target states copied from the old iteration.
+  - Basis (IB) states copied for the new iteration.
+  - One initial state and one corresponding new segment for each old segment, seeded with the final propagator coordinate (pcoord) of the old segment.
+  - A mapping file (istate-map) that records how old segments map to new initial states.
+- Writes a mapping file by default named istate_map.txt (customizable via --istate-map); optional header removal via --no-headers.
+- Sets up the new simulation for a single iteration (iteration 1) with the newly created segments prepared.
+
+This operation is intended to be a preparatory step for executable propagation or for further manipulation (e.g., via w_binning) to shape the new simulation.
+
+---
+
+## 2. Key concepts
+
+- Iteration: A snapshot of the simulation at a particular time point. The old simulation’s data at iteration n_iter is forked into a new simulation starting at iteration 1.
+- Segment: A trajectory fragment within an iteration. Each old segment is transformed into a new initial state and a single new segment in the fork.
+- Initial State (ISTATE): The starting point for a new segment. The fork creates one initial state per old segment.
+- pcoord (progress coordinate array): The coordinates describing the progress of a segment. The fork uses the final pcoord of each old segment as the pcoord of the corresponding new initial state.
+- Target States / Basis States: Global structures copied from the old iteration to the new one to preserve the configuration of the fork.
+- istate-map: A text file mapping each old segment to the new initial state (to aid traceability and potential back-mapping).
+
+---
+
+## 3. Command-line interface (arguments)
+
+The w_fork command is exposed as a console script (entry point: w_fork). The following arguments are supported:
+
+- -i, --input
+  - Input HDF5 file for the old simulation.
+  - Default behavior reads from the configuration if not provided.
+- -I, --iteration
+  - The iteration of the old simulation to fork from (N_ITER).
+  - If omitted, the last complete iteration is used.
+- -o, --output
+  - Output HDF5 file for the new fork (default: forked.h5).
+- --istate-map
+  - Path to the istate-map text file (default: istate_map.txt).
+- --no-headers
+  - Do not write header lines to the istate-map file.
+- Additional global WestPA options are added via westpa.rc.add_args(parser) (e.g., config, logging, etc.).
+
+Notes:
+- The script opens the old HDF5 in read mode, creates and opens a new HDF5 for writing, and then performs the fork operations.
+- After completion, the new HDF5 is prepared for iteration 1 with its segments and initial states in place.
+
+---
+
+## 4. What the command does (high-level flow)
+
+1. Parse CLI arguments and configure WestPA runtime.
+2. Open the old HDF5 backing file (input_h5file or configured defaults).
+3. Determine the target fork iteration (n_iter):
+   - If provided with -I, use that value.
+   - Otherwise, use the last complete iteration minus one.
+4. Create and open a new HDF5 backing file (output_h5file) and prepare its structure.
+5. Copy target states from the old iteration to the new one.
+6. Copy basis states from the old iteration and create the IB-state group in the new iteration.
+7. Transform each old segment into:
+   - One initial state with the final pcoord from the old segment.
+   - One new segment for the new iteration, seeded by the new initial state (with the corresponding parent/WTG parent IDs and weight copied from the old segment).
+8. Build a state map that records:
+   - old_n_iter
+   - old_seg_id
+   - new_istate_id
+9. Update the new simulation’s initial states and prepare the new iteration (n_iter=1) with the new segments.
+10. Set the new simulation’s current_iteration to 1 and close both files.
+11. Write the istate-map file (if headers are enabled) describing the mapping of old segments to new initial states.
+
+Behavior notes:
+- The fork produces exactly one initial state and one corresponding new segment per old segment.
+- The initial state pcoord is set to the final pcoord of the old segment.
+- The new segment weight equals the old segment’s weight.
+- This setup is designed to be compatible with downstream tools (e.g., w_binning) for further customization.
+
+---
+
+## 5. Data structures and internal logic
+
+- Data model accessors:
+  - get_target_states(n_iter)
+  - save_target_states(target_states, n_iter)
+  - get_basis_states(n_iter)
+  - create_ibstate_group(basis_states, n_iter=1)
+  - get_iter_group(n_iter)
+- Iteration and segment construction:
+  - old_iter_group['seg_index'][...]: index rows for old segments, used to copy weights.
+  - old_iter_group['pcoord']: pcoord data for old iteration segments; shape is (n_segments, pcoord_len, pcoord_ndim).
+  - old_final_pcoords: last pcoord per old segment, used as the new initial state pcoord.
+  - istates = dm_new.create_initial_states(n_segments, n_iter=1)
+  - Segment(...) is constructed with:
+    - n_iter=1
+    - seg_id = iseg
+    - weight = index_row['weight']
+    - parent_id = -(istate.state_id + 1)
+    - wtg_parent_ids = [-(istate.state_id + 1)]
+    - status = Segment.SEG_STATUS_PREPARED
+  - segment.pcoord is initialized to zeros and then populated with the final pcoord from the old segment.
+- State map:
+  - state_map_dtype = [('old_n_iter', n_iter_dtype), ('old_seg_id', seg_id_dtype), ('new_istate_id', seg_id_dtype)]
+  - state_map is populated with old_n_iter, old_seg_id, and new_istate_id for each segment.
+- Finalization:
+  - dm_new.update_initial_states(istates, n_iter=0)
+  - dm_new.prepare_iteration(n_iter=1, segments=segments)
+  - dm_new.current_iteration = 1
+  - File handles closed
+- istate_map file:
+  - Optional header:
+    - mapping description and column headers
+  - Columns:
+    - old_n_iter
+    - old_seg_id
+    - new_istate_id
+
+---
+
+## 6. Example usage
+
+1) Fork from an existing simulation file, forking at a specific iteration, and write a mapping file with headers:
+
+- Command:
+  - w_fork -i old_sim.h5 -I 9 -o forked.h5 --istate-map istate_map.txt
+
+- Behavior:
+  - Reads old_sim.h5, forks from iteration 9, writes forked.h5.
+  - Creates istate_map.txt with headers and one line per old segment mapping to the new initial state.
+
+2) Fork without headers in the mapping file:
+
+- Command:
+  - w_fork -i old_sim.h5 -I 9 -o forked.h5 --istate-map istate_map.txt --no-headers
+
+- Behavior:
+  - Same as above but without the header lines in istate_map.txt.
+
+3) Fork using configuration (default behavior for input):
+
+- Command:
+  - w_fork -o forked.h5
+
+- Behavior:
+  - Reads configuration to locate the input HDF5 file.
+  - Uses the last complete iteration as the default fork point.
+  - Produces forked.h5 and istate_map.txt (with headers by default).
+
+Notes:
+- If -i is omitted, the tool relies on westpa.rc configuration for the input file path.
+- If -I is omitted, the fork uses the last complete iteration minus one, per the code logic (n_iter = dm_old.current_iteration - 1).
+
+---
+
+## 7. Output artifacts
+
+- forked.h5 (the new HDF5 backing file for the fork)
+  - Contains target states copied from the old iteration.
+  - Contains basis/IB states copied and prepared for the new iteration.
+  - Contains one new initial state per old segment and one corresponding new segment in iteration 1.
+  - Updated iteration metadata (current_iteration set to 1).
+- istate_map.txt (mapping of old segments to new initial states)
+  - Includes lines describing which old segment (old_n_iter, old_seg_id) maps to which new initial state (new_istate_id).
+  - Optional headers can be included or omitted via --no-headers.
+
+---
+
+## 8. Implementation notes for developers
+
+- The command is implemented as a standalone script with an entry point named `w_fork`.
+- It uses WestPA’s data management API (westpa.rc, DataManager, Iteration/Segment objects) to perform the fork.
+- The code creates new initial states and segments in the forked iteration, linking them via parent IDs to the initial states, enabling immediate continuation or further manipulation (e.g., with w_binning).
+- The mapping file provides traceability for re-creating the relationship between old segments and new initial states, which is useful for debugging, visualization, or back-mapping analyses.
+- The behavior is designed to be a deterministic, one-to-one transformation from old segments to new segments/initial states, with the option to adjust via downstream tooling.
+
+---
+
+## 9. Potential caveats and tips
+
+- The fork assumes the old run has a valid last complete iteration. If the old run is incomplete, specify a valid n_iter with -I.
+- The mapping file uses fixed-width formatting for integers; ensure the consuming tools can parse the file even when the system locale affects number formatting.
+- If you intend to modify the forked simulation extensively, consider using w_binning after fork to refine initial state distributions or to rebalance weights.
+- Ensure that the output path exists or is writable; the script does not create intermediate directories by itself.
+
+---
+
+## 10. Related commands
+
+- w_binning: For refining or rebinding state weights and pcoords after forking.
+- w_propagate (or equivalent): For propagating the forked simulation after preparation (not part of w_fork itself, but a common next step).
+- Other WestPA scripting utilities that interact with ISTATEs, segments, and basis states.
+
+---
+
+If you need additional sections (e.g., API references for the WestPA data manager methods used by w_fork, or a hands-on tutorial with a concrete dataset), I can expand this documentation accordingly.

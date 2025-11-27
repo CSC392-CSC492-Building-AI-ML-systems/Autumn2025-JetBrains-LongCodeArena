@@ -1,0 +1,142 @@
+Augmentations
+===============
+This module provides a standard suite of image augmentations used by AutoAugment policies
+for ImageNet, RandAugment, and TrivialAugmentWide. The augmentations are implemented
+with NVIDIA DALI operators and are wired together through the @augmentation decorator.
+
+Decorator behavior
+------------------
+- The @augmentation decorator handles computation of the transformed parameter.
+- When invoked, the decorated augmentation expects a single positional argument: a batch of samples.
+- The actual transformation parameter is supplied indirectly via:
+  - mag_range: the allowed magnitude range
+  - randomly_negate: whether the magnitude can be negated
+  - mag_to_param: a function that maps a magnitude to the operator parameter
+  The parameter is computed as mag_to_param(magnitudes[magnitude_bin] * ((-1) ** random_sign)),
+  where magnitudes is linspace(mag_range[0], mag_range[1], num_magnitude_bins).
+- Augmentations are defined with example setups passed to @augmentation, and can be customized by creating a new augmentation with a different mag_range, etc.
+- Example: to extend the magnitudes of shear_x from 0.3 to 0.5, use:
+  my_shear_x = shear_x.augmentation(mag_range=(0, 0.5))
+
+Usage and customization
+-----------------------
+- To customize magnitudes, assign a new augmentation with altered mag_range:
+  my_shear_x = shear_x.augmentation(mag_range=(0, 0.5))
+- You can override the name of an augmentation using the name parameter of the decorator.
+
+Examples
+--------
+- Basic usage (decorator computes the magnitude internally):
+  batch_out = shear_x(batch)  # magnitude is chosen from mag_range and mapped automatically
+
+- Customize magnitude range:
+  my_shear_x = shear_x.augmentation(mag_range=(0, 0.5))
+  batch_out = my_shear_x(batch)
+
+- Use translations with relative offsets (shape-aware):
+  batch_out = translate_x(batch, rel_offset=0.2, shape=batch.shape)
+
+- Use translations without needing input shape (direct offset):
+  batch_out = translate_x_no_shape(batch, offset=12)
+
+- Use shape-aware vertical translation:
+  batch_out = translate_y(batch, rel_offset=0.3, shape=batch.shape)
+
+- Use vertical translation without input shape (direct offset):
+  batch_out = translate_y_no_shape(batch, offset=8)
+
+- Rotate with a small angle:
+  batch_out = rotate(batch, angle=10)
+
+API reference
+-------------
+
+warp_x_param(magnitude)
+- Returns a parameter for horizontal warp given magnitude.
+- Returns: [magnitude, 0]
+
+warp_y_param(magnitude)
+- Returns a parameter for vertical warp given magnitude.
+- Returns: [0, magnitude]
+
+shear_x(data, shear, fill_value=128, interp_type=None)
+- Applies a horizontal shear to the input batch.
+- Decorated with mag_range=(0, 0.3), randomly_negate=True, mag_to_param=warp_x_param
+- Internally uses:
+  - fn.transforms.shear(shear=shear)
+  - fn.warp_affine(data, matrix=mt, fill_value=fill_value, interp_type=interp_type, inverse_map=False)
+
+shear_y(data, shear, fill_value=128, interp_type=None)
+- Applies a vertical shear to the input batch.
+- Decorated with mag_range=(0, 0.3), randomly_negate=True, mag_to_param=warp_y_param
+- Internally uses:
+  - fn.transforms.shear(shear=shear)
+  - fn.warp_affine(data, matrix=mt, fill_value=fill_value, interp_type=interp_type, inverse_map=False)
+
+translate_x(data, rel_offset, shape, fill_value=128, interp_type=None)
+- Applies a horizontal translation.
+- Computes offset as rel_offset * shape[1]
+- Decorated with mag_range=(0, 250), randomly_negate=True, mag_to_param=warp_x_param
+- Internally uses:
+  - fn.transforms.translation(offset=offset)
+  - fn.warp_affine(...)
+
+translate_x_no_shape(data, offset, fill_value=128, interp_type=None)
+- Applies a horizontal translation using a direct offset.
+- Decorated with mag_range=(0, 250), randomly_negate=True, mag_to_param=warp_x_param, name="translate_x"
+
+translate_y(data, rel_offset, shape, fill_value=128, interp_type=None)
+- Applies a vertical translation.
+- Computes offset as rel_offset * shape[0]
+- Decorated with mag_range=(0, 1), randomly_negate=True, mag_to_param=warp_y_param
+- Internally uses:
+  - fn.transforms.translation(offset=offset)
+  - fn.warp_affine(...)
+
+translate_y_no_shape(data, offset, fill_value=128, interp_type=None)
+- Applies a vertical translation using a direct offset.
+- Decorated with mag_range=(0, 250), randomly_negate=True, mag_to_param=warp_y_param, name="translate_y"
+
+rotate(data, angle, fill_value=128, interp_type=None, rotate_keep_size=True)
+- Rotates the image around its center.
+- Decorated with mag_range=(0, 30), randomly_negate=True
+- Internally uses:
+  - fn.rotate(data, angle=angle, fill_value=fill_value, interp_type=interp_type, keep_size=rotate_keep_size)
+
+shift_enhance_range(magnitude)
+- Helper used for brightness and contrast.
+- Maps a magnitude in [0, 1] to the range used by enhancement operations.
+- Returns 1 + magnitude
+- Note: Randomly negated magnitude is handled by the decorator; the effective parameter lies in [0.1, 1.9] for brightness/contrast when mag_range is (0, 0.9).
+
+brightness(data, parameter)
+- Brightens or darkens the image.
+- Decorated with mag_range=(0, 0.9), randomly_negate=True, mag_to_param=shift_enhance_range
+- Internally applies:
+  - fn.brightness(data, brightness=parameter)
+
+contrast(data, parameter)
+- Adjusts contrast using a channel-weighted mean as the center.
+- Decorated with mag_range=(0, 0.9), randomly_negate=True, mag_to_param=shift_enhance_range
+- Implementation notes:
+  - Computes mean across spatial dimensions to form a center
+  - Uses RGB weights [0.299, 0.587, 0.114]
+  - Combines center with the input to produce the enhanced contrast
+  - Casts result back to the input dtype
+
+Notes
+-----
+- All augmentations integrate with DALI-based pipelines and AutoAugment policies.
+- The magnitude parameters are abstracted away by the decorator; you typically call the augmented function with your batch, and the decorator selects a magnitude bin and maps it to the operator parameter.
+- For many transforms, you can customize behavior by providing a different mag_range, toggling randomly_negate, or supplying a different mag_to_param function.
+- Some transformations offer a shape-aware variant (translate_x/translate_y) and corresponding no_shape variants that accept direct offsets.
+
+Example: customizing and using augmentations in a policy
+- Create a custom shear_x with a wider magnitude range:
+  my_shear_x = shear_x.augmentation(mag_range=(0, 0.5))
+- Apply to a batch:
+  out = my_shear_x(batch)
+
+- Use a direct horizontal translation (no shape) with an explicit offset:
+  my_translate_x = translate_x_no_shape.augmentation(mag_range=(0, 200))
+  out = my_translate_x(batch)

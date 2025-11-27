@@ -1,0 +1,193 @@
+# w_ipa: WESTPA Interactive Python Analysis
+
+This document describes the w_ipa command and the internal WIPI (WESTPA Interactive Python Analysis) tool that powers it. It is intended for developers working with WESTPA's interactive analysis facilities and the w_ipa implementation provided in the codebase.
+
+---
+
+## Overview
+
+- w_ipa is a stateful, interactive analysis tool built on top of WESTPA’s tooling.
+- It operates on the currently selected analysis scheme and iteration, returning data from the current iteration and allowing trace-based exploration.
+- Access to the analysis state is exposed through a Python-like interface (via the w and west objects), including properties such as iteration, scheme, states, and current data.
+- The tool integrates with the WESTPA data model (HDF5 files, schemes, iterations, walkers, weights, coordinates, etc.) and provides helpers for tracing, caching, and data access.
+
+Key concepts:
+- Current analysis state is accessible as w.current, which contains walkers, summary, states, seg_id, weights, parents, kinavg, pcoord, bins, populations, and any auxdata.
+- A trace (w.trace(seg_id)) can be computed to retrieve a detailed history for a given seg_id. Tracing can be expensive.
+- The tool is designed to work with the first enabled analysis scheme by default, but the active scheme can be changed.
+
+---
+
+## Quick Start
+
+- Launch the interactive analyzer:
+  - Command: w_ipa (or the equivalent WestPA command mapped to the w_ipa tool)
+- Inspect the current iteration and scheme:
+  - Accessed via w.iteration or west.iteration
+  - List and select analysis schemes via w.list_schemes and w.scheme
+- Inspect current data:
+  - Access w.current for per-iteration data
+  - Inspect w.states and w.bin_labels for the current scheme
+- Run a trace:
+  - tr = w.trace(seg_id)  # seg_id from the current iteration
+- Reanalyze or analyze-only workflows:
+  - Use flags such as --analysis-only (-ao) or --reanalyze (-ra) as described in the CLI options
+
+---
+
+## Architecture and Data Model
+
+- WIPI (WIPI): The core class implementing w_ipa, extending WESTParallelTool.
+- Data access:
+  - WESTDataReader: Handles parsing of command-line arguments and access to data files for the current iteration.
+  - HDF5 backend via h5io.WESTPAH5File for reading/updating WESTPA data.
+- State and iteration:
+  - The tool relies on the current WESTPA configuration and analysis scheme to determine what data to expose.
+  - The active analysis scheme is chosen from westpa.rc.config['west']['analysis'] and its enabled status.
+- Interfaces:
+  - The tool defaults to a matplotlib-based interface, but can switch to a text interface for terminal plotting.
+- State management:
+  - The tool is designed as a “stateful” interface, pulling data from the current analysis scheme and iteration.
+
+Key internal components:
+- WIPI.__init__: Sets up the data reader, progress indicator, default iteration, interface, and scheme.
+- WIPI.add_args(parser): Adds all CLI arguments (progress, data reader args, and runtime options) and a hidden -f/extra option. Sets default compression.
+- WIPI.process_args(args): Processes arguments, initializes the current iteration count, selects the active scheme, and configures the interface (text vs. plotting) based on user options.
+- WIPI.hash_args(args, extra=None, path=None): Builds a hash for the provided arguments (with some path normalization) to determine if a file needs updating. Provides optional debug output when --debug is set.
+- WIPI.stamp_hash(h5file_name, new_hash): Opens the given HDF5 file and stamps the new argument hash into the file’s metadata. This aids caching and re-use of computations.
+
+---
+
+## Command-Line Interface and Options
+
+The w_ipa tool defines several runtime options to control analysis behavior and debugging:
+
+- --analysis-only, -ao
+  - Run the analysis and return to the terminal.
+- --reanalyze, -ra
+  - Delete existing analysis files and re-run the analysis.
+- --ignore-hash, -ih
+  - Ignore the argument hash and do not regenerate files.
+- --debug, -d
+  - Emit verbose debugging output suitable for development.
+- --terminal, -t
+  - Plot output in the terminal (text interface). When set, w_ipa uses a text-based interface.
+- -f, --extra
+  - An extra, hidden option used for internal purposes (suppressed in help).
+- The tool also sets a default compression flag to True.
+
+Important notes:
+- The tool uses a progress indicator component to display progress during long operations.
+- If the --terminal flag is used, the interface switches to a text-based plotting/output mode.
+
+---
+
+## Interactive State Access and Usage
+
+- Iteration and schemes:
+  - Access iteration via w.iteration or west.iteration.
+  - Inspect and switch schemes via w.list_schemes and w.scheme.
+  - The active scheme is determined from the WESTPA configuration and is selected if enabled in the analysis settings.
+- Current data:
+  - w.current provides per-iteration details including: walkers, summary, states, seg_id, weights, parents, kinavg, pcoord, bins, populations, and any auxdata available for the current iteration.
+- States and bins:
+  - w.states and w.bin_labels reflect the states and bins defined by the current analysis scheme.
+- Tracing:
+  - w.trace(seg_id) executes a trace over a given seg_id for the current iteration and returns a dictionary with trace history. Keep in mind that traces can be expensive to compute.
+
+---
+
+## API Reference (Key Methods)
+
+- WIPI.add_args(parser)
+  - Adds all command-line arguments for w_ipa, including progress, data reader options, and runtime flags.
+- WIPI.process_args(args)
+  - Processes parsed arguments, initialises iteration data, selects the active scheme, and configures the interface.
+- WIPI.hash_args(args, extra=None, path=None)
+  - Generates an MD5 hash of a normalized representation of the arguments (for caching purposes).
+  - Path normalization removes a given path from argument strings; removes certain redundant flags.
+  - Optional debugging output when debug mode is enabled.
+- WIPI.stamp_hash(h5file_name, new_hash)
+  - Opens the specified HDF5 file in read-write mode and stamps the new argument hash into the file’s metadata.
+  - This is used to tie results/caches to a specific set of arguments.
+
+---
+
+## Data Access and Tracing
+
+- Data access is mediated through WESTDataReader and the WESTPA HDF5 backend (h5io).
+- The current iteration’s data (walkers, weights, coordinates, etc.) is retrieved via the WESTA data structures and made available through w.current.
+- Tracing (w.trace(seg_id)) returns detailed historical information for a single seg_id, useful for diagnosing transition-path behavior and kinetics.
+
+---
+
+## Examples
+
+- Inspect the current iteration and scheme:
+  - w.iteration
+  - w.scheme
+  - w.list_schemes
+- Work with current data:
+  - print(w.current)
+  - print(w.states)
+  - print(w.bin_labels)
+- Run a trace for a seg_id in the current iteration:
+  - trace_info = w.trace(seg_id)
+  - # trace_info is a dictionary with the history for that seg_id
+- Reanalyze workflow:
+  - w_ipa --reanalyze
+  - # or: w_ipa -ra
+- Analysis-only workflow:
+  - w_ipa --analysis-only
+  - # or: w_ipa -ao
+- Toggle terminal plotting:
+  - w_ipa --terminal
+  - # or: w_ipa -t
+
+---
+
+## Development and Extension Notes
+
+- The WIPI class is designed as a foundation for interactive analysis workflows in WESTPA.
+- It relies on WESTPA’s configuration for schemes and analysis settings, and delegates data loading to WESTDataReader and the HDF5 backend.
+- If extending w_ipa:
+  - Implement additional helpers that read from w.current or w.trace outputs to expose more diagnostics.
+  - Extend hashing and caching strategies to better handle complex argument spaces and nested configurations.
+  - Consider additional interfaces (e.g., IPython/Jupyter integration) while preserving the existing command-line UX.
+- Ensure proper handling of large traces by using the documented caveat that traces can be expensive to compute.
+
+---
+
+## Troubleshooting
+
+- If w_ipa fails to select an active scheme:
+  - Verify westpa.rc.config and the analysis section, ensuring at least one analysis_schemes entry is enabled.
+- If data is not updating after changes:
+  - Use --reanalyze to force regeneration of analysis outputs.
+  - Check that the argument hash matches existing cached outputs (or use --ignore-hash to bypass).
+- If plotting is not showing in terminal:
+  - Ensure --terminal is set if you want a text interface; otherwise, the default may be matplotlib-based plotting.
+
+---
+
+## Developer Notes
+
+- The code is structured to separate concerns:
+  - Argument parsing and processing are handled in add_args/process_args.
+  - Data access and iteration metadata are centralized via WESTDataReader and the current iteration context.
+  - Caching and reproducibility are addressed via hash_args and stamp_hash.
+- The design emphasizes interactive exploration while maintaining reproducibility through explicit argument hashing and HDF5 metadata updates.
+
+---
+
+## Glossary
+
+- w: The interactive Python-like namespace exposed to the user for theWESTPA analysis (attributes like w.iteration, w.scheme, w.states, etc.).
+- west: The global WESTPA namespace providing access to iteration and configuration.
+- w_ipa: The WESTPA Interactive Python Analysis command/tool.
+- wtrace: A trace operation available via w.trace(seg_id) to fetch history for a seg_id.
+- HDF5 (WESTPA data): The underlying data store (via h5io.WESTPAH5File) for iterations, segments, walkers, and analysis data.
+
+---
+
+If you need the documentation in a specific format (reStructuredText) or want additional sections (e.g., API reference for more internal methods, configuration file layout, or extended examples), I can adapt the content accordingly.

@@ -1,0 +1,194 @@
+Using metadata
+==============
+
+This document explains how to work with metadata in the codebase. Metadata provides a lightweight mechanism to attach auxiliary information to objects without affecting their core data model. It is designed to be simple, JSON-serializable, and easy to evolve over time.
+
+Overview
+--------
+
+- Metadata is a key-value store associated with an object in your system.
+- Keys are typically strings and values must be JSON-serializable (e.g. numbers, strings, booleans, lists, dicts).
+- Metadata should be namespaced to avoid collisions (e.g. your-app:version, user:preferences).
+- Metadata can be used for tooling, plugins, data provenance, configuration hints, or runtime state that does not belong in the primary domain model.
+
+Data model
+----------
+
+- Metadata container: A dict-like structure attached to an object.
+- Keys: Strings, preferably namespaced (namespace:key).
+- Values: JSON-serializable primitives and nested structures.
+- Scope: Metadata is local to the object unless explicitly persisted to a server or storage layer.
+
+Common patterns
+---------------
+
+- Attach metadata to objects without changing their primary schema.
+- Use a dedicated metadata section to avoid polluting domain fields.
+- Validate metadata against a schema when used by tooling that requires it.
+- Treat metadata as mutable and versioned where possible to support migrations.
+
+Recommended APIs (example pattern)
+----------------------------------
+
+Below are example patterns you can adopt in your codebase. Adapt to your actual object model as needed.
+
+1) Simple metadata container (mixin pattern)
+
+- Purpose: Provide a uniform interface for all objects that carry metadata.
+
+- Interface (conceptual):
+
+  - get_metadata() -> dict
+  - set_metadata(key: str, value) -> None
+  - update_metadata(data: dict) -> None
+  - clear_metadata() -> None
+
+Python sketch:
+
+  class MetadataMixin(object):
+      def __init__(self):
+          self._metadata = {}
+
+      def get_metadata(self):
+          return self._metadata
+
+      def set_metadata(self, key, value):
+          self._metadata[key] = value
+
+      def update_metadata(self, data):
+          if not isinstance(data, dict):
+              raise TypeError("metadata update requires a dict")
+          self._metadata.update(data)
+
+      def clear_metadata(self):
+          self._metadata.clear()
+
+2) Namespaced keys
+
+- Reason: Avoid collisions when multiple components contribute metadata.
+
+Code example:
+
+  obj.update_metadata({
+      'myapp:version': '1.2.3',
+      'user:preferences:notifications': True
+  })
+
+3) Serialization
+
+- Ensure metadata is JSON-serializable for persistence or transport.
+
+Code example:
+
+  import json
+
+  def serialize_metadata(obj):
+      return json.dumps(obj.get_metadata())
+
+  def load_metadata(obj, json_str):
+      obj._metadata = json.loads(json_str)
+
+4) Validation (optional but recommended)
+
+- Validate metadata before consuming it with tooling.
+
+Code example:
+
+  def validate_metadata(metadata, schema):
+      # Very simple validation example; replace with a real schema check as needed
+      for key, hint in schema.items():
+          if hint.get('required') and key not in metadata:
+              raise ValueError("Missing required metadata key: {}".format(key))
+
+      # Additional type checks, allowed keys, etc.
+
+5) Migration and evolution
+
+- Plan for schema changes:
+  - Introduce versioned metadata entries (e.g. myapp:metadata_version = 1).
+  - Provide migration helpers that translate old keys to new ones.
+  - Deprecate old keys gradually and emit warnings.
+
+Examples
+--------
+
+1) Attaching and reading metadata on an object
+
+Code example:
+
+  class Asset(MetadataMixin):
+      def __init__(self, name):
+          super(Asset, self).__init__()
+          self.name = name
+
+  a = Asset("hero_shot")
+  a.set_metadata("creator", "alice")
+  a.update_metadata({"myapp:version": "1.0", "reviewed": False})
+
+  creator = a.get_metadata().get("creator")
+  version = a.get_metadata().get("myapp:version")
+
+2) Namespaced metadata with validation
+
+Code example:
+
+  metadata_schema = {
+      'myapp:version': {'type': str, 'required': True},
+      'user:preferences:notifications': {'type': bool, 'required': False},
+  }
+
+  # Simple validation function (illustrative)
+  def simple_validate(md, schema):
+      for key, rule in schema.items():
+          if rule.get('required') and key not in md:
+              raise ValueError("Missing required metadata key: {}".format(key))
+          if key in md:
+              expected = rule.get('type')
+              if expected and not isinstance(md[key], expected):
+                  raise TypeError("Metadata key {} must be {}".format(key, expected.__name__))
+
+  md = a.get_metadata()
+  simple_validate(md, metadata_schema)
+
+3) Serializing metadata for transport or storage
+
+Code example:
+
+  serialized = json.dumps(a.get_metadata())
+  # Store `serialized` somewhere, or send over the network
+  loaded = json.loads(serialized)
+  a.update_metadata(loaded)
+
+Best practices
+--------------
+
+- Use clear, stable namespaces to prevent key collisions.
+- Keep metadata small and focused on auxiliary information.
+- Prefer JSON-serializable values to maximize interoperability.
+- Document the meaning of metadata keys used by your tooling.
+- Establish a versioning strategy for metadata schemas and migrate keys as needed.
+
+Testing
+--------
+
+- Write unit tests that verify:
+  - Metadata can be set, updated, and cleared.
+  - Namespaced keys are preserved and retrievable.
+  - Serialization/deserialization round-trips preserve data integrity.
+  - Validation logic accepts valid metadata and rejects invalid data.
+
+Security and privacy
+--------------------
+
+- Be cautious about storing sensitive information in metadata.
+- Consider access control around metadata modification and visibility if metadata is persisted or exposed through APIs.
+
+See also
+--------
+
+- JSON serialization guidelines
+- Schema validation patterns
+- Plugin architecture guidelines (for metadata-driven plugins)
+- Data migration and versioning strategies
+
+If you have a specific metadata API in this codebase (for example, a module named metadata or a particular Entity API that supports metadata), you can adapt the above patterns to align with that API by replacing the generic MetadataMixin with the actual base class or interfaces provided by your framework.

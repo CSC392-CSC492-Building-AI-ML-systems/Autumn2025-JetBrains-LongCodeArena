@@ -1,0 +1,108 @@
+storage.rst
+
+Storage Driver and Dynamic SIDV API
+-----------------------------------
+
+Overview
+- This module provides the storage driver integration used by the high-level StorageInterface.
+- It defines a dynamic, directory-like object (StorageInterfaceDirVar) that represents either a storage directory or a storage variable on disk.
+- Data is not kept in memory. Writes and reads flow through the storage driver on demand.
+- Variables and directories are created lazily by attempting to use them as attributes of the StorageInterface (or other SIDV instances).
+
+Key Concepts
+- StorageInterfaceDirVar (SIDV)
+  - A dynamic object that represents a storage location on disk.
+  - Can be a directory (folder-like grouping) or a leaf variable (actual stored data).
+  - Instances are typically created by the StorageInterface when attributes are accessed (e.g., my_store.my_var or my_store.some_dir.my_var).
+  - The SIDV delegates all I/O to the underlying storage driver and storage interface.
+
+- Storage Driver and Interface
+  - Each SIDV holds a reference to:
+    - storage_interface: The top-level interface handling file IO.
+    - storage_driver: The driver implementing concrete IO operations (e.g., NetCDF).
+  - The driver provides:
+    - get_storage_variable(path): fetches an existing storage variable by path.
+    - create_storage_variable(path, type): creates a new storage variable with a given type.
+
+- Binding and Path
+  - Before performing IO, an SIDV binds to a target (variable) via internal methods such as _bind_to_variable_with_write_or_append or _bind_to_variable_with_read.
+  - The path for the variable is derived from the SIDV’s name and its predecessor chain (path attribute).
+
+Public API (StorageInterfaceDirVar)
+- write(data, at_index=None)
+  - Purpose: Write data to a variable (not a directory). Supports optional overwrite at a specific index for appendable variables.
+  - Behavior:
+    - If not bound, binds to a target suitable for write/append.
+    - If the variable doesn’t yet exist on disk, obtains it via get_storage_variable(path) or creates it via create_storage_variable(path, type(data)).
+    - Marks the SIDV as a non-directory and dumps any buffered metadata if needed.
+    - Delegates to self._variable.write(data, at_index=at_index).
+  - Notes:
+    - Raises an error if the SIDV represents a DIRECTORY (as described in the method docstring).
+
+- append(data)
+  - Purpose: Append data to a variable whose size may grow dynamically (first dimension increases with each call).
+  - Behavior:
+    - If not bound, binds to a target via _bind_to_variable_with_write_or_append.
+    - If the variable does not exist, creates it with create_storage_variable(path, type(data)).
+    - Marks the SIDV as a non-directory and dumps any buffered metadata.
+    - Delegates to self._variable.append(data).
+
+- read()
+  - Purpose: Read the variable’s data from disk.
+  - Behavior:
+    - If not bound, binds for reading via _bind_to_variable_with_read.
+    - If the in-memory variable reference is missing, fetches it with get_storage_variable(path); if missing, propagates KeyError.
+    - Returns the data read from the variable (as described by the method’s purpose).
+
+Usage Example
+- Typical usage pattern (as suggested by the code comments and docstrings):
+  - Establish a driver and interface
+    - from .iodrivers import NetCDFIODriver
+    - my_driver = NetCDFIODriver('my_store.nc')
+    - my_store = StorageInterface(my_driver)
+  - Write a static array
+    - import numpy as np
+    - x = np.eye(3)
+    - my_store.my_arr.write(x)
+  - Append to a dynamic list and update an entry
+    - my_store.the_list.append([0, 0, 1])
+    - my_store.the_list.append([0, 0, 1])
+    - my_store.the_list.write([1, 1, 1], at_index=0)
+  - Read a variable
+    - data = my_store.my_arr.read()
+
+Internal Details and Behavior
+- Data Flow
+  - Data flows to disk through the storage_driver once operations are invoked on the SIDV.
+  - If a target is not bound or does not yet exist on disk, the SIDV creates a storage element via the driver.
+  - The SIDV uses a metadata buffer (_metadata_buffer) and a _dump_metadata_buffer step to ensure metadata is written when necessary (e.g., prior to or after write operations).
+
+- State Tracking
+  - _name: Name of the variable within the storage system.
+  - _storage_interface: Link back to the top-level StorageInterface.
+  - _storage_driver: The concrete I/O driver used for disk access.
+  - _predecessor: The parent SIDV (used to compute hierarchical paths).
+  - _variable: The actual storage variable object once bound/loaded.
+  - _directory: Boolean indicating whether this SIDV represents a directory.
+  - _metadata_buffer: Buffer for metadata to be flushed to disk.
+
+- Path Resolution
+  - The path is derived from the SIDV’s name and its predecessor chain, enabling nested directories and variables to map to on-disk locations.
+
+Notes
+- This API emphasizes the “what” and “how” of storage I/O, not the internal implementation details of the underlying driver.
+- The example stores rely on a NetCDF-like driver (NetCDFIODriver) but the design supports other storage backends via the StorageDriver abstraction.
+
+Implementation References (for scanning)
+- StorageInterfaceDirVar
+  - write(self, data, at_index=None)
+  - append(self, data)
+  - read(self)
+
+- Internal mechanisms (names you may encounter or extend)
+  - _bind_to_variable_with_write_or_append
+  - _bind_to_variable_with_read
+  - _dump_metadata_buffer
+  - _variable (storage variable handle)
+  - _directory (flag for directory vs. variable)
+  - path (computed path to the on-disk object)

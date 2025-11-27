@@ -1,0 +1,110 @@
+Working with Large Data Sets
+============================
+
+This guide documents how to perform distributed estimation on large data sets using the provided routines. It covers available distribution modes, estimation strategies, key concepts, and a high-level workflow for scalable modeling.
+
+Overview
+--------
+
+The framework supports estimation on large data by partitioning data and performing local computations, followed by combining results. It provides:
+
+- Sequential (no extra dependencies)
+- Parallel execution via Joblib backends (to support various cluster backends)
+  - dask.distributed
+  - yarn
+  - ipyparallel
+
+Supported estimation methods
+----------------------------
+
+- Debiased regularized estimation
+- Naive coefficient averaging (two variants)
+  - Regularized
+  - Unregularized
+
+Default behavior
+----------------
+
+The default is regularized estimation with debiasing, following the methods described in the literature on communication-efficient sparse regression.
+
+References
+----------
+
+Jason D. Lee, Qiang Liu, Yuekai Sun, and Jonathan E. Taylor. 
+"Communication-Efficient Sparse Regression: A One-Shot Approach." arXiv:1503.04337 (2015).
+
+Key variables and concepts
+--------------------------
+
+- wexog
+  - A weighted design matrix used in the node-wise regression procedure.
+- nodewise_row
+  - Node-wise regression results used to form the approximate inverse covariance.
+- nodewise_weight
+  - Weights derived from gamma_hat values for each predictor to form the final inverse covariance.
+- approx_inv_cov
+  - The estimated inverse covariance matrix, formed via node-wise regression. In the OLS case, it approximates n * (X^T X)^{-1}.
+
+Internal components (high-level)
+--------------------------------
+
+- _est_regularized_naive(mod, pnum, partitions, fit_kwds=None)
+  - Estimates regularized fitted parameters by calling fit_regularized on the local model and returning the parameters.
+- _est_unregularized_naive(mod, pnum, partitions, fit_kwds=None)
+  - Estimates unregularized fitted parameters by calling fit on the local model and returning the parameters.
+- _join_naive(params_l, threshold=0)
+  - Joins results from multiple partitions by averaging parameter vectors and applying a threshold.
+- _calc_grad(mod, params, alpha, L1_wt, score_kwds)
+  - Computes the gradient of the score (for debiasing) given current parameters and penalty settings.
+- _calc_wdesign_mat(mod, params, hess_kwds)
+  - Builds the weighted design matrix needed for the approximate inverse covariance.
+- _est_regularized_debiased(mod, mnum, partitions, fit_kwds=None, score_kwds=None, hess_kwds=None)
+  - Debiased regularized estimation for a partition; the default estimation routine for distributed models.
+
+Workflow: distributed estimation on large data
+----------------------------------------------
+
+1. Partition the data into manageable chunks (partitions).
+2. On each partition, fit a local model using:
+   - Regularized or unregularized naïve fitting (_est_regularized_naive, _est_unregularized_naive).
+3. Combine local estimates:
+   - Use _join_naive to compute a mean (possibly thresholded) coefficient vector across partitions.
+4. If debiasing is desired:
+   - Compute the gradient and weights with _calc_grad and _calc_wdesign_mat.
+   - Apply the debiasing step via _est_regularized_debiased to obtain a debiased estimate.
+5. Interpret the resulting coefficient estimates, incorporating the approximate inverse covariance matrix if needed for inference.
+
+Usage notes
+-----------
+
+- The methods support both regularized and unregularized fitting at the partition level.
+- Debiasing requires additional inputs (score and Hessian keywords) and is designed to reduce bias introduced by regularization in distributed settings.
+- The threshold parameter in _join_naive can sparsify the aggregated coefficients by zeroing small values.
+
+Example structure (conceptual)
+------------------------------
+
+- Partition data into N chunks.
+- For each chunk i:
+  - mod_i = fit a regression model on chunk i
+  - params_i = _est_regularized_naive(mod_i, i, N, fit_kwds)
+- params_mean = _join_naive([params_1, ..., params_N], threshold)
+- If debiasing is enabled:
+  - Compute score and Hessian keywords
+  - params_debiased = _est_regularized_debiased(mod, mnum, N, fit_kwds, score_kwds, hess_kwds)
+
+Dependencies and backends
+-------------------------
+
+- Joblib is used to orchestrate parallel execution.
+- Backends may include:
+  - dask.distributed
+  - yarn
+  - ipyparallel
+
+References for further reading
+------------------------------
+
+- Lee, Liu, Sun, Taylor. “Communication-Efficient Sparse Regression: A One-Shot Approach.” arXiv:1503.04337 (2015)
+
+This document provides a concise reference for working with large data sets using distributed estimation routines, their components, and the recommended workflow for obtaining scalable regression estimates with optional debiasing.

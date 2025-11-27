@@ -1,0 +1,163 @@
+Parallel Random Number Generation
+===============================
+
+Overview
+--------
+
+This document describes the Parallel Random Number Generation (PRNG) capabilities implemented by the npyrandom foundation used by numpy's RNG ecosystem. It documents the architecture, components, and build-time decisions that enable fast, parallel-friendly random number streams through a cohesive C/Cython stack.
+
+Core concept
+------------
+
+- A static C library (npyrandom) provides the core RNG distributions and utilities used by higher-level Python bindings.
+- A set of Cython extensions exposes a NumPy-compatible random API (numpy.random) with multiple bit generators designed for parallel workloads.
+- Engine options include MT19937, Philox, PCG64, and SFC64, with Philox and PCG64 especially well-suited for parallel generation due to their design (counter-based and stream-separable behavior).
+- High-performance bounded integer generation is implemented via a templated/auto-generated path (_bounded_integers) for fast integer sampling within arbitrary ranges.
+
+What’s built (high-level map)
+-----------------------------
+
+- Static library npyrandom
+  - Sources:
+    - src/distributions/logfactorial.c
+    - src/distributions/distributions.c
+    - src/distributions/random_mvhg_count.c
+    - src/distributions/random_mvhg_marginals.c
+    - src/distributions/random_hypergeometric.c
+  - Purpose: core distributions and random value generation utilities used across engines.
+
+- Cython extensions for numpy.random
+  - Generated artifacts:
+    - _bounded_integers.pxd (from _bounded_integers.pxd.in)
+    - _bounded_integers.pyx (from _bounded_integers.pyx.in)
+    - __init__.py, __init__.pxd, and various helper pxd/pyx files copied into the build
+  - Core modules:
+    - _bounded_integers: fast bounded integer generation (links to npyrandom and numpy math support)
+    - _common: common utilities for RNG
+    - _mt19937: MT19937 engine and support
+    - _philox: Philox engine
+    - _pcg64: PCG64 engine
+    - _sfc64: SFC64 engine
+    - bit_generator: high-level bit generation interface
+    - _generator: general-purpose generator wrapper relying on bounded integers
+    - mtrand: legacy Mersenne Twister compatibility (enabled with legacy flag)
+  - Build-time templating:
+    - Templates (_bounded_integers.pxd.in, _bounded_integers.pyx.in) are processed with tempita to produce _bounded_integers.pxd and _bounded_integers.pyx
+    - A custom target generates the _bounded_integers.pxd from its template and ensures installation
+  - Scripting details:
+    - C args include large-file support and NumPy C-API compatibility settings
+    - Special handling on Cygwin for symbol export
+
+- Python package layout
+  - numpy/random/
+    - __init__.py, __init__.pxd, __init__.pyi
+    - _common.pxd, _generator.pyi, _mt19937.pyi, _pcg64.pyi, _philox.pyi, _sfc64.pyi
+    - bit_generator.pxd, bit_generator.pyi
+    - c_distributions.pxd
+    - LICENSE.md, mtrand.pyi
+    - Generated extension modules installed as part of the package:
+      - numpy/random/_bounded_integers.* (via _bounded_integers.pyx)
+      - numpy/random/_common.* 
+      - numpy/random/_mt19937.* 
+      - numpy/random/_philox.* 
+      - numpy/random/_pcg64.* 
+      - numpy/random/_sfc64.* 
+      - numpy/random/bit_generator.* 
+      - numpy/random/_generator.* 
+      - numpy/random/mtrand.* 
+  - Tests, data, and examples are installed under numpy/random/tests and related subdirectories to exercise and demonstrate parallel RNG usage.
+
+Parallel-friendly engines and their roles
+-----------------------------------------
+
+- Philox
+  - Design: counter-based RNG suitable for parallel streams. Different counters yield independent streams suitable for per-thread or per-task RNG instances.
+  - Role: Primary engine in parallel workloads where many independent streams are required without inter-stream correlation.
+
+- PCG64
+  - Design: permutation-based RNG with robust statistical properties; efficient, easy to parallelize with independent instances.
+  - Role: Alternatives for parallel workloads requiring different distribution properties or reproducibility guarantees.
+
+- SFC64
+  - Design: simple fast counter-based generator with good throughput for general purposes.
+  - Role: Lightweight parallel-ready option where speed is prioritized.
+
+- MT19937 (legacy compatibility)
+  - Role: Backward-compatible engine for legacy usage; not the default for parallel workloads but available for compatibility with older code paths.
+
+Bounded integer generation
+--------------------------
+
+- Implemented via a generated path (_bounded_integers) to efficiently sample integers in a specified range with minimal bias.
+- The approach is integrated into the extension modules and linked against the npyrandom core for speed.
+- Generation is used by higher-level distribution utilities and by the bit generator stack to support fast integer-based operations within random number pipelines.
+
+Architecture and integration details
+------------------------------------
+
+- Core library npyrandom
+  - Provides distribution primitives and supporting utilities used by all RNG engines.
+  - Compiled as a static library and installed under numpy/random/lib.
+
+- Python exposure
+  - Each engine is exposed as a dedicated extension module (e.g., _mt19937, _philox, _pcg64, _sfc64).
+  - A common bit generator interface (bit_generator) ties individual engines into the NumPy-like RNG API.
+  - The _generator module provides a higher-level interface for producing random values using the bounded integer path and engine interactions.
+  - mtrand module maintains compatibility for legacy MT handling.
+
+- Build-time workflow (as reflected by the Meson build script)
+  - Assemble core C sources into npyrandom static library
+  - Generate _bounded_integers.pxd and _bounded_integers.pyx from templates
+  - Compile per-engine Python extension modules with appropriate C arguments and linked libraries
+  - Copy and install Python sources, tests, and examples into the numpy/random package
+  - Install the static library alongside the Python package for runtime linking
+
+Developer notes
+---------------
+
+- The build relies on Meson with:
+  - npyrandom static library targets
+  - Custom templating via tempita_cli to generate _bounded_integers.pxd and _bounded_integers.pyx
+  - Per-extension module targets created in a loop over random_pyx_sources
+- The design emphasizes parallel-friendly RNGs (Philox, PCG64, SFC64) while maintaining compatibility with legacy APIs (MT19937/mtrand).
+- Tests and examples are shipped under numpy/random/tests and numpy/random/tests/data to validate correctness and demonstrate usage in parallel scenarios.
+
+Usage highlights and practical guidance
+---------------------------------------
+
+- Parallel generation scenarios benefit from using counter-based engines (Philox, PCG64) to obtain deterministic, independent streams across threads or processes.
+- For new codepaths requiring high throughput and parallel safety, prefer _philox or _pcg64 as the underlying bit generator.
+- The bounded integer path (_bounded_integers) ensures unbiased sampling for small and large ranges, which is important for parallel sampling pipelines.
+
+File and path references (quick map)
+------------------------------------
+
+- Core: src/distributions/*.c
+- Core library: static npyrandom (npyrandom_sources)
+- Templates: _bounded_integers.pxd.in, _bounded_integers.pyx.in
+- Generated artifacts: _bounded_integers.pxd, _bounded_integers.pyx
+- Extensions: numpy/random/{_mt19937, _philox, _pcg64, _sfc64, bit_generator, _generator, mtrand}.*
+- Python surface: numpy/random/{__init__.py, __init__.pxd, __init__.pyi, …}
+- Tests and examples: numpy/random/tests, numpy/random/tests/data, numpy/random/_examples/*
+
+Licensing
+---------
+
+This project is dual-licensed under the University of Illinois/NCSA Open Source License (NC) terms as indicated in the repository.
+
+Examples
+--------
+
+- Building the project (typical steps):
+  - meson setup build
+  - meson compile -C build
+  - meson install -C build
+- Using in Python:
+  - import numpy as np
+  - Use Generator with a preferred bit generator (e.g., Philox or PCG64) to obtain parallel-safe streams.
+  - Access legacy paths via mtrand if compatibility is required.
+
+Notes
+-----
+
+- The documentation above reflects the code structure depicted in the build script and its generated artifacts. Adjustments to the file layout, engine names, or template generation can affect the exact module surface, but the parallel RNG design and goals remain the same.

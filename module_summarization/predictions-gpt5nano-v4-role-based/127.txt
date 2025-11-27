@@ -1,0 +1,139 @@
+Convolution module: Built-in kernels
+=====================================
+
+Overview
+--------
+This section documents the built-in kernel facilities used by the Convolution tools in
+the convolution module. Built-in kernels are encapsulated as Kernel objects
+(Kernel, Kernel1D, Kernel2D) and are used by the Convolution class to perform
+1D/2D convolution with optional boundary handling and normalization. The code
+paths shown here also contain internal helpers that optimize performance and
+handle input preparation.
+
+Key concepts
+------------
+- Kernel, Kernel1D, Kernel2D: Represent the discrete convolution kernel used by the
+  Convolution engine. They wrap a numeric array (and associated metadata) that
+  describes the weights of the kernel in 1D or 2D.
+- Boundary handling: Convolution can treat data outside the input array in several ways.
+  Supported boundary options include None, "fill", "wrap", and "extend".
+- FFT-based acceleration: For performance, large convolutions are performed via fast
+  Fourier transform (FFT). The module computes appropriate padding lengths to maximize
+  FFT efficiency.
+- Input preparation: Before convolution, inputs are prepared (dtype/order, handling of
+  NaNs and masks) to ensure correct interpolation and to avoid unintended side effects.
+
+Boundary handling options
+-------------------------
+The convolution routines expose a boundary handling parameter with the following options:
+
+- None: Default boundary behavior (no special boundary handling is applied by the internal helpers).
+- "fill": Pad outside the input with a fill value (useful for zero-padding or a user-specified value).
+- "wrap": Treat the input as periodic; data wraps around at the boundaries.
+- "extend": Extend the boundary by repeating edge values (edge padding).
+
+FFT sizing and performance
+---------------------------
+To achieve optimal FFT performance when padding is required for convolution, the module uses
+the following mechanism:
+
+- _good_sizes: A precomputed list of "good" sizes that yield efficient FFTs on many
+  platforms. This list includes common powers of two and other sizes chosen for FFT speed.
+- _good_range: The log10 of the largest value in _good_sizes, used to scale padding when exact
+  FFT-friendly lengths aren’t available.
+- _next_fast_lengths(shape): Compute per-axis padding lengths that are optimal for FFTs.
+  - If SciPy is available, it uses scipy.fft.next_fast_len for each axis.
+  - If SciPy is unavailable, it falls back to the _good_sizes table, scaling by powers of 10
+    as needed. If no suitable length can be found, a ValueError is raised.
+
+Input preparation and copying
+----------------------------
+The function _copy_input_if_needed is responsible for preparing inputs for the
+convolution process. Its behavior includes:
+
+- Accepts either a Kernel instance or a raw array; if a Kernel is provided, the underlying
+  array is used (input.array).
+- Strips quantity units if present (e.g., Astropy units) to operate on plain numeric data.
+- Creates a copy when necessary:
+  - If nan_treatment == "fill" or the input is masked, or a separate mask is provided,
+    a copy is made to avoid modifying the original data.
+  - Masked inputs can be filled with a user-specified fill_value to produce a numeric array
+    suitable for interpolation/convolution.
+- Preserves dtype and array order as much as possible to minimize surprises during processing.
+
+Developer notes
+---------------
+- The module integrates with the internal C-accelerated path via _convolveNd_c for fast
+  convolution on multi-dimensional inputs.
+- Kernel size validation and related exceptions:
+  - KernelSizeError and related checks (e.g., has_even_axis, raise_even_kernel_exception) ensure
+    kernels are defined with appropriate sizes and axes for the intended convolution
+    operation. Violations raise appropriate exceptions to guide kernel construction.
+
+How to use built-in kernels (practical examples)
+-----------------------------------------------
+Note: These examples illustrate common usage with the public API (Kernel1D, Kernel2D, and Convolution).
+
+1) 1D kernel example
+- Create a simple 1D kernel (e.g., a symmetric smoothing kernel) and convolve a 1D signal.
+
+Example:
+.. code-block:: python
+
+    import numpy as np
+    from astropy.modeling.convolution import Kernel1D, Convolution
+
+    # Simple 1D kernel: [0.25, 0.5, 0.25]
+    k = Kernel1D([0.25, 0.5, 0.25])
+    conv = Convolution(k)
+
+    data = np.random.random(100)
+    result = conv(data)
+
+2) 2D kernel example
+- Create a 2D kernel (e.g., a separable smoothing kernel) and convolve a 2D image.
+
+Example:
+.. code-block:: python
+
+    import numpy as np
+    from astropy.modeling.convolution import Kernel2D, Convolution
+
+    # Simple 2D kernel
+    k2d = Kernel2D([[1, 2, 1],
+                    [2, 4, 2],
+                    [1, 2, 1]])
+    conv2d = Convolution(k2d)
+
+    image = np.random.random((64, 64))
+    result2d = conv2d(image)
+
+3) Boundary handling
+- Demonstrate how to control boundary behavior during convolution.
+
+Example:
+.. code-block:: python
+
+    conv = Convolution(Kernel2D([[1, 1, 1], [1, 1, 1], [1, 1, 1]]),
+                       boundary="extend")  # or "fill", "wrap", None
+    out = conv(image)
+
+Notes
+-----
+- Built-in kernels are designed to be easy to use with the Convolution class and to
+  work well with the internal FFT-based acceleration paths when requested.
+- For advanced performance tuning, the internal _next_fast_lengths helper is used to
+  select FFT sizes automatically; SciPy’s scipy.fft.next_fast_len, when available, provides
+  the best lengths, otherwise a robust fallback is used.
+
+References to internal helpers (for developers)
+------------------------------------------------
+- _good_sizes: Precomputed efficient sizes for FFT padding (list of integers).
+- _good_range: logarithmic range used to scale padding when SciPy’s next_fast_len is unavailable.
+- _next_fast_lengths(shape): Compute per-axis FFT-friendly lengths for the given shape.
+- _copy_input_if_needed(input, dtype=float, order="C", nan_treatment=None, mask=None, fill_value=None): Prepare input data for convolution, handling kernels, units, masks, and NaN/fill behavior.
+- BOUNDARY_OPTIONS: Allowed boundary handling modes: [None, "fill", "wrap", "extend"].
+
+If you need further customization or want to understand how a specific built-in kernel is defined
+and configured, refer to the Kernel family (Kernel, Kernel1D, Kernel2D) and the public Convolution
+interface that consumes these kernels.

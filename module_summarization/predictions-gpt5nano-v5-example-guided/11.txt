@@ -1,0 +1,157 @@
+Working with Entities
+=====================
+
+Overview
+--------
+This module provides the core building blocks for interacting with an ftrack server and its entities. It defines a session-based API that manages authentication, server communication, caching, and optional event hub integration. Through a Session instance, you can access and manipulate ftrack entities, with optional automatic population of missing data and support for pluggable caches and plugins.
+
+Key Components
+--------------
+- SessionAuthentication
+- Session
+
+SessionAuthentication
+---------------------
+Attaches ftrack session authentication information to HTTP requests. It injects the necessary headers so the server can identify the user and API key for each request.
+
+Code excerpt (from the source):
+.. code-block:: python
+
+    class SessionAuthentication(requests.auth.AuthBase):
+        '''Attach ftrack session authentication information to requests.'''\
+
+        def __init__(self, api_key, api_user):
+            '''Initialise with *api_key* and *api_user*.'''
+            self.api_key = api_key
+            self.api_user = api_user
+            super(SessionAuthentication, self).__init__()
+
+        def __call__(self, request):
+            '''Modify *request* to have appropriate headers.'''\
+            request.headers.update({
+                'ftrack-api-key': self.api_key,
+                'ftrack-user': self.api_user
+            })
+            return request
+
+Usage (Session)
+-------------
+- Session is the main isolated context for interacting with an ftrack server. It handles server URL, credentials, caching, plugin discovery, and optional event hub integration. The constructor supports a rich set of parameters with environment-variable fallbacks:
+
+.. code-block:: python
+
+    class Session(object):
+        def __init__(
+            self, server_url=None, api_key=None, api_user=None, auto_populate=True,
+            plugin_paths=None, cache=None, cache_key_maker=None,
+            auto_connect_event_hub=None, schema_cache_path=None,
+            plugin_arguments=None
+        ):
+            '''
+            Initialise session.
+            ...
+            '''
+
+Key features exposed by Session include:
+- Mandatory credentials when not provided via environment variables (server_url, api_key, api_user).
+  - If server_url is not provided, the environment variable FTRACK_SERVER is checked.
+  - If api_key is not provided, FTRACK_API_KEY (or FTRACK_APIKEY for backwards compatibility) is checked.
+  - If api_user is not provided, FTRACK_API_USER is checked or the current system user is used as a fallback.
+- Automatic population of entity attributes (auto_populate) by default. When enabled, accessing entity attributes fetches missing data from the server on-demand.
+- Caching support with a layered cache (top level MemoryCache by default) to improve performance and reduce redundant requests.
+- A configurable cache key maker (default: StringKeyMaker) to generate stable keys for cached objects.
+- Optional automatic connection of an embedded event hub for non-local events (configurable via auto_connect_event_hub).
+- Plugin discovery and command-line argument handling via plugin_paths and plugin_arguments.
+- Recording of operations via recorded_operations (ftrack_api.operation.Operations) with a flag to enable/disable operation recording.
+
+Usage
+-----
+Basic session creation (requires server URL and credentials):
+
+.. code-block:: python
+
+    from ftrack_api import Session
+
+    # Minimal explicit credentials
+    session = Session(
+        server_url='https://my-ftrack-server.example',
+        api_key='your_api_key',
+        api_user='your_username'
+    )
+
+Environment-variable based usage (credentials pulled from environment):
+
+.. code-block:: python
+
+    import os
+    os.environ['FTRACK_SERVER'] = 'https://my-ftrack-server.example'
+    os.environ['FTRACK_API_KEY'] = 'your_api_key'
+    os.environ['FTRACK_API_USER'] = 'your_username'
+    session = Session()
+
+Advanced usage
+--------------
+- Disable automatic population to fetch data only when explicitly requested:
+
+.. code-block:: python
+
+    session = Session(
+        server_url='https://server',
+        api_key='key',
+        api_user='user',
+        auto_populate=False
+    )
+
+- Enable schema caching by providing a cache path:
+
+.. code-block:: python
+
+    session = Session(
+        server_url='https://server',
+        api_key='key',
+        api_user='user',
+        schema_cache_path='/path/to/schema/cache'
+    )
+
+- Provide a custom cache or a function to configure caches (the callable may return None to continue safely):
+
+.. code-block:: python
+
+    def configure_cache(session):
+        # Return a cache instance or None
+        return MyCache()
+
+    session = Session(
+        server_url='https://server',
+        api_key='key',
+        api_user='user',
+        cache=configure_cache,
+    )
+
+Details
+-------
+- Credentials and server URL resolution
+  - If server_url is not provided, the environment variable FTRACK_SERVER is used.
+  - If api_key is not provided, FTRACK_API_KEY or FTRACK_APIKEY is checked.
+  - If api_user is not provided, FTRACK_API_USER or the current system user (via getpass) is used as fallback.
+
+- Auto-populate behavior
+  - When auto_populate is True (default), missing entity data can be retrieved automatically from the server when accessed.
+
+- Caching
+  - A layered cache is used with a MemoryCache at the top level by default.
+  - A cache_key_maker (default: StringKeyMaker) generates keys for stored objects.
+
+- Event hub
+  - If auto_connect_event_hub is True, an embedded event hub is connected in a background thread, enabling non-local event publishing and subscribing.
+  - Subscribing to events does not require a connected hub; publishing or receiving non-local events does.
+
+- Plugins and plugin arguments
+  - Plugins can be discovered via plugin_paths, and optional plugin_arguments are passed to discovery and registered plugins. If a plugin signature does not accept the provided arguments, the discovery mechanism will adjust to only pass supported arguments and log a warning.
+
+- Operational tracking
+  - Operations performed via the session are recorded in recorded_operations, enabling later inspection or rollback handling as implemented by ftrack_api.operation.
+
+Notes
+-----
+- This module focuses on the mechanics of session management and "working with entities" through a persistent, authenticated connection to an ftrack server. Access to specific entity types and attributes is provided by the broader ftrack_api.entity and related modules, used in conjunction with the Session instance.

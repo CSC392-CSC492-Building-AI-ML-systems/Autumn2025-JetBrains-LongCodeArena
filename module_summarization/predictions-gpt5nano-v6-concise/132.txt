@@ -1,0 +1,163 @@
+# Markov Chain Monte Carlo (MCMC) framework (mcmc.rst)
+
+This document describes the Markov Chain Monte Carlo (MCMC) framework implemented in the module that defines MCMC moves, move composition, and the MCMC sampler. It is intended for developers who want to implement new moves, customize caching and platform usage, or compose complex sampling strategies.
+
+## Overview
+
+The MCMC framework provides equilibrium sampling from a biomolecular thermodynamic state using Markov chain Monte Carlo methods. It supports:
+
+- Langevin dynamics (integration-error free when configured appropriately)
+- Hybrid Monte Carlo (HMC)
+- Generalized Hybrid Monte Carlo (GHMC)
+- Monte Carlo barostat moves
+
+Moves can be combined through:
+
+- SequenceMove: a fixed sequence of moves executed each iteration
+- WeightedMove: a probabilistic selection among moves (unnormalized weights)
+
+By default, moves use the fastest OpenMM platform available via a shared global ContextCache, to minimize OpenMM Context creation. This can be overridden with local caches per move or by using a DummyContextCache to avoid caching altogether.
+
+Reference: Jun S. Liu, *Monte Carlo Strategies in Scientific Computing*, Springer, 2008.
+
+## Key concepts
+
+- ThermodynamicState: describes the thermodynamic conditions (system, temperature, pressure, etc.) for sampling.
+- SamplerState: describes the microscopic state (positions, velocities, box vectors, etc.) to be evolved.
+- MCMCMove: abstract base for any MCMC move. Implementations must define an apply(thermodynamic_state, sampler_state) method that can modify either or both states.
+- Move sets:
+  - SequenceMove(move_list): run all moves in the given order each iteration.
+  - WeightedMove([(move_a, w_a), (move_b, w_b), ...]): randomly select a move according to weights at each iteration.
+- MCMCSampler: coordinates the sampling process. It holds the current thermodynamic state, sampler state, and the move set. It provides a run loop (and convenience methods such as minimize) to advance the simulation.
+- Context caching and platform selection:
+  - Global ContextCache (cache.global_context_cache) determines the default caching strategy and platform.
+  - Per-move context_cache overrides allow fine-grained control.
+  - DummyContextCache disables caching.
+- Randomness:
+  - A maximum seed value (_RANDOM_SEED_MAX) is defined to constrain random seeds used by moves.
+
+## API reference
+
+### MCMCMove (abstract base class)
+- Purpose: define an interface for all MCMC moves.
+- Key method:
+  - `apply(thermodynamic_state, sampler_state) -> None`
+    - Applies the move, potentially modifying the thermodynamic state and/or the sampler state.
+- Usage notes:
+  - Subclasses should implement logic to accept/reject proposals as appropriate for the specific move type.
+  - Moves may maintain internal statistics (e.g., number of attempts, acceptance rate).
+
+Example (conceptual):
+- Implementing a GHMC-like move by integrating with a short trajectory and performing a Metropolis acceptance check.
+- Maintaining counters for accepted/rejected moves.
+
+### MCMCSampler
+- Purpose: orchestrate MCMC sampling given an initial thermodynamic state, a sampler state, and a move set.
+- Constructor (parameters):
+  - `thermodynamic_state`: openmmtools.states.ThermodynamicState
+  - `sampler_state`: openmmtools.states.SamplerState
+  - `move_set`: container of MCMCMove objects
+    - If a list/tuple: moves are executed in the given sequence each iteration
+    - If a dict: keys are moves and values are unnormalized weights
+- Attributes:
+  - `thermodynamic_state`
+  - `sampler_state`
+  - `move_set`
+- Typical usage:
+  - Create a move (e.g., GHMCMove, LangevinDynamicsMove)
+  - Combine into a SequenceMove or WeightedMove
+  - Instantiate MCMCSampler with the thermodynamic/state objects and the chosen move set
+  - Run the simulation via `minimize()` and `run(n_iterations=...)`
+- Methods (typical but not exhaustively listed here):
+  - `minimize()`: preconditions to prepare the sampler (e.g., energy minimization)
+  - `run(n_iterations)`: perform the MCMC sampling for the given number of iterations
+  - Additional utilities may be provided by concrete implementations to query state or statistics
+
+## Typical usage examples
+
+- Basic setup with two moves and a sequence:
+```python
+from simtk import unit
+from openmmtools import testsystems, cache
+from openmmtools.states import ThermodynamicState, SamplerState
+
+# Create initial state for alanine dipeptide in vacuum
+test = testsystems.AlanineDipeptideVacuum()
+thermodynamic_state = ThermodynamicState(system=test.system,
+                                         temperature=298 * unit.kelvin)
+sampler_state = SamplerState(positions=test.positions)
+
+# Define moves
+ghmc_move = GHMCMove(timestep=1.0 * unit.femtosecond, n_steps=50)
+langevin_move = LangevinDynamicsMove(n_steps=10)
+
+# Create an MCMC sampler with a single move
+sampler = MCMCSampler(thermodynamic_state, sampler_state, move=ghmc_move)
+
+# Or combine into a sequence
+sequence_move = SequenceMove([ghmc_move, langevin_move])
+sampler = MCMCSampler(thermodynamic_state, sampler_state, move=sequence_move)
+
+# Or select moves randomly with weights
+weighted_move = WeightedMove([(ghmc_move, 0.5), (langevin_move, 0.5)])
+sampler = MCMCSampler(thermodynamic_state, sampler_state, move=weighted_move)
+```
+
+- Configuring the default platform and cache:
+```python
+reference_platform = openmm.Platform.getPlatformByName('Reference')
+cache.global_context_cache.platform = reference_platform
+cache.global_context_cache.time_to_live = 10  # number of read/write operations
+```
+
+- Running a short simulation:
+```python
+sampler.minimize()
+sampler.run(n_iterations=2)
+```
+
+- Using local caches (per-move) and a dummy cache (no caching):
+```python
+local_cache1 = cache.ContextCache(capacity=5, time_to_live=50)
+local_cache2 = cache.ContextCache(platform=reference_platform, capacity=1)
+
+sequence_move = SequenceMove([HMCMove(), LangevinDynamicsMove()],
+                             context_cache=local_cache1)
+ghmc_move = GHMCMove(context_cache=local_cache2)
+
+# Without global cache: use a dummy cache
+dummy_cache = cache.DummyContextCache(platform=reference_platform)
+ghmc_move = GHMCMove(context_cache=dummy_cache)
+```
+
+## Extending the framework
+
+- Implementing a new MCMC move:
+  - Subclass MCMCMove and implement `apply(self, thermodynamic_state, sampler_state)`.
+  - The `apply` method can modify the thermodynamic state, the sampler state, or both.
+  - Optionally maintain internal statistics (e.g., number of attempts, acceptance rate).
+  - Ensure the move integrates cleanly with OpenMM (e.g., perform any required context/cache handling here).
+
+- Composing moves:
+  - Use SequenceMove to enforce a fixed order of moves each iteration.
+  - Use WeightedMove to introduce stochasticity in move selection with specified weights.
+
+- Caching and platforms:
+  - Use global_context_cache for a shared default strategy across moves.
+  - Override per-move with a custom ContextCache to control platform and caching behavior for specific moves.
+  - Use DummyContextCache to disable caching if desired (e.g., for debugging or resource-constrained environments).
+
+## Design notes
+
+- The framework emphasizes modularity: moves encapsulate specific sampling strategies and can be combined without changing the MCMCSampler.
+- OpenMM integration is abstracted via ThermodynamicState and SamplerState, enabling different sampling methods to operate over the same state representations.
+- Performance considerations center on minimizing OpenMM Context creation overhead via ContextCache and reusing platform-specific contexts where possible.
+
+## References
+
+- Jun S. Liu. Monte Carlo Strategies in Scientific Computing. Springer, 2008.
+
+## Remarks
+
+- This documentation reflects the structure and usage as implemented in the provided module. For concrete move implementations (e.g., GHMCMove, LangevinDynamicsMove, HMCMove) and their particular parameters, refer to the corresponding classes in the codebase.
+- Ensure you have the appropriate OpenMM and openmmtools versions compatible with the API used here when integrating with your project.

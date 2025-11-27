@@ -1,0 +1,121 @@
+schedulers.rst
+
+Stateless learning rate schedulers
+================================
+
+Overview
+--------
+This module provides stateless learning rate schedulers that interface directly with Composer's Time abstraction. The primary goal is to allow schedulers to be expressed in explicit, arbitrary time units and to compose cleanly with the trainer state. Scheduling decisions are made by returning a multiplier α to apply to the optimizer’s base learning rate η, such that the effective learning rate at time t is η(t) = η0 × α(t).
+
+Key concepts
+------------
+- Stateless schedulers: Functions or lightweight callable objects that map the current trainer State (and an optional scale schedule ratio, SSR) to a learning-rate multiplier α ∈ (0, ∞). They do not mutate internal scheduler state.
+- Time abstraction: Schedulers consume and convert “time” through Composer’s Time and TimeUnit abstractions (e.g., epochs, batches, or custom time units).
+- Scale Schedule Ratio (SSR): A factor that scales the scheduling “timeline.” If α(t) is the multiplier at time t with SSR=1.0, then ασ(t) = α(t / σ). SSR allows expressing schedules that adapt to different pacing.
+- Multiplicative stacking: When multiple schedulers are active, their effects multiply (α_total = α1 × α2 × ...).
+
+Public API
+----------
+The module exports a set of stateless scheduler implementations and utilities:
+
+- ComposerScheduler (Protocol)
+  - A protocol that defines the interface for stateless schedulers.
+  - Signature: __call__(state: State, ssr: float = 1.0) -> float
+  - Returns a learning-rate multiplier α to apply to the base LR.
+  - Notes:
+    - Schedulers output a multiplier α, not a direct learning rate.
+    - Multiple schedulers stack multiplicatively.
+    - The SSR parameter scales the time reference as described above.
+
+- _convert_time(time, state, ssr=1.0)
+  - Internal helper used to convert a given time specification into a concrete Time[int] object suitable for SSR calculations.
+  - Accepts time as a string or a Time object.
+  - Converts DURATION and EPOCH units into an appropriate unit (DURATION to BATCH when necessary, or to the same unit as the max_duration, depending on context).
+  - Ensures state.max_duration is set; may require state.dataloader_len for certain conversions.
+  - Applies the SSR scaling to the time value.
+
+- compile_composer_scheduler(scheduler: ComposerScheduler, state: State, ssr: float = 1.0) -> PyTorchScheduler
+  - Converts a stateless ComposerScheduler into a PyTorch-compatible scheduler object (a PyTorch scheduler that follows the standard LR scheduler interface).
+  - The resulting scheduler maintains a bound reference to the current State, but internally updated state within the scheduler is typically ignored by the user.
+  - Intended use: integrate with PyTorch optimizers while preserving the stateless, explicit-time semantics.
+
+- Public scheduler implementations (as listed in __all__):
+  - StepScheduler
+  - MultiStepScheduler
+  - ConstantScheduler
+  - LinearScheduler
+  - ExponentialScheduler
+  - CosineAnnealingScheduler
+  - CosineAnnealingWarmRestartsScheduler
+  - PolynomialScheduler
+  - MultiStepWithWarmupScheduler
+  - ConstantWithWarmupScheduler
+  - LinearWithWarmupScheduler
+  - CosineAnnealingWithWarmupScheduler
+  - PolynomialWithWarmupScheduler
+
+Notes:
+- The actual implementations for the above schedulers live within this module or adjacent modules and are designed to be used via compile_composer_scheduler when integrating with a PyTorch optimizer.
+- The design emphasizes explicit, configurable time units and seamless composition with other schedulers.
+
+Usage patterns
+--------------
+1) Implementing a simple functional scheduler
+
+```python
+from composer.core import State
+
+def ten_epoch_decay_scheduler(state: State, ssr: float = 1.0) -> float:
+    # Example: keep LR multiplier 1.0 for the first 10 epochs, then drop to 0.5
+    if state.timestamp.epoch < 10:
+        return 1.0
+    return 0.5
+```
+
+- This scheduler is a valid ComposerScheduler (either as a function or a callable class).
+
+2) Using a callable class
+
+```python
+class TenEpochDecayScheduler:
+    def __call__(self, state: State, ssr: float = 1.0) -> float:
+        return 1.0 if state.timestamp.epoch < 10 else 0.5
+
+ten_epoch_decay = TenEpochDecayScheduler()
+```
+
+3) Converting to a PyTorch-compatible scheduler
+
+```python
+# Assuming `state` is the current Composer State (e.g., from a Trainer)
+from composer.schedulers import compile_composer_scheduler
+
+lr_scheduler = compile_composer_scheduler(ten_epoch_decay, state)
+# Attach to a PyTorch optimizer as you would with a standard LR scheduler
+```
+
+4) Using SSR and time units
+
+- Schedulers can specify time in terms of epochs, batches, or durations (as strings or Time objects).
+- SSR scales the effective time reference. For example, a schedule intended over t units with SSR s will act as if it were evaluated at t/s.
+- Time conversion utilities handle conversions between EPOCH, BATCH, and DURATION units, including conversions that require knowledge of dataloader length.
+
+Implementation notes
+--------------------
+- Time handling relies on Time and TimeUnit from composer.core.time, enabling flexible, explicit time units.
+- _convert_time enforces max_duration presence and uses state.dataloader_len when converting epoch-based or duration-based references to a common unit compatible with SSR.
+- The compile_composer_scheduler function wraps a stateless scheduler into a PyTorch-compatible scheduler, exposing a familiar .step() interface while preserving the explicit time-based semantics.
+
+See also
+--------
+- composer.core.State: Represents the trainer state used by schedulers.
+- composer.core.Time and TimeUnit: Time abstraction and units used by schedulers.
+- torch.optim.lr_scheduler.LambdaLR: Used as a reference for the PyTorch-compatible scheduler interface when wrapping stateless schedulers.
+
+Design rationale
+---------------
+- Stateless design enables schedulers to be expressed independently of the trainer’s internal state evolution, making them easier to test, reuse, and configure.
+- Time-based interfaces allow expressing schedules in any domain-specific unit (e.g., epochs, batches, custom intervals) without coupling to PyTorch’s internal step counts.
+- SSR provides a principled way to scale schedules when training pacing changes (e.g., different dataset sizes, distributed setups).
+
+This module is the primary place to understand and implement stateless learning rate schedules in Composer, including how to express schedules in explicit time units, convert them for PyTorch compatibility, and compose multiple schedulers multiplicatively.

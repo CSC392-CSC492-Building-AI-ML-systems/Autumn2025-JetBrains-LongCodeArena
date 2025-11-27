@@ -1,0 +1,143 @@
+# Support Vector Machines (SVM)
+
+## Overview
+This module provides a linear Support Vector Machine (SVM) classifier implemented via liblinear, optimized for large-scale datasets with many samples. It operates with a linear kernel (kernel='linear') and supports both dense and sparse input. Multiclass classification is handled in a one-vs-rest (OVR) fashion by default, with an alternative crammer–Singer strategy available. The implementation emphasizes flexibility in penalty and loss functions, enabling a range of regularization and optimization choices.
+
+Key differences from kernel-based SVC:
+- Uses liblinear for efficiency with linear kernels and large datasets.
+- Greater flexibility in penalties (l1, l2) and losses (hinge, squared_hinge).
+- Options to select dual or primal optimization problems, including an automated choice.
+
+Referenced APIs and helper functions in the code base include interactions with C libraries for BLAS and liblinear, such as set_parameter, set_problem, and train, as well as internal helpers for solver selection.
+
+## Key Components
+- LinearSVC class
+  - Primary linear SVM classifier implemented with liblinear.
+  - Supports:
+    - penalty: {'l1', 'l2'} with default 'l2'
+    - loss: {'hinge', 'squared_hinge'} with default 'squared_hinge'
+    - dual: "auto" or bool with default True
+    - tol: stopping tolerance (default 1e-4)
+    - C: regularization strength (default 1.0)
+    - multi_class: {'ovr', 'crammer_singer'} (default 'ovr')
+    - fit_intercept: whether to fit an intercept (default True)
+    - intercept_scaling: scaling for the intercept feature (default 1.0)
+  - Multiclass handling:
+    - 'ovr' trains n_classes one-vs-rest classifiers
+    - 'crammer_singer' optimizes a joint objective over all classes (loss/penalty/dual ignored in this mode)
+  - Intercept handling:
+    - If fit_intercept is True, an intercept feature is added and intercept_scaling controls its effective weight.
+
+- _validate_dual_parameter (helper)
+  - Determines whether to solve the dual or primal problem when dual="auto".
+  - Logic (pseudocode):
+    - if dual == "auto":
+      - if X.shape[0] < X.shape[1]:
+        - try _get_liblinear_solver_type(..., True); return True
+        - except ValueError: return False
+      - else:
+        - try _get_liblinear_solver_type(..., False); return False
+        - except ValueError: return True
+    - elif dual == "warn": emit a FutureWarning and return True
+    - else: return dual
+  - This function is a practical mechanism to select an appropriate optimization formulation based on data shape and compatibility of the chosen loss/penalty.
+
+- Liblinear integration (C API references)
+  - The implementation relies on C-level wrappers and helper functions to construct problems, set models, and train, including:
+    - set_parameter, set_problem, csr_set_problem, set_model
+    - get_bias, free_problem, free_parameter, set_verbosity
+  - These interfaces enable bulk optimization with linear kernels and various regularization schemes.
+
+## Usage
+
+- Basic usage (dense or sparse data):
+  - Import and instantiate LinearSVC with desired options.
+  - Fit on feature matrix X and target y.
+  - Predict on new data or obtain decision scores.
+
+Example:
+- Python (usage with default settings):
+  - from sklearn.svm import LinearSVC
+  - clf = LinearSVC()
+  - clf.fit(X, y)
+  - preds = clf.predict(X)
+  - scores = clf.decision_function(X)
+
+- Example with custom parameters:
+  - clf = LinearSVC(C=0.5, penalty='l2', loss='hinge', dual='auto')
+  - clf.fit(X, y)
+
+- Notes:
+  - If you require a kernelized SVM, consider SVC with kernel='rbf' or other kernels (this module focuses on linear SVMs).
+  - For multiclass problems, the default OVR strategy can be adjusted via multi_class.
+
+## Details
+
+Parameters (as implemented in LinearSVC)
+- penalty : {'l1', 'l2'}, default='l2'
+  - Norm used in the penalization. 'l2' is standard; 'l1' yields sparse coef_ vectors.
+- loss : {'hinge', 'squared_hinge'}, default='squared_hinge'
+  - Loss function. 'hinge' is the standard SVM loss; 'squared_hinge' is its square.
+  - Combination of penalty='l1' and loss='hinge' is not supported.
+- dual : "auto" or bool, default=True
+  - Selects dual or primal optimization.
+  - Prefer dual=False when n_samples > n_features.
+  - 'auto' chooses dual or primal automatically based on data shape, loss, penalty, and multi_class.
+  - The default behavior changes with implementation updates; the auto-selection aims to balance efficiency and feasibility.
+- tol : float, default=1e-4
+  - Tolerance for stopping criteria.
+- C : float, default=1.0
+  - Regularization parameter. Strength inversely proportional to C.
+- multi_class : {'ovr', 'crammer_singer'}, default='ovr'
+  - Multiclass strategy when more than two classes are present.
+  - 'ovr': trains n_classes one-vs-rest classifiers.
+  - 'crammer_singer': joint optimization across all classes; ignores loss, penalty, and dual.
+- fit_intercept : bool, default=True
+  - If True, an intercept term is fit by augmenting the feature vector with a constant feature.
+- intercept_scaling : float, default=1.0
+  - When fit_intercept is True, appends a synthetic feature with this value to the input vector and scales its weight.
+
+Implementation notes
+- The _validate_dual_parameter helper determines whether to use the dual or primal formulation when dual="auto", based on:
+  - Data dimensions (X.shape[0] vs X.shape[1])
+  - Compatibility of the chosen loss/penalty with dual or primal.
+  - Potential ValueError from _get_liblinear_solver_type indicating an unsupported configuration.
+- Intercept handling is implemented with intercept_scaling, influencing the regularization on the intercept term.
+
+Code references (from the provided source)
+- Helper for dual selection:
+  - See _validate_dual_parameter(dual, loss, penalty, multi_class, X)
+  - Code excerpt:
+    - def _validate_dual_parameter(dual, loss, penalty, multi_class, X):
+        """Helper function to assign the value of dual parameter."""
+        if dual == "auto":
+            if X.shape[0] < X.shape[1]:
+                try:
+                    _get_liblinear_solver_type(multi_class, penalty, loss, True)
+                    return True
+                except ValueError:  # dual not supported for the combination
+                    return False
+            else:
+                try:
+                    _get_liblinear_solver_type(multi_class, penalty, loss, False)
+                    return False
+                except ValueError:  # primal not supported by the combination
+                    return True
+        # TODO 1.5
+        elif dual == "warn":
+            warnings.warn(
+                (
+                    "The default value of `dual` will change from `True` to `'auto'` in"
+                    " 1.5. Set the value of `dual` explicitly to suppress the warning."
+                ),
+                FutureWarning,
+            )
+            return True
+        else:
+            return dual
+
+- Liblinear and C API integration (illustrative, from the provided extern blocks)
+  - copy_w, set_parameter, set_problem, csr_set_problem, set_model
+  - get_bias, free_problem, free_parameter, set_verbosity
+
+This documentation provides a concise overview of the SVM implementation available in this module, focusing on the linear SVM (LinearSVC) and its configurable options, multiclass behavior, and the internal dual/primal decision process.

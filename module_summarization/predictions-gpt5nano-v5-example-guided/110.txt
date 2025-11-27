@@ -1,0 +1,288 @@
+# BestEffortCallback
+
+## Overview
+
+BestEffortCallback is a Qt-aware, best-effort live-callback designed for monitoring and visualizing data during an experimental run. It integrates with Bluesky-like plans to produce:
+
+- A LiveTable of timed readings
+- Live plots (LivePlot, LiveGrid, LiveScatter)
+- Optional peak statistics collection
+- Optional grouping and handling of multiple data streams (e.g., primary and baseline)
+
+The callback prints contextual headings at the start of a run, tracks streams, and decides which data to plot or tabulate based on run hints and configuration flags. It is guarded by a class-safe decorator to handle exceptions gracefully.
+
+Key features include:
+- Toggleable heading, table, baseline, and plotting behavior
+- Automatic dimension inference from plan hints or a fallback guess
+- Handling of multiple streams and per-descriptor information
+- Integration with a figure factory for external figure creation
+
+For testing in a simulated environment, see tests/interactive/best_effort_cb.py.
+
+## Key Components
+
+- BestEffortCallback (class)
+  - Decorated with @make_class_safe(logger=logger) for robust error handling
+  - Inherits from QtAwareCallback to integrate with Qt event loops
+  - Core configuration options:
+    - fig_factory: Optional factory for creating figures
+    - table_enabled: Enable/disable the LiveTable output
+    - Other internal state trackers and maps:
+      - _start_doc, _descriptors, _table, _heading_enabled, _baseline_enabled, _plots_enabled
+      - _live_plots, _live_grids, _live_scatters, _peak_stats
+      - _cleanup_motor_heuristic, _stream_names_seen
+      - _buffer (for bottom border handling of the table)
+      - _baseline_toggle
+  - Public playback controls:
+    - overplot: Enable overplotting behavior
+    - noplot_streams: Streams that should not be plotted
+    - omit_single_point_plot: Do not plot when there is a single data point
+  - Public data:
+    - peaks: Peak results (PeakResults from the fitting module)
+- Core methods
+  - enable_heading / disable_heading
+  - enable_table / disable_table
+  - enable_baseline / disable_baseline
+  - enable_plots / disable_plots
+  - __call__(name, doc, *args, **kwargs): Early exit if nothing is enabled
+  - start(doc): Initialize run state, infer dimensions, and print run header
+  - descriptor(doc): Store descriptor, detect new streams, prepare plotting, and apply dimension filtering
+
+Code excerpts (highlights)
+
+- Class and constructor
+```python
+@make_class_safe(logger=logger)
+class BestEffortCallback(QtAwareCallback):
+    def __init__(self, *, fig_factory=None, table_enabled=True, **kwargs):
+        super().__init__(**kwargs)
+        # internal state
+        self._start_doc = None
+        self._descriptors = {}
+        self._table = None
+        self._heading_enabled = True
+        self._table_enabled = table_enabled
+        self._baseline_enabled = True
+        self._plots_enabled = True
+        # axes supplied from outside
+        self._fig_factory = fig_factory
+        # maps descriptor uid to dict which maps data key to LivePlot instance
+        self._live_plots = {}
+        self._live_grids = {}
+        self._live_scatters = {}
+        self._peak_stats = {}  # same structure as live_plots
+        self._cleanup_motor_heuristic = False
+        self._stream_names_seen = set()
+
+        # public options
+        self.overplot = True
+        self.noplot_streams = ['baseline']
+        self.omit_single_point_plot = True
+
+        # public data
+        self.peaks = PeakResults()
+
+        # hack to handle the bottom border of the table
+        self._buffer = StringIO()
+        self._baseline_toggle = True
+```
+
+- Enabling/disabling headings and outputs
+```python
+def enable_heading(self):
+    "Print timestamp and IDs at the top of a run."
+    self._heading_enabled = True
+
+def disable_heading(self):
+    "Opposite of enable_heading()"
+    self._heading_enabled = False
+
+def enable_table(self):
+    "Print hinted readings from the 'primary' stream in a LiveTable."
+    self._table_enabled = True
+
+def disable_table(self):
+    "Opposite of enable_table()"
+    self._table_enabled = False
+
+def enable_baseline(self):
+    "Print hinted fields from the 'baseline' stream."
+    self._baseline_enabled = True
+
+def disable_baseline(self):
+    "Opposite of enable_baseline()"
+    self._baseline_enabled = False
+
+def enable_plots(self):
+    "Plot hinted fields from all streams not in ``noplot_streams``."
+    self._plots_enabled = True
+
+def disable_plots(self):
+    "Do not plot anything."
+    self._plots_enabled = False
+```
+
+- Run start: dimension hints and header
+```python
+def start(self, doc):
+    self.clear()
+    self._start_doc = doc
+    self.plan_hints = doc.get('hints', {})
+
+    # Prepare a guess about the dimensions (independent variables) in case
+    # we need it.
+    motors = self._start_doc.get('motors')
+    if motors is not None:
+        GUESS = [([motor], 'primary') for motor in motors]
+    else:
+        GUESS = [(['time'], 'primary')]
+
+    # Ues the guess if there is not hint about dimensions.
+    dimensions = self.plan_hints.get('dimensions')
+    if dimensions is None:
+        self._cleanup_motor_heuristic = True
+        dimensions = GUESS
+
+    # We can only cope with all the dimensions belonging to the same
+    # stream unless we resample. We are not doing to handle that yet.
+    if len(set(d[1] for d in dimensions))!= 1:
+        self._cleanup_motor_heuristic = True
+        dimensions = GUESS  # Fall back on our GUESS.
+        warn("We are ignoring the dimensions hinted because we cannot "
+             "combine streams.")
+
+    # for each dimension, choose one field only
+    # the plan can supply a list of fields. It's assumed the first
+    # of the list is always the one plotted against
+    self.dim_fields = [fields[0]
+                       for fields, stream_name in dimensions]
+
+    # make distinction between flattened fields and plotted fields
+    # motivation for this is that when plotting, we find dependent variable
+    # by finding elements that are not independent variables
+    self.all_dim_fields = [field
+                           for fields, stream_name in dimensions
+                           for field in fields]
+
+    _, self.dim_stream = dimensions[0]
+
+    # Print heading.
+    tt = datetime.fromtimestamp(self._start_doc['time']).utctimetuple()
+    if self._heading_enabled:
+        print("\n\nTransient Scan ID: {0}     Time: {1}".format(
+            self._start_doc.get('scan_id', ''),
+            time.strftime("%Y-%m-%d %H:%M:%S", tt)))
+        print("Persistent Unique Scan ID: '{0}'".format(
+            self._start_doc['uid']))
+```
+
+- Descriptor handling and plotting decision (highlights)
+```python
+def descriptor(self, doc):
+    self._descriptors[doc['uid']] = doc
+    stream_name = doc.get('name', 'primary')  # fall back for old docs
+
+    if stream_name not in self._stream_names_seen:
+        self._stream_names_seen.add(stream_name)
+        if self._table_enabled:
+            print("New stream: {!r}".format(stream_name))
+
+    columns = hinted_fields(doc)
+
+    # ## This deals with old documents. ## #
+
+    if stream_name == 'primary' and self._cleanup_motor_heuristic:
+        # We stashed object names in self.dim_fields, which we now need to
+        # look up the actual fields for.
+        self._cleanup_motor_heuristic = False
+        fixed_dim_fields = []
+        for obj_name in self.dim_fields:
+            # Special case: 'time' can be a dim_field, but it's not an
+            # object name. Just add it directly to the list of fields.
+            if obj_name == 'time':
+                fixed_dim_fields.append('time')
+                continue
+            try:
+                fields = doc.get('hints', {}).get(obj_name, {})['fields']
+            except KeyError:
+                fields = doc['object_keys'][obj_name]
+            fixed_dim_fields.extend(fields)
+        self.dim_fields = fixed_dim_fields
+
+    # Ensure that no independent variables ('dimensions') are
+    # duplicated here.
+    columns = [c for c in columns if c not in self.all_dim_fields]
+
+    # ## DECIDE WHICH KIND OF PLOT CAN BE USED ## #
+
+    plot_data = True
+
+    if not self._plots_enabled:
+        plot_data = False
+    if stream_name in self.noplot_streams:
+        plot_data = False
+    if not columns:
+        plot_data = False
+    if ((self._start_doc.get('num_points') == 1) and
+            (stream_name == self.dim_stream) and
+            self.omit_single_point_plot):
+        plot_data = False
+
+    if plot_data:
+        ...
+```
+
+## Usage
+
+- Typical usage pattern
+  - Instantiate the callback and attach it to a RunEngine so it can observe events and documents produced during a run.
+
+```python
+from bluesky.run_engine import RunEngine
+# from yourmodule.callbacks import BestEffortCallback
+
+RE = RunEngine({})
+bec = BestEffortCallback()
+RE.subscribe(bec)
+```
+
+- Adjusting behavior at runtime
+```python
+# Turn off all plots
+bec.disable_plots()
+
+# Turn on tables and baseline readings only
+bec.enable_table()
+bec.enable_baseline()
+```
+
+- Testing and examples
+- For testing in a simulated environment, see:
+  - tests/interactive/best_effort_cb.py
+
+## Details
+
+- Internal state and configuration
+  - The callback maintains internal state to handle multiple streams, descriptors, and per-descriptor plotting objects.
+  - It tracks which streams have been seen to print stream changes (e.g., "New stream: 'primary'").
+  - It uses a combination of plan hints and a fallback dimension guess to determine independent variables (dimensions) for plotting.
+  - A heuristic cleanup (_cleanup_motor_heuristic) is used when dimension hints cannot be consistently applied across streams.
+
+- Output behavior
+  - When heading is enabled, a header is printed at the start of the run including:
+    - Transient Scan ID
+    - Time
+    - Persistent Unique Scan ID
+  - New streams trigger a notification if table output is enabled.
+
+- Extensibility
+  - The constructor accepts a fig_factory for custom figure creation, making the callback adaptable to different visualization backends.
+  - The callback is designed to be used with LivePlot, LiveGrid, and LiveScatter, and to manage per-descriptor plotting objects automatically.
+
+- Related components
+  - LiveTable, LivePlot, LiveGrid, LiveScatter, QtAwareCallback, and make_class_safe are imported from the project’s core plotting and utilities.
+  - PeakStats (and the peaks data field) are prepared for peak analysis from the fitting module.
+
+- Testing guidance
+  - See tests/interactive/best_effort_cb.py for an example of running and testing the callback in a simulated environment.
+

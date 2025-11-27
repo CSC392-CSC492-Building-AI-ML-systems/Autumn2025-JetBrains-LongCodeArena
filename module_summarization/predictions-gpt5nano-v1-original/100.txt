@@ -1,0 +1,158 @@
+Managers
+========
+
+Overview
+--------
+
+This module provides a small set of classes that help manage JSON-RPC requests
+to a provider and assist with constructing, signing, and broadcasting raw
+Ethereum transactions. The main components are:
+
+- RequestManager: sends synchronous or asynchronous requests to a provider,
+  handling response normalization and error reporting.
+- ManagerWrapper: a light wrapper that forwards calls to a wrapped manager.
+- BaseSendRawTransactionMixin: a mixin that adds logic for tracking nonces and
+  known transactions, constructing full transactions, signing them, and
+  broadcasting via the appropriate JSON-RPC methods.
+
+Classes and APIs
+----------------
+
+RequestManager
+--------------
+
+Manages interactions with a provider, supporting both blocking and non-blocking
+request patterns.
+
+- __init__(provider)
+  - Create a RequestManager tied to the given provider.
+
+- setProvider(provider)
+  - Update the underlying provider used for requests.
+
+- request_blocking(self, method, params)
+  - Perform a synchronous request via the provider.
+  - Behavior:
+    - Calls provider.make_request(method, params).
+    - Normalizes the response to a dict (string or object handling).
+    - Raises ValueError if the response contains an "error" key.
+    - Returns the value at response['result'].
+
+- request_async(self, method, params)
+  - Schedule an asynchronous request and return a request_id.
+  - Uses uuid4 to create a request id and gevent.spawn to run request_blocking.
+
+- receive_blocking(self, request_id, timeout=None)
+  - Wait for and retrieve the result of a previously scheduled request.
+  - Removes the entry from pending_requests; supports an optional timeout via gevent.Timeout.
+  - Parses the response as JSON and returns response['result'].
+  - Raises KeyError if the request_id is unknown and ValueError on "error" in response.
+
+- receive_async(self, request_id, *args, **kwargs)
+  - NotImplemented in this implementation (callback pattern not provided).
+
+ManagerWrapper
+--------------
+
+A thin wrapper around a “wrapped_manager” that forwards attributes and
+methods to the underlying manager.
+
+- __init__(wrapped_manager)
+  - Store the wrapped manager instance.
+
+- provider (property)
+  - Delegates to wrapped_manager.provider.
+
+- pending_requests (property)
+  - Delegates to wrapped_manager.pending_requests.
+
+- setProvider(self, provider)
+  - Sets the provider on the wrapped manager.
+
+- request_blocking(self, *args, **kwargs)
+  - Delegate to wrapped_manager.request_blocking.
+
+- request_async(self, *args, **kwargs)
+  - Delegate to wrapped_manager.request_async.
+
+- receive_blocking(self, *args, **kwargs)
+  - Delegate to wrapped_manager.receive_blocking.
+
+- receive_async(self, *args, **kwargs)
+  - Delegate to wrapped_manager.receive_async.
+
+BaseSendRawTransactionMixin
+---------------------------
+
+A mixin that extends a manager to support signing and sending raw transactions.
+It tracks known nonces and transactions per-address and provides utilities to
+construct, sign, and broadcast transactions.
+
+- _known_transactions, _known_nonces
+  - Internal mappings:
+    - _known_transactions[addr] -> set of known transaction hashes for addr
+    - _known_nonces[addr] -> set of known nonces for addr
+
+- __init__(self, *args, **kwargs)
+  - Initialize tracking structures and invoke the parent initializer.
+
+- _get_nonces_and_cleanup(self, addr, chain_nonce)
+  - Retrieve nonces for the given address, cleaning up once a transaction nonce
+    is lower than the chain nonce.
+  - Yields nonces that are greater than or equal to the chain nonce.
+
+- get_chain_nonce(self, addr)
+  - Query the chain nonce for addr using eth_getTransactionCount with 'pending'.
+
+- get_nonce(self, addr)
+  - Compute the nonce to use for a new transaction:
+    - nonce is the maximum of chain_nonce and any tracked nonces.
+    - If there are no relevant nonces and chain_nonce is 0, returns -1.
+
+- get_transaction_signature(self, serialized_txn)
+  - Abstract method to be implemented by subclasses.
+  - Should return a signature for the given serialized transaction.
+
+- sign_and_serialize_transaction(self, transaction)
+  - Serialize the transaction, obtain its signature via get_transaction_signature,
+    apply the signature, and return the RLP-encoded signed transaction.
+
+- construct_full_transaction(self, base_transaction)
+  - Build a complete transaction from a base transaction by filling defaults:
+    - nonce: get_nonce(from) + 1
+    - gasPrice: eth_gasPrice
+    - gas: hex(90000)
+    - value: '0x0'
+    - to: ''
+    - data: ''
+
+- TXN_SENDING_METHODS
+  - A set of methods related to sending transactions:
+    - 'eth_sendTransaction'
+    - 'eth_sendRawTransaction'
+    - 'personal_signAndSendTransaction'
+    - 'personal_sendTransaction'
+
+- request_blocking(self, method, params)
+  - Extend the base request handling to support signing-and-sending logic:
+    - If method is 'eth_sendTransaction':
+      - Build a full transaction from base_transaction.
+      - Sign and serialize the full transaction.
+      - Send via 'eth_sendRawTransaction' with the hex-encoded bytes.
+    - Otherwise, delegate to the parent implementation.
+    - If the method is in TXN_SENDING_METHODS, perform additional post-processing
+      (as defined by the mixin) after the delegation.
+
+Notes
+-----
+
+- The implementation relies on several Web3 utilities (for encoding, decoding, nonce handling, etc.) and uses gevent for asynchronous execution.
+- get_transaction_signature is intentionally left unimplemented; concrete subclasses must provide an appropriate signing routine.
+- The request/response handling assumes JSON-RPC style responses, with error reporting via a raised ValueError when an "error" key is present.
+
+References
+----------
+
+- RequestManager: synchronous and asynchronous request execution patterns.
+- ManagerWrapper: delegation pattern for composing managers.
+- BaseSendRawTransactionMixin: nonce management, transaction construction, signing, and broadcasting.

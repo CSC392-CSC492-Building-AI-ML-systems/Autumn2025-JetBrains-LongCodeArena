@@ -1,0 +1,68 @@
+Controlling chunking
+====================
+
+This module demonstrates how Dask controls and adapts chunking when performing array operations, particularly through blockwise composition and the handling of inputs with differing chunk grids.
+
+Key concepts
+- Chunking basics: Each Dask array has a chunking pattern per axis. Operations can preserve, broadcast, or expand this pattern.
+- Blockwise: A powerful primitive to express elementwise computations with explicit output chunk layout. By selecting the output chunk layout (the oinds) you control how the resulting array is chunked.
+- Input layouts vs. output layout: You can align the output chunk grid with the input grids or with a combination of inputs to achieve broadcasting or expansion along new axes.
+
+How this code controls chunking
+- The _wrap_masked helper uses blockwise and explicitly computes an output chunking pattern (oinds) based on the input and value arrays:
+  - ainds represents the chunking axes of the first input.
+  - vinds represents the chunking axes of the second input (value).
+  - oinds is chosen as the longer of ainds and vinds (using max(..., key=len)).
+  - The blockwise call then uses oinds as the output chunking pattern, and passes a, ainds, value, vinds accordingly.
+  - This demonstrates explicit control of the output chunk layout to accommodate broadcasting and axis expansion.
+
+  Example from the code:
+  .. code-block:: python
+
+      ainds = tuple(range(a.ndim))[::-1]
+      vinds = tuple(range(value.ndim))[::-1]
+      oinds = max(ainds, vinds, key=len)
+      return blockwise(f, oinds, a, ainds, value, vinds, dtype=a.dtype)
+
+  Interpretation:
+  - The output chunk layout oinds is chosen to be as long as the longest input layout, enabling broadcasting along axes present in one input but not the other.
+  - The individual inputs are supplied with their own chunk axes (ainds, vinds) so Dask can broadcast correctly across blocks.
+
+- Another example shows preserving input chunking when the second operand is a scalar:
+  - For masked_equal, the output uses the same axes as the input:
+  - ainds = tuple(range(a.ndim))
+  - value is scalar, so vinds = ()
+  - The output layout remains the same as the input (inds), i.e., chunking is preserved.
+
+  Example:
+  .. code-block:: python
+
+      inds = tuple(range(a.ndim))
+      return blockwise(np.ma.masked_equal, inds, a, inds, value, (), dtype=a.dtype)
+
+  Interpretation:
+  - With a scalar value, there are no extra axes to broadcast along, so the output chunking matches the input.
+
+- For operations implemented via map_blocks, chunking is typically preserved from the input:
+  - masked_invalid, masked_inside, masked_outside, getdata, getmaskarray all use map_blocks to apply a function per block.
+  - Since map_blocks operates on each block independently, the overall chunking pattern remains aligned with the original input’s chunks unless the function changes the shape.
+
+Practical implications
+- To control how an operation chunks its result, prefer:
+  - blockwise with an explicit oinds that reflect the desired output layout (as shown in _wrap_masked).
+  - preserving input chunking by using the same axis order as the inputs (as shown in masked_equal).
+  - map_blocks when you want per-block application without forcing a different global chunk layout.
+- When inputs have mismatched chunk grids or different numbers of axes, explicitly computing oinds (the output chunk layout) helps you define how the result should be chunked and broadcast across blocks.
+
+Notes for implementers
+- The choice of oinds directly affects performance characteristics, such as cross-block communication and task graph size. Align oinds with downstream computations to minimize reshaping or re-chunking.
+- When introducing new operations that combine multiple inputs, consider whether the output should:
+  - Preserve input chunking (simple elementwise operations),
+  - Broadcast along new axes (expand to the longer axis set),
+  - Or require a custom, explicit layout for best performance.
+
+Related references
+- blockwise: used to construct operations with explicit chunk layouts and broadcasting behavior.
+- map_blocks: used for per-block application while generally preserving input chunking.
+
+This documentation focuses on how the code demonstrates controlling chunking in array-chunk operations via blockwise output layout and, in fewer cases, preservation of input chunking through map_blocks.

@@ -1,0 +1,197 @@
+# Ploterr command (ploterr.rst)
+
+Ploterr is a plotting utility integrated with WESTPA that renders error-bar plots from generic interval data stored in HDF5 files. It focuses on plotting the expected values together with their confidence intervals across iteration steps.
+
+- Core idea: given a dataset containing iter_start, iter_stop, expected, ci_lbound, and ci_ubound, generate a line plot of the expected values with shaded or overlaid CI bounds (implemented as separate lines in the current code).
+- Output formats: the plot is saved to a file whose format is inferred from the output filename extension (e.g., .pdf, .png).
+
+This document describes the Ploterr command from the perspective of a developer contributing to or extending the code.
+
+---
+
+## Quick overview
+
+- Base class: `CommonPloterrs`
+  - Shared plotting configuration and CLI options.
+  - Handles axis scaling, ranges, and labels.
+  - Determines the plotting interface (matplotlib vs. text) based on the environment and explicit flags.
+  - Core plotting implementation via Matplotlib when available.
+
+- Subcommand: `GenericIntervalSubcommand`
+  - Implements a generic path-based plotting interface for HDF5 datasets.
+  - Accepts a single argument of the form `FILENAME/PATH[SLICE]` specifying the dataset to plot.
+  - Optional `-o/--output` to specify the output file (default: `errbars.pdf`).
+
+- Plot data expectations
+  - The HDF5 dataset must be 1-dimensional.
+  - Required fields within the selected dataset: `iter_start`, `iter_stop`, `expected`, `ci_lbound`, `ci_ubound`.
+  - Plot x-axis uses `iter_stop - 1` as iteration values (the code derives this and plots against the 1D data).
+
+- Plot appearance
+  - `expected` series plotted in black.
+  - CI lower bound (`ci_lbound`) and CI upper bound (`ci_ubound`) plotted in gray.
+  - Axes scales can be linear, log, or symlog, per `--xscale` / `--yscale`.
+  - Optional axis limits and labels: `--xrange`, `--yrange`, `--xlabel`, `--ylabel`, `--title`.
+
+---
+
+## Design and usage
+
+### Core classes and responsibilities
+
+- `CommonPloterrs(WESTSubcommand)`
+  - Properties:
+    - `xscale`, `yscale` (str): axis scales (`'linear'`, `'log'`, `'symlog'`).
+    - `xrange`, `yrange` (tuple or None): axis limits as `(min, max)`.
+    - `xlabel`, `ylabel`, `title` (str or None): axis labels and plot title.
+    - `plot_options_group`: argparse group for plot-related options.
+  - CLI options (via `add_args`):
+    - `--xscale`, `--yscale` with choices `['linear', 'log', 'symlog']` (default `'linear'`).
+    - `--xrange`, `--yrange` (string of the form `"xmin,xmax"`).
+    - `--xlabel`, `--ylabel`, `--title` (strings).
+    - `--terminal` / `-t`: plot output in terminal (forces text interface).
+  - Behavior:
+    - `process_args` reads ranges, scales, and labels from CLI args.
+    - Auto-selects interface: if `--terminal` is set or no DISPLAY, uses text interface; otherwise uses Matplotlib.
+  - Plotting helper:
+    - `do_plot(data, output_filename, title=None, x_range=None, y_range=None, x_label=None, y_label=None)`.
+    - Uses Matplotlib to render the plot and save to `output_filename`.
+
+- `GenericIntervalSubcommand(CommonPloterrs)`
+  - CLI specifics:
+    - Subcommand name: `generic`
+    - Help: “arbitrary HDF5 file and dataset”
+    - Arguments:
+      - `-o`, `--output`: output file (default: `errbars.pdf`).
+      - `dsspec`: dataset spec in the form `FILENAME/PATH[SLICE]`.
+  - Data loading:
+    - Parses `dsspec` into `(pathname, slicestr)` using a regex.
+    - If a slice is provided, builds a NumPy index expression with `np.index_exp` (via `eval`).
+    - Resolves the HDF5 file path with `h5io.resolve_filepath`.
+    - Stores dataset slice as `self.dset_slice` for later data access.
+  - Data validation:
+    - Intended to load the dataset and verify required fields; the snippet shows a check for 1D dimensionality and a required-field set, but the full validation logic is not displayed.
+
+---
+
+## Data model and requirements
+
+- HDF5 dataset must be 1-dimensional.
+- Required fields present in the dataset (within the selected slice): 
+  - `iter_start`
+  - `iter_stop`
+  - `expected`
+  - `ci_lbound`
+  - `ci_ubound`
+- The code computes the x-axis values as `iters = data['iter_stop'] - 1` and plots:
+  - `iters` vs `data['expected']` (black line)
+  - `iters` vs `data['ci_lbound']` (gray line)
+  - `iters` vs `data['ci_ubound']` (gray line)
+
+- Plot appearance can be customized via:
+  - `--xscale`, `--yscale`
+  - `--xrange`, `--yrange`
+  - `--xlabel`, `--ylabel`, `--title`
+
+---
+
+## Data loading and safety notes
+
+- Dataset path parsing uses the form `FILENAME/PATH[SLICE]`.
+- Slice expressions are built by concatenating `np.index_exp` with the user-provided slice and evaluated with `eval`. This enables flexible slicing but requires trusted input.
+- The HDF5 file is opened in read mode via `h5io.resolve_filepath`.
+- The code enforces that the plotted data is 1D; otherwise a `TypeError` is raised.
+
+---
+
+## Examples
+
+- Basic usage (generate a 1D error-bar plot for a single interval dataset):
+  - Command:
+    - west ploterr generic kinavg.h5/rate_evolution[:,0,1] -o rate_evolution_errbars.pdf
+  - Notes:
+    - Output file is `rate_evolution_errbars.pdf`.
+    - Uses defaults: x-axis is iteration (based on `iter_stop`), y-axis defaults to data values, no explicit ranges or labels unless supplied.
+
+- Customize axes and labels:
+  - Command:
+    - west ploterr generic kinavg.h5/rate_evolution[:,0,1] -o rate_evolution_errbars.png --xrange 0,1000 --yrange 0,1 --xlabel "Iteration" --ylabel "Rate" --title "Rate evolution (0→1, CI 95%)"
+  - Notes:
+    - Saves as PNG, with specified ranges and labels.
+
+- Change plot appearance and force terminal output in headless environments:
+  - Command:
+    - west ploterr generic kinavg.h5/rate_evolution[:,0,1] -o rate_evolution_errbars.pdf --terminal
+  - Notes:
+    - Forces text-based interface, suitable for environments without a display.
+
+- Force log-scale on axes:
+  - Command:
+    - west ploterr generic kinavg.h5/rate_evolution[:,0,1] -o rate_evolution_errbars.pdf --xscale linear --yscale log
+
+- Output to PDF for a different dataset:
+  - Command:
+    - west ploterr generic mydata.h5/my_dataset -o my_errors.pdf
+
+---
+
+## Developer notes and extension points
+
+- Extending with additional subcommands
+  - Implement new subclasses of `CommonPloterrs` and register them with the WEST command framework in a similar fashion to `GenericIntervalSubcommand`.
+  - Implement per-subcommand argument parsing in `add_args`, data loading in `process_args`, and validation in `load_and_validate_data`.
+
+- Plotting backend considerations
+  - The code imports `matplotlib.pyplot` only when a display is available (`DISPLAY` environment variable is set). If you plan to run in headless environments, ensure the interface is set to `text` (via `--terminal` or environment) or guard plotting code accordingly.
+  - The current plotting routine is built around Matplotlib; for non-GUI backends, you would need to provide an alternative or mock interface for the `text` mode.
+
+- Security note
+  - Slice handling uses `eval` on user-provided strings to construct a NumPy index expression. This is convenient but potentially unsafe with untrusted input. Consider safer slice parsing or restricted evaluation if inputs come from untrusted sources.
+
+- API sketch (conceptual)
+  - `CommonPloterrs`
+    - Methods:
+      - `add_args(parser)`: add shared CLI options.
+      - `process_args(args)`: process and normalize arguments.
+      - `parse_range(rangespec) -> tuple[float, float]`: parse a range string.
+      - `do_plot(...)`: render and save the plot.
+  - `GenericIntervalSubcommand(CommonPloterrs)`
+    - `add_args(parser)`: define `-o/--output` and `dsspec`.
+    - `process_args(args)`: parse `dsspec`, resolve HDF5 file, prepare slice.
+    - `load_and_validate_data()`: load dataset and validate schema.
+
+---
+
+## Known limitations and caveats
+
+- The dataset must be 1D; higher-dimensional datasets are rejected with a `TypeError`.
+- The slicing mechanism relies on `eval` for safety and flexibility; ensure inputs are controlled.
+- Matplotlib is required for the default (GUI) interface; headless environments require `--terminal` or environment constraints to switch to text mode.
+
+---
+
+## Reference: API surface (summary)
+
+- ploterr
+  - CommonPloterrs
+    - CLI options:
+      - `--xscale`, `--yscale`
+      - `--xrange`, `--yrange`
+      - `--xlabel`, `--ylabel`, `--title`
+      - `--terminal`, `-t`
+    - Methods:
+      - `process_args(args)`
+      - `parse_range(rangespec) -> (min, max)`
+      - `do_plot(data, output_filename, title=None, x_range=None, y_range=None, x_label=None, y_label=None)`
+  - GenericIntervalSubcommand(CommonPloterrs)
+    - Subcommand: `generic`
+    - Options:
+      - `-o/--output`
+      - `dsspec` (FILENAME/PATH[SLICE])
+    - Data handling:
+      - `process_args(args)` parses `dsspec`, resolves HDF5 file, builds `self.dset_slice`
+      - `load_and_validate_data()` ensures required fields exist and dataset is 1D
+
+---
+
+This documentation provides the essential guidance for developers working with the Ploterr command, its generic interval subcommand, and how to extend or adapt it for additional datasets or plotting backends.

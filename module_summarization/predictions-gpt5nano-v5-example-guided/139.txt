@@ -1,0 +1,124 @@
+# Controlling chunking
+
+## Overview
+Controlling chunking in dask.array involves ensuring that operations over chunked arrays preserve or correctly adapt the chunk structure. This is achieved through a backend-dispatch mechanism for core operations and through wrappers that translate NumPy-like masked-array operations into chunk-aware Dask computations (via blockwise and map_blocks). The following components and patterns demonstrate how chunking is managed and preserved.
+
+## Key Components
+
+- Backend dispatch for core operations
+  - The module defines Dispatch-backed lookups to route fundamental operations to the appropriate backend implementation. This enables chunk-aware behavior across backends (e.g., NumPy, CuPy) without manually duplicating chunking logic.
+  - Examples of dispatch lookups:
+    - concatenate_lookup = Dispatch("concatenate")
+    - tensordot_lookup = Dispatch("tensordot")
+    - einsum_lookup = Dispatch("einsum")
+    - empty_lookup = Dispatch("empty")
+    - divide_lookup = Dispatch("divide")
+    - percentile_lookup = Dispatch("percentile")
+    - numel_lookup = Dispatch("numel")
+    - nannumel_lookup = Dispatch("nannumel")
+    - to_numpy_dispatch = Dispatch("to_numpy_dispatch")
+    - to_cupy_dispatch = Dispatch("to_cupy_dispatch")
+
+  Code excerpt:
+  ```
+  concatenate_lookup = Dispatch("concatenate")
+  tensordot_lookup = Dispatch("tensordot")
+  einsum_lookup = Dispatch("einsum")
+  empty_lookup = Dispatch("empty")
+  divide_lookup = Dispatch("divide")
+  percentile_lookup = Dispatch("percentile")
+  numel_lookup = Dispatch("numel")
+  nannumel_lookup = Dispatch("nannumel")
+  to_numpy_dispatch = Dispatch("to_numpy_dispatch")
+  to_cupy_dispatch = Dispatch("to_cupy_dispatch")
+  ```
+
+- Masked-array wrappers that preserve chunking
+  - A helper (_wrap_masked) converts inputs to arrays and constructs a blockwise operation that preserves and aligns chunking across the involved arrays.
+  - The approach ensures that NumPy masked-array operations operate correctly on chunked data by computing appropriate output axes and applying the function blockwise.
+
+  Key helper:
+  ```
+  from functools import wraps
+  from dask.array import chunk
+  from dask.array.core import asanyarray, blockwise
+  from numpy import ma
+
+  @wraps(f)
+  def _(a, value):
+      a = asanyarray(a)
+      value = asanyarray(value)
+      ainds = tuple(range(a.ndim))[::-1]
+      vinds = tuple(range(value.ndim))[::-1]
+      oinds = max(ainds, vinds, key=len)
+      return blockwise(f, oinds, a, ainds, value, vinds, dtype=a.dtype)
+
+  return _
+  ```
+
+  Wrapped masked operations (examples):
+  ```
+  masked_greater = _wrap_masked(np.ma.masked_greater)
+  masked_greater_equal = _wrap_masked(np.ma.masked_greater_equal)
+  masked_less = _wrap_masked(np.ma.masked_less)
+  masked_less_equal = _wrap_masked(np.ma.masked_less_equal)
+  masked_not_equal = _wrap_masked(np.ma.masked_not_equal)
+  ```
+
+- Additional masked-array utilities that preserve chunking
+  - masked_equal, masked_invalid, masked_inside, masked_outside, masked_where, masked_values, fix_invalid, getdata, getmaskarray
+  - These utilities demonstrate chunk-preserving approaches such as using map_blocks or blockwise to implement masked-array semantics on chunked data.
+  - Example definitions (snippets):
+    ```
+    @derived_from(np.ma)
+    def masked_equal(a, value):
+        a = asanyarray(a)
+        if getattr(value, "shape", ()):
+            raise ValueError("da.ma.masked_equal doesn't support array `value`s")
+        inds = tuple(range(a.ndim))
+        return blockwise(np.ma.masked_equal, inds, a, inds, value, (), dtype=a.dtype)
+
+    @derived_from(np.ma)
+    def masked_invalid(a):
+        return asanyarray(a).map_blocks(np.ma.masked_invalid)
+
+    @derived_from(np.ma)
+    def masked_inside(x, v1, v2):
+        x = asanyarray(x)
+        return x.map_blocks(np.ma.masked_inside, v1, v2)
+    ```
+
+## Usage
+
+- Backend-aware operations
+  - Use the Dispatch-based registries to route core operations to the appropriate backend while preserving chunking semantics across operations. The exact usage is integrated with the Dask array backend dispatch machinery.
+
+- Masked-array operations on chunked data
+  - Use the _wrap_masked helper to create chunk-aware wrappers around NumPy masked-array operations, ensuring correct broadcasting and alignment of chunk axes.
+  - Example (demonstrating the wrapper definitions):
+    ```
+    masked_greater = _wrap_masked(np.ma.masked_greater)
+    masked_greater_equal = _wrap_masked(np.ma.masked_greater_equal)
+    masked_less = _wrap_masked(np.ma.masked_less)
+    masked_less_equal = _wrap_masked(np.ma.masked_less_equal)
+    masked_not_equal = _wrap_masked(np.ma.masked_not_equal)
+    ```
+
+- Practical pattern: wrap numpy-like operations so they operate blockwise on chunks
+  - By choosing oinds as the longest combined axis set (oinds = max(ainds, vinds, key=len)) and applying blockwise, chunk alignment is preserved or correctly broadcasted.
+
+## Details
+
+- Output axis alignment
+  - The oinds calculation in _wrap_masked ensures that the output chunking aligns with the larger of the input chunk grids, preserving proper chunk boundaries during the blockwise operation.
+
+- Blockwise-first approach to chunking
+  - The wrappers rely on blockwise (and map_blocks for some cases) to implement operations, which is central to controlling and preserving chunking semantics across complex operations and broadcasting.
+
+- Validation for masked_equal
+  - For masked_equal, if the value argument has a shape (i.e., is an array), the function raises a ValueError, indicating that array-valued inputs are not supported for that operation in this wrapper context.
+
+- References
+  - See also backends.py for backend-specific implementations and additional context on how Dispatch routing interacts with chunked arrays.
+
+This module demonstrates how Controlling chunking is achieved by combining backend dispatch mechanisms with blockwise/map_blocks wrappers that preserve and correctly align chunk structures during operations on chunked arrays.

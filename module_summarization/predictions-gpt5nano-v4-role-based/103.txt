@@ -1,0 +1,165 @@
+codegen.rst
+
+Diofant Code Generation API
+===========================
+
+Overview
+--------
+The codegen module provides a language-agnostic representation of routines (functions)
+that evaluate diofant expressions and can be translated into target languages
+such as C, Fortran, Fortran90, and Octave/Matlab. It is designed as a dedicated
+code generator rather than a pretty-printer, addressing challenges like
+creating full compilable code (headers, inputs/outputs, and library integration)
+and enabling optimisations such as common subexpression elimination across
+multiple expressions.
+
+Key ideas:
+- Separate concept of a generic Routine and language-specific CodeGen backends.
+- Describes how inputs, outputs, locals, and global context are organized.
+- Provides a friendly API on top of the rigorous Routine/CodeGen workflow for common use cases.
+
+Public milestones (as described in the module docstring)
+-------------------------------------------------------
++ First working version with scalar input arguments, generating C code, tests
++ Friendly functions that are easier to use than the rigorous Routine/CodeGen workflow.
++ Integer and Real numbers as input and output
++ Output arguments
++ InputOutput arguments
++ Sort input/output arguments properly
++ Contiguous array arguments (numpy matrices)
++ Also generate.pyf code for f2py (in autowrap module)
++ Isolate constants and evaluate them beforehand in double precision
++ Fortran 90
++ Octave/Matlab
+
+- Common Subexpression Elimination
+- User defined comments in the generated code
+- Optional extra include lines for libraries/objects that can eval special
+  functions
+- Test other C compilers and libraries: gcc, tcc, libtcc, gcc+gsl, ...
+- Contiguous array arguments (diofant matrices)
+- Non-contiguous array arguments (diofant matrices)
+- ccode must raise an error when it encounters something that can not be
+  translated into c. ccode(integrate(sin(x)/x, x)) does not make sense.
+- Complex numbers as input and output
+- A default complex datatype
+- Include extra information in the header: date, user, hostname, sha1 hash, ...
+- Fortran 77
+- C++
+- Python
+- ...
+
+Core concepts
+-------------
+The module introduces a core abstraction and a translator system:
+
+- Routine
+  - A generic description of a routine (function) to evaluate one or more expressions.
+  - Encapsulates:
+    - name: routine name
+    - arguments: a list of argument descriptors (InputArgument, OutputArgument, InOutArgument)
+    - results: a list of Result descriptors representing return values
+    - local_vars: variables defined inside the routine
+    - global_vars: symbols not passed as arguments (external context)
+  - Validation guarantees:
+    - All symbols appearing in results and in argument expressions are supplied by
+      input arguments, local variables, or global context.
+    - If a symbol is required for an output but not provided by inputs or locals/globals,
+      a ValueError is raised.
+  - Properties:
+    - variables: set of all variables potentially used by the routine (input names, local names, and result_vars)
+    - result_variables: a list of the variables produced as results
+
+- CodeGen family
+  - CodeGen (base class): converts Routine instances into compilable code for a target language.
+  - CCodeGen, FCodeGen, OctaveCodeGen: concrete backends for C, Fortran, and Octave/Matlab.
+  - These backends translate the Routine’s structure (arguments, results, locals, globals) into syntactically correct code for the target language, respecting language-specific limitations (e.g., multiple return values, pass-by-reference semantics, naming rules).
+
+- DataType and friends
+  - DataType: represents the types used in the generated code (integers, reals, complex, etc.).
+  - default_datatypes, get_default_datatype: provide sensible defaults for the target language and user overrides.
+
+- Arguments and results primitives
+  - Argument: generic argument descriptor.
+  - InputArgument: represents an input passed to the generated routine.
+  - OutputArgument: represents an output produced by the routine.
+  - InOutArgument: represents an argument used for both input and output (in-place modification).
+  - Result: represents a return value (often with an associated expression).
+
+- Helper API
+  - codegen: a convenient function for common, high-level code generation tasks.
+  - make_routine: helper to build Routine instances suitable for typical use cases.
+
+Usage patterns
+--------------
+- Low-level workflow (powerful, flexible):
+  - Construct Routine objects manually by supplying:
+    - name, a list of arguments (InputArgument, OutputArgument, InOutArgument),
+    - results (Result objects with associated expressions),
+    - local_vars and global_vars
+  - Use a specific CodeGen subclass (e.g., CCodeGen) to translate the Routine into target-language code.
+  - The CodeGen backends produce compilable code (and headers where applicable) with language-specific conventions.
+
+- High-level workflow (friendly API):
+  - Use codegen(code) or make_routine(...) to create Routine objects and translate them with minimal boilerplate.
+  - This path abstracts away low-level details while still producing correct output for supported languages.
+
+Key validation and design rules (as implemented in Routine.__init__)
+-------------------------------------------------------------------
+- Collect input and symbol usage:
+  - input_symbols collects names from InputArgument entries.
+  - For OutputArgument arguments, collect free_symbols from their associated expressions.
+  - For InOutArgument arguments, include the argument name in input_symbols and collect free_symbols from its expression.
+  - Collect free_symbols from all Result expressions.
+  - Collect local symbols from local_vars (both as names and as Result expressions).
+  - global_vars are treated as externally provided context.
+
+- Coverage check:
+  - Compute notcovered = symbols - (input_symbols ∪ local_symbols ∪ global_vars)
+  - If notcovered is not empty, raise a ValueError indicating that required symbols for outputs are not provided via inputs, locals, or globals.
+
+- Internal consistency:
+  - Ensures that every symbol needed by outputs is accounted for by inputs, local variables, or global context, preventing ill-formed routines.
+
+Practical example (conceptual)
+--------------------------------
+Note: This is a conceptual illustration; actual constructors depend on the definitions of InputArgument, OutputArgument, InOutArgument, and Result in the codebase.
+
+- Define a simple routine that computes y = x + 1 and returns y, with x as input, y as output.
+
+  - arg_x = InputArgument(name='x')
+  - res_y = Result(name='y', expr=SomeExpression('x + 1'))  # expression referencing x
+  - routine = Routine(
+      name='increment',
+      arguments=[arg_x],
+      results=[res_y],
+      local_vars=[],
+      global_vars=[]
+    )
+
+  - Use a CCodeGen or OctaveCodeGen instance to generate target code:
+    - codegen_backend = CCodeGen(...)
+    - code = codegen_backend.to_code(routine)
+
+What you can customize
+-----------------------
+- Language targets: C, Fortran, Fortran90, Octave/Matlab through respective CodeGen subclasses.
+- Data types: adjust input/output data types via DataType and default_datatypes.
+- Granularity: enable/disable features such as common subexpression elimination, include lines, comments, or special libraries via CodeGen options (where implemented).
+
+Notes and caveats
+-----------------
+- The code generation workflow is iterative and currently marked as work in progress.
+- Some milestones (e.g., advanced array handling, f2py integration, and other language targets) are planned but may not be fully implemented yet.
+- The current framework emphasizes correctness of symbol usage and structural integrity before producing language-specific code.
+
+Related modules and concepts
+----------------------------
+- diofant.utilities.codegen vs. diofant.printing.ccode:
+  - Code generation aims to produce compilable code with proper headers and argument handling, while printing.ccode focuses on string representations of expressions.
+- Printing backends (ccode, fcode, octave) are leveraged by CodeGen backends for generating language-specific expression code.
+
+References
+----------
+- Public API: Routine, DataType, default_datatypes, get_default_datatype, Argument, InputArgument, OutputArgument, Result, CodeGen, CCodeGen, FCodeGen, OctaveCodeGen, codegen, make_routine
+- Core design decisions and milestones are described in the module docstring and aligned with the goals above.

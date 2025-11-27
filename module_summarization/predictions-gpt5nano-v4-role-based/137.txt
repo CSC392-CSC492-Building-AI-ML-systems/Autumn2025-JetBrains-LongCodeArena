@@ -1,0 +1,151 @@
+ImPACT.rst
+
+ImPACT: Image Pixel-wise Fit for Atmospheric Cherenkov Telescopes
+===============================================================
+
+Overview
+--------
+ImPACTReconstructor implements a template-based, pixel-wise image fitting approach for Atmospheric Cherenkov Telescopes (IACTs) as described in Parsons & Hinton (2014). The method compares an image predicted by a library of telescope templates to the observed camera image on a per-pixel basis and performs a maximum-likelihood fit to recover shower parameters such as the shower direction, energy, and depth of maximum (Xmax).
+
+Key ideas
+- Build predicted camera images from a template network for each telescope type given a shower hypothesis.
+- Compare predicted vs observed pixel content using a per-pixel likelihood (e.g., Poisson-like with Gaussian approximations) and maximize the overall likelihood.
+- Optionally include a per-pixel time gradient template to exploit timing information.
+- Use priors (e.g., energy prior, Xmax prior) to regularize the fit.
+- Perform the optimization with a configured minimiser (Minuit or SciPy optimizers).
+- The approach is computationally intensive; units are fixed for performance (radians for angles, metres for distances, TeV for energy).
+
+Core functionality (from code)
+- Pixel-wise image fitting via a likelihood approach using template networks
+- Template interpolation per telescope type
+- Optional time-gradient templates
+- Priors on energy and Xmax to constrain the fit
+- Atmosphere profile handling for conversion between height and depth
+- Handling of different telescope camera types with per-camera pedestal characteristics
+
+API and Main Components
+- ImPACTReconstructor (class)
+  - Purpose: Perform the image-pixel-wise reconstruction using template networks.
+  - Key configuration options (via __init__):
+    - root_dir: Path to the template files
+    - minimiser: Minimiser backend (default "minuit")
+    - prior: String specifying priors to apply (if any)
+    - template_scale: Scale factor for template amplitudes
+    - xmax_offset: Offset applied to the Xmax prior/estimate
+    - use_time_gradient: Whether to use time-gradient templates
+  - Important attributes (partial, as shown in the code):
+    - file_names: Mapping of telescope type to template file names for amplitude and optional timing
+    - ped_table: Per-camera per-telescope pedestal widths (hard-coded defaults)
+    - spe: Single photoelectron width (hard-coded)
+    - thickness_profile, altitude_profile: Atmosphere profiles from ctapipe’s atmosphere utilities
+    - pixel_x, pixel_y, image, time: Per-event per-pixel data placeholders
+    - tel_types, tel_id: Telescope type and id mappings for the event
+    - tel_pos_x, tel_pos_y: Telescope positions (for geometry)
+    - peak_x, peak_y, peak_amp: Peak positions and amplitudes (Hillas-derived)
+    - hillas_parameters: List of Hillas parameters per telescope for peak estimation
+    - prediction, time_prediction: Cached template interpolators (image and time)
+    - array_direction, array_return, nominal_frame: Geometry handling for the array
+    - template_scale, xmax_offset, use_time_gradient: Configuration knobs
+  - Public methods (as provided in the snippet):
+    - initialise_templates(tel_type)
+      - Purpose: Ensure templates for each telescope type are loaded and cached.
+      - Input: tel_type (dictionary of telescope types present in the event)
+      - Behavior: Loads TemplateNetworkInterpolator for each needed telescope type; optionally loads TimeGradientInterpolator if use_time_gradient is True.
+      - Returns: True when initialisation is complete.
+    - get_hillas_mean()
+      - Purpose: Compute peak positions for each telescope image to estimate the shower maximum via Hillas parameters.
+      - Behavior: Iterates over self.hillas_parameters to compute weighted peak positions (x, y) and amplitudes.
+      - Output: Updates peak_x, peak_y, peak_amp arrays (one per telescope).
+  - Supporting helper functions (module-level):
+    - guess_shower_depth(energy)
+      - Returns a simple estimate of the depth of shower maximum (Xmax) as a function of energy:
+        x_max_exp = 300 + 93 * log10(energy)
+    - energy_prior(energy, index=-1)
+      - Prior term encouraging physically plausible energies (power-law form)
+    - xmax_prior(energy, xmax, width=100)
+      - Prior on Xmax relative to the expected Xmax for a given energy, using a Gaussian width
+        computed from the difference to the energy-dependent expectation
+
+Data model and templates
+- Templates
+  - For each telescope type (e.g., CHEC, LSTCam, NectarCam, FlashCam), a template file is loaded:
+    - Amplitude templates (image)
+    - Optional time-gradient templates (if use_time_gradient is True)
+  - Interpolators:
+    - TemplateNetworkInterpolator: Predicts a pixel amplitude given a shower hypothesis
+    - TimeGradientInterpolator: Predicts per-pixel timing information
+- Observables per event
+  - pixel_x, pixel_y: Pixel coordinates in the camera (per event)
+  - image: Observed per-pixel signal (charges)
+  - time: Per-pixel timing information (if available)
+- Per-telescope metadata
+  - tel_types, tel_id: Type and identifier per telescope in the event
+  - tel_pos_x, tel_pos_y: Ground-plane telescope positions (geometry)
+  - hillas_parameters: Hillas moments for each telescope, used to infer peak positions
+- Per-camera calibration
+  - ped_table: Pedestal widths per camera type, used for per-pixel noise modeling
+  - spe: Width of the single photoelectron charge distribution (used in likelihood)
+
+Likelihood and priors
+- Pixel-wise likelihoods
+  - ctapipe.image.neg_log_likelihood and ctapipe.image.mean_poisson_likelihood_gaussian are available in the codebase
+  - The fit combines per-pixel likelihoods across all recorded telescopes
+  - The per-pixel model accounts for expected signal from templates and noise from pedestals
+- Priors
+  - energy_prior: Encodes a prior on the energy, modeling a power-law (nuisance parameter control via index)
+  - xmax_prior: Encodes prior on Xmax given energy via a Gaussian around the energy-dependent expectation (x_max_exp)
+  - The user can supply a prior string to influence the fit (self.priors)
+
+Atmosphere and geometry
+- Atmosphere
+  - get_atmosphere_profile_functions("paranal", with_units=False) provides depth vs altitude relations needed to map height above ground to depth of shower maximum
+- Geometry
+  - The code uses NominalFrame, TiltedGroundFrame, GroundFrame and project_to_ground for coordinate transformations
+  - The final reconstructed geometry is designed to be stored in ctapipe containers
+
+Usage notes
+- Performance considerations
+  - This approach is computationally intensive due to per-pixel likelihood evaluations and template interpolation
+  - Units are fixed within the class to avoid runtime unit conversions and speed up calculations
+- Template and camera handling
+  - Different telescope cameras use different templates and pedestal values
+  - DUMMY camera types are treated specially (no real templates)
+
+Practical guidance and example usage
+- Typical workflow (high level):
+  1) Instantiate the reconstructor with a path to the template files:
+     recon = ImPACTReconstructor(root_dir="/path/to/templates", minimiser="minuit", use_time_gradient=True)
+  2) For a given event, prepare the per-telescope data: pixel positions, image values, and per-telescope metadata.
+  3) Initialize templates for the telescopes present in the event:
+     recon.initialise_templates(event.tel_type)
+  4) Run the pixel-wise fit (the full fit routine is not shown in the snippet but would leverage the loaded templates and per-pixel data, using the configured minimiser and priors).
+  5) Access the reconstruction results via the standard ctapipe containers (e.g., ReconstructedGeometryContainer, ReconstructedEnergyContainer).
+
+Notes
+- The class relies on ctapipe components:
+  - TemplateNetworkInterpolator and TimeGradientInterpolator for template handling
+  - Atmosphere profile functions for projecting height to depth
+  - Per-pixel likelihood functions from ctapipe.image
+- The model assumes fixed units inside the class for performance:
+  - Angles in radians
+  - Distances in metres
+  - Energies in TeV
+- The pedestals and single photoelectron distribution width are currently hard-coded, with room for external calibration integration.
+
+References
+- Parsons, K. and Hinton, J. (2014). Image template-fitted reconstruction for IACTs (ImPACT). Astroparticle Physics 56, 26–34.
+- ctapipe documentation and modules used:
+  - ctapipe.image for likelihood calculations
+  - ctapipe.coordinates for frame transformations
+  - ctapipe.instrument for atmosphere profile functions
+  - ctapipe.template_network_interpolator for template interpolation
+
+Notes for maintainers
+- The public API surface includes:
+  - ImPACTReconstructor class
+  - energy_prior(energy, index=-1)
+  - xmax_prior(energy, xmax, width=100)
+  - guess_shower_depth(energy)
+- Ensure the template files referenced in file_names exist and are accessible under root_dir
+- Validate that ped_table keys cover the active telescope cameras in a run
+- When expanding functionality, consider exposing a public fit() method or similar to perform the full maximum-likelihood minimization and returning reconstruction containers.

@@ -1,0 +1,119 @@
+w_direct
+========
+
+Overview
+--------
+
+The w_direct command computes state-to-state kinetics by tracing trajectory data from a WESTPA simulation. It consists of two primary subcommands:
+
+- w_direct init: Traces trajectories to compute conditional fluxes and related statistics, producing a direct kinetics file (default direct.h5) containing raw flux data, arrivals, durations, and event counts.
+- w_direct kinetics: Produces averaged rates/fluxes from the direct kinetics data, including optional evolution (time-windowed) datasets.
+
+Key concepts:
+- Uses a bootstrap-based estimator (mcbs_ci_correl) to obtain confidence intervals for rate estimates.
+- The rate estimator employed is a custom block, implemented in _rate_eval_block, which iterates over all ordered state pairs (i != j) and computes rate estimates for each pair using the total i→j population data for proper normalization.
+- Output is stored in an HDF5 file (default direct.h5) with multiple datasets described below.
+
+Subcommands
+-----------
+
+init
+- Purpose: Calculate state-to-state kinetics by tracing trajectories and write results to an HDF5 file.
+- Default kinetics/output file: direct.h5
+- Required inputs:
+  - An assignments file (usually assign.h5) that provides trajectory labeling.
+  - Population data used by the estimator (pops) and trajectory flux data (dataset) per state pair.
+- Internal operation:
+  - Uses a custom evaluation block (_rate_eval_block) to compute rate estimates for every i→j pair (excluding i == j).
+  - Calls mcbs_ci_correl with:
+    - estimator: sequence_macro_flux_to_rate
+    - alpha, n_sets, autocorrel_alpha
+    - do_correl, mcbs_enable
+    - estimator_kwargs containing istate and jstate
+  - Produces per-block results suitable for bootstrap aggregation, returning tuples that include the block index, state pair, and confidence-interval information.
+- Output (in direct.h5):
+  - conditional_fluxes: [iteration][state][state]
+  - conditional_arrivals: [iteration][stateA][stateB] (integer)
+  - total_fluxes: [iteration][state]
+  - arrivals: [iteration][state]
+  - duration_count: [iteration]
+  - durations: [iteration][event duration] with fields:
+    - istate (initial state)
+    - fstate (final state)
+    - duration (float, tau units)
+    - weight (float, trajectory weight at end of transition)
+
+Notes:
+- The conditional fluxes are not normalized by the initial macrostate population. Normalization to rates is performed by w_direct kinetics in the second subcommand and related tooling.
+
+kinetics
+- Purpose: Generate average rates/fluxes and associated errors from a WESTPA simulation.
+- Output files:
+  - avg_rates: [state, state] (structured)
+  - avg_total_fluxes: [state] (structured)
+  - avg_conditional_fluxes: [state, state] (structured)
+- Optional evolution mode (if the “evolution-mode” option is enabled in the wrapper tooling):
+  - rate_evolution: [window][state][state] (structured)
+- This subcommand consumes the direct kinetics data produced by w_direct init and aggregates statistics over a specified window of iterations, providing easier-to-interpret rate/flux summaries.
+
+Input/Output data model
+-----------------------
+
+Direct (w_direct init) outputs
+- conditional_fluxes: macrostate-to-macrostate fluxes (not normalized by initial population)
+- conditional_arrivals: trajectory counts arriving at a final state from a given initial state
+- total_fluxes: total flux into each macrostate
+- arrivals: trajectories arriving at each state (regardless of origin)
+- durations: event durations with per-event records (istoate, fstate, duration, weight)
+
+Averaged (w_direct kinetics) outputs
+- avg_rates: rates between states, derived from the direct data
+- avg_total_fluxes: total flux into each state
+- avg_conditional_fluxes: state-to-state fluxes normalized and averaged
+- rate_evolution (if enabled): time-resolved evolution of rates
+
+Implementation highlights
+-------------------------
+
+Core logic
+- _rate_eval_block(iblock, start, stop, nstates, data_input, name, mcbs_alpha, mcbs_nsets, mcbs_acalpha, do_correl, mcbs_enable)
+  - Custom rate estimator for the kinetics calculations.
+  - Iterates over all ordered pairs of states (istate, jstate) with istate != jstate.
+  - For each pair, constructs a dataset containing the time series for that pair and the full population data.
+  - Calls mcbs_ci_correl with:
+    - estimator: sequence_macro_flux_to_rate
+    - estimator_kwargs: {'istate': istate, 'jstate': jstate}
+  - Aggregates results as (name, iblock, istate, jstate, (start, stop) + ci_res) for bootstrap processing.
+
+Data flow and dependencies
+- relies on:
+  - assignments file for trajectory labeling and iteration coverage
+  - dataset and pops data derived from the kinetics input (the code passes data_input['dataset'][:, istate, jstate] and data_input['pops'])
+  - mcbs_ci_correl and sequence_macro_flux_to_rate for rate estimation with confidence intervals
+- The code imports: weight_dtype, h5io, WKinetics, WESTKineticsBase, AverageCommands, and a bootstrap/CI module (mcbs_ci_correl, _1D_simple_eval_block, _2D_simple_eval_block)
+
+Usage notes for developers
+- w_direct is designed to be extended with a custom rate evaluation for complex estimators; _rate_eval_block demonstrates how to assemble per-state-pair calculations and feed them to a block bootstrap CI routine.
+- The output files are intended as inputs for w_direct kinetics to produce normalized rates and averages, incorporating statistical uncertainty.
+
+Practical examples
+- Initialize direct kinetics (default direct.h5):
+  - w_direct init --assignments assign.h5 --output direct.h5
+- Compute averaged kinetics from direct data:
+  - w_direct kinetics --input direct.h5 --output direct_avg.h5
+
+When to use
+- Use w_direct init to extract raw, unnormalized state-to-state flux information from trajectory data, including confidence intervals via bootstrap.
+- Use w_direct kinetics to obtain normalized rate estimates and aggregated statistics suitable for interpretation and comparison.
+
+Notes for maintainers
+- The default file names (direct.h5) and dataset schemas are documented in the class docstrings and the code paths; ensure compatibility with any tooling that consumes these datasets.
+- The open_files method validates that the assignments data span the requested iteration range, raising a clear error if not.
+
+See Also
+- WESTKineticsBase, WKinetics (base classes for kinetics-related commands)
+- mcbs_ci_correl, _1D_simple_eval_block, _2D_simple_eval_block (bootstrap/CI utilities)
+- sequence_macro_flux_to_rate (estimator used for converting flux sequences into rates)
+- accumulate_state_populations_from_labeled (population accumulation helper used to prepare pops)
+
+This documentation focuses on the w_direct command and its two subcommands, summarizing purpose, data model, workflows, and key implementation details relevant to developers extending or integrating w_direct functionality.

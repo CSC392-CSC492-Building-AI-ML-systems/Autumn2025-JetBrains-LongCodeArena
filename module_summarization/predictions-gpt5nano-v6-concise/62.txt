@@ -1,0 +1,181 @@
+# Visitors (sql.visitors)
+
+This page documents the traversal/visitor interface implemented by sql.visitors. It covers how to create visitiable objects, how to write visitors that consume those objects via the generated compiler dispatch, and how to use the traversal helpers provided by the module.
+
+## Overview
+
+The sql.visitors module provides a lightweight, extensible framework for visiting and traversing SQLAlchemy’s internal AST-like structures (ClauseElements, expressions, etc.). The core concepts are:
+
+- Visitable: a base class for objects that can be “visited” by a visitor. Each Visitable class declares a visit name via `__visit_name__`, and the module automatically wires up a dispatch method that calls back into the visitor’s corresponding `visit_<visit_name>` method.
+- Compiler dispatch: at class creation time, if a subclass of Visitable defines `__visit_name__`, the module generates a `_compiler_dispatch` method (and stores the original implementation if present). This method looks up a `visit_<visit_name>` on the visitor and calls it with the element as the first argument.
+- InternalTraversal: an enum used by the HasTraverseInternals system to describe how to traverse internal datastructures (e.g., clause elements, from clauses, etc.). It supports automatic generation of traversal helpers such as `get_children`, `_copy_internals`, and `_gen_cache_key`.
+- ExternalTraversal, anon_map, and traversal helpers: additional utilities used to support traversal and caching in more complex scenarios.
+
+This architecture lets you separate the traversal logic (visitors) from the objects being traversed (Visitable elements), while providing a predictable, extensible dispatch mechanism.
+
+## Key Concepts
+
+### Visitable and compiler dispatch
+
+- Visitable is the base class for all objects that participate in the visitor/dispatch mechanism.
+- Subclasses define a class attribute `__visit_name__` (must be a string) to indicate how they should be visited.
+- At subclass initialization, if `__visit_name__` is defined, sql.visitors generates a `_compiler_dispatch` method that:
+  - Looks for a method named `visit_<visit_name>` on the visitor object.
+  - If found, calls `visitor.visit_<visit_name>(element, **kw)`.
+  - If not found, calls `visitor.visit_unsupported_compilation(element, err, **kw)` to allow graceful fallback.
+
+Example:
+- A Visitable subclass:
+  class MyNode(Visitable):
+      __visit_name__ = 'mynode'
+      __slots__ = ('value',)
+
+      def __init__(self, value):
+          self.value = value
+
+- A visitor that handles this node:
+  class MyVisitor:
+      def visit_mynode(self, node, **kw):
+          return f"MyNode(value={node.value})"
+
+      def visit_unsupported_compilation(self, node, err, **kw):
+          return f"Unsupported: {err}"
+
+- Dispatch in action:
+  node = MyNode(42)
+  visitor = MyVisitor()
+  result = node._compiler_dispatch(visitor)
+  # result -> "MyNode(value=42)"
+
+Notes:
+- You can customize behavior for unsupported nodes by implementing `visit_unsupported_compilation`.
+- The `_compiler_dispatch` method is installed automatically by the metaprogramming in `Visitable.__init_subclass__`.
+
+### InternalTraversal
+
+- InternalTraversal is an Enum that defines symbolic roles used when traversing internal structures.
+- It is used by HasTraverseInternals to automatically provide:
+  - get_children
+  - _copy_internals
+  - _gen_cache_key
+- Typical usage looks like:
+  class Case(Visitable):
+      _traverse_internals = [
+          ("value", InternalTraversal.dp_clauseelement),
+          ("whens", InternalTraversal.dp_clauseelement_tuples),
+          ("else_", InternalTraversal.dp_clauseelement),
+      ]
+- The symbols encode how each attribute should be traversed (e.g., a single element vs. a list of elements vs. a collection of clause elements).
+
+### ExternalTraversal and anon_map
+
+- ExternalTraversal and anon_map are utilities used by SQLAlchemy’s traversal and caching mechanisms. They are part of the broader traversal framework that allows external visitors and anonymous-name mappings to participate in traversal and caching.
+- Their usage is typically internal to SQLAlchemy’s compilation and cache-key generation logic, though the API is exposed for advanced customization.
+
+## API Reference (high level)
+
+- iterate
+- traverse_using
+- traverse
+- cloned_traverse
+- replacement_traverse
+- Visitable
+- ExternalTraversal
+- InternalTraversal
+- anon_map
+
+Note: The module’s public surface includes both the core dispatching mechanism (Visitable and the generated `_compiler_dispatch`) and the traversal utilities used to navigate and cache traversal results. The actual behavior of the traversal helpers (iterate, traverse_using, etc.) is exercised within SQLAlchemy’s compiler and traversal layers; refer to the module’s source for precise semantics.
+
+## Examples
+
+### Example 1: Basic compile-dispatch with a single node
+
+```python
+from sql.visitors import Visitable
+
+class MyNode(Visitable):
+    __visit_name__ = 'mynode'
+    __slots__ = ('value',)
+
+    def __init__(self, value):
+        self.value = value
+
+class MyVisitor:
+    def visit_mynode(self, node, **kw):
+        return f"Visited {node.value}"
+
+    def visit_unsupported_compilation(self, element, err, **kw):
+        return f"Unsupported: {err}"
+
+node = MyNode(123)
+visitor = MyVisitor()
+
+result = node._compiler_dispatch(visitor)
+print(result)  # "Visited 123"
+```
+
+### Example 2: Traversal through child nodes
+
+```python
+from sql.visitors import Visitable
+
+class MyNode(Visitable):
+    __visit_name__ = 'mynode'
+    __slots__ = ('value', 'child')
+
+    def __init__(self, value, child=None):
+        self.value = value
+        self.child = child
+
+class CountingVisitor:
+    def visit_mynode(self, node, ctx=None, **kw):
+        if ctx is None:
+            ctx = {'count': 0}
+        ctx['count'] += 1
+        if node.child is not None:
+            node.child._compiler_dispatch(self, ctx=ctx)
+        return ctx
+
+root = MyNode(1, MyNode(2, MyNode(3)))
+visitor = CountingVisitor()
+
+ctx = root._compiler_dispatch(visitor)
+print(ctx)  # {'count': 3}
+```
+
+In this example, the visitor manually traverses to the child by invoking the child’s `_compiler_dispatch`, illustrating how traversal can be implemented within visit methods.
+
+### Example 3: Handling unsupported nodes
+
+```python
+class MyVisitor:
+    def visit_unsupported_compilation(self, element, err, **kw):
+        return f"Unsupported element: {element.__class__.__name__} ({err})"
+
+# A node without a corresponding visit_<name> method will trigger this path
+class UnknownNode(Visitable):
+    __visit_name__ = 'unknown'
+    __slots__ = ()
+
+node = UnknownNode()
+visitor = MyVisitor()
+
+print(node._compiler_dispatch(visitor))
+# "Unsupported element: UnknownNode (<some AttributeError...>)"
+```
+
+This demonstrates the fallback path when a visitor does not implement a `visit_<visit_name>` method.
+
+## Design and Migration Notes
+
+- __visit_name__ must be assigned at the class level and must be a string. Non-string values raise an InvalidRequestError during class construction.
+- If a subclass defines its own `_compiler_dispatch`, the module preserves the original as `_original_compiler_dispatch` to support overrides (e.g., by extensions like sqlalchemy.ext.compiles).
+- The dispatch mechanism is intended to be extended by users who implement their own visitors; for typical use within SQLAlchemy, the internal compiler traversals rely on pre-defined `visit_<name>` methods for ClauseElements and related objects.
+
+## See Also
+
+- SQLAlchemy’s compilation/traversal machinery for ClauseElements
+- HasTraverseInternals and internal traversal helpers
+- anon_map and prefix_anon_map for anonymous placeholder handling
+
+If you need deeper, line-by-line behavior or additional traversal helpers, consult the module’s source and related traversal/compilation helpers in the codebase.

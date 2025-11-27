@@ -1,0 +1,187 @@
+ug-connect.rst
+==============
+
+Connecting Steps Together
+------------------------
+
+This document describes how to connect multiple steps in a build by linking their inputs and outputs. It explains the core concepts exposed by the Step and Edge helpers, how to obtain and manipulate handles, and common patterns for wiring steps together in a graph.
+
+Key concepts
+------------
+
+- Step
+  - Represents a configuration unit that has a set of inputs and outputs, along with a set of commands to execute.
+  - Each Step loads its configuration from a YAML file (configure.yml) located in the step’s directory, or from the top-level steps/ path for default steps.
+  - Important fields in a Step YAML:
+    - name: Identifier for the step.
+    - inputs: Optional list of input labels.
+    - outputs: Optional list of output labels (may include tagged outputs).
+    - commands: List of shell commands to run for this step (defaults to [ "true" ] if omitted or empty).
+  - The Step API provides convenient handles to connect steps together (see Handles section).
+
+- Edge
+  - A lightweight container that represents a directed connection from one step’s output to another step’s input.
+  - Holds two handles: src (a handle to an output) and dst (a handle to an input).
+  - Used by the graph-building component to wire steps together.
+
+- Handles
+  - A handle is a tuple that identifies a specific input or output on a step.
+  - Output handle: (step_name, 'outputs', output_name)
+  - Input handle:  (step_name, 'inputs',  input_name)
+  - The Step API provides convenient ways to obtain these handles.
+
+How handles work
+----------------
+
+- Get an input handle
+  - s.get_input_handle(name)
+  - Returns: (step_name, 'inputs', name)
+  - Validates that the step has an inputs list and that the requested input exists.
+
+- Get an output handle
+  - s.get_output_handle(name)
+  - Returns: (step_name, 'outputs', name)
+  - Validates that the step has an outputs list and that the requested output exists.
+
+- Syntactic sugar
+  - s.i(name) is a shorthand for s.get_input_handle(name)
+  - s.o(name) is a shorthand for s.get_output_handle(name)
+
+- All handles
+  - s.all_input_handles() returns a list of all input handles for the step (or [] if no inputs).
+  - s.all_output_handles() returns a list of all output handles for the step (or [] if no outputs).
+
+- Extending steps
+  - extend_inputs(new_list): append new input labels to the step
+  - extend_outputs(new_list): append new output labels to the step
+  - pre_extend_commands(new_list): insert commands before the existing ones
+  - extend_commands(new_list): append commands after the existing ones
+
+Connecting steps with Edge
+--------------------------
+
+- Concept: An Edge connects a step’s output to another step’s input.
+- Edge(src, dst) where:
+  - src is an output handle (e.g., s.o('out1'))
+  - dst is an input handle (e.g., t.i('in1'))
+- Typical usage pattern:
+  - Create Step objects for each participating step.
+  - Create Edge objects to connect the appropriate output to input handles.
+  - The graph builder uses these Edge objects to form the directed dependency graph between steps.
+
+Illustrative example
+--------------------
+
+Assume you have two steps: StepA and StepB.
+
+- StepA produces an output named "out_A"
+- StepB consumes an input named "in_B"
+
+Python example:
+
+- Load or construct steps
+  - sA = Step('path/to/StepA')
+  - sB = Step('path/to/StepB')
+
+- Create the connection (edge) from StepA's output to StepB's input
+  - edge = Edge(sA.o('out_A'), sB.i('in_B'))
+
+- Optional: inspect handles
+  - print(sA.o('out_A'))  # ('StepA', 'outputs', 'out_A')
+  - print(sB.i('in_B'))   # ('StepB', 'inputs', 'in_B')
+
+- If your graph builder supports multiple connections, you can create more edges similarly, e.g.:
+  - edge2 = Edge(sA.o('out_A2'), sB.i('in_B2'))
+
+Tagged outputs (YAML shorthand)
+--------------------------------
+
+Step YAML supports tagged outputs to influence how outputs are named or resolved:
+
+- A YAML example snippet (outputs can include tags):
+  - outputs:
+    - foo1.txt
+    - foo2.txt
+    - ~: results/1/2/3/data.txt
+
+Explanation:
+- Simple outputs (strings) refer to files directly.
+- A dict entry may be used to tag or rename an output; the Step loader normalizes tagged outputs to a form where the key is the basename and the value is the path, enabling convenient cross-step usage.
+- This feature allows suites to route files through standardized names while preserving the actual file paths.
+
+Default vs. explicit step paths
+--------------------------------
+
+- Default steps
+  - If a Step is constructed with default=True, the loader reads from the top-level steps directory:
+    /<top-dir>/steps/<step_path>/configure.yml
+- Explicit steps
+  - If default is False (or omitted), the loader reads:
+    <step_path>/configure.yml
+- In both cases, the loaded data must include a name field.
+
+Example step YAMLs (simplified)
+--------------------------------
+
+StepA configure.yml (simplified)
+- name: StepA
+  inputs:
+    - in_A
+  outputs:
+    - out_A
+  commands:
+    - echo "Producing out_A"
+
+StepB configure.yml (simplified)
+- name: StepB
+  inputs:
+    - in_B
+  outputs:
+    - out_B
+  commands:
+    - echo "Consuming in_B and producing out_B"
+
+Connecting in code (end-to-end sketch)
+---------------------------------------
+
+- Create steps
+  - sA = Step('path/to/StepA')
+  - sB = Step('path/to/StepB')
+
+- Connect
+  - edge = Edge(sA.o('out_A'), sB.i('in_B'))
+
+- The graph builder would then:
+  - Ensure the edge src/dst are valid handles
+  - Schedule StepA before StepB in the build
+
+Notes and caveats
+-----------------
+
+- Validate presence of inputs/outputs
+  - Accessors enforce that a step has the requested input/output
+- Empty inputs/outputs are pruned in Step loading
+  - If inputs/outputs are empty, they may be removed from the config to indicate “no inputs” or “no outputs”
+- Commands normalization
+  - If commands are empty or missing, they default to [ "true" ] to ensure a no-op shell step
+  - Commands are normalized to strings; booleans in YAML may be coerced to 'true'/'false' strings
+
+Reference: API surface (summary)
+-------------------------------
+
+- Step
+  - __init__(step_path, default=False)
+  - get_input_handle(name)
+  - get_output_handle(name)
+  - i(name), o(name)
+  - all_input_handles()
+  - all_output_handles()
+  - extend_inputs(list)
+  - extend_outputs(list)
+  - pre_extend_commands(list)
+  - extend_commands(list)
+
+- Edge
+  - __init__(src, dst)
+
+This documentation provides the essential guidance to connect steps using the provided Step and Edge helpers. For concrete implementations, refer to the ug-connect workflow in your repository’s graph builder that consumes these handles and edges to assemble the final execution plan.

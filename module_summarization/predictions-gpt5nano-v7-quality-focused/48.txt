@@ -1,0 +1,149 @@
+discretemod.rst
+================
+
+Overview
+--------
+This module provides the infrastructure for zero-inflated count models in
+StatsModels. It defines a base class for zero-inflated models and exposes
+public classes for common zero-inflated distributions such as Poisson,
+Generalized Poisson, and Negative Binomial variants.
+
+Public API
+----------
+- ZeroInflatedPoisson
+- ZeroInflatedGeneralizedPoisson
+- ZeroInflatedNegativeBinomialP
+
+GenericZeroInflated
+-------------------
+GenericZeroInflated implements the common zero-inflation logic shared by the
+zero-inflated count models. Specific models (ZIP, Zero-Inflated Generalized
+Poisson, Zero-Inflated Negative Binomial) derive from this class and provide
+the main-count model specification.
+
+Key concepts
+------------
+- Zero-inflation part (inflation model):
+  - Modeled with a binary outcome indicating whether an observation is zero
+    due to the inflation process or due to the main count process.
+  - The inflation probability w is modeled using either logistic (logit) or
+    probit link, implemented via a small auxiliary model (Logit or Probit).
+
+- Main count model:
+  - The standard count model (Poisson, Generalized Poisson, NB, etc.)
+    contributes the log-likelihood portion for non-zero counts and the
+    log-likelihood contribution for zeros when not inflated.
+
+- Parameter layout:
+  - The first k_inflate parameters correspond to the inflation model.
+  - The remaining parameters correspond to the main count model.
+
+Initialization and validation
+-----------------------------
+- exog_infl is optional. If None, a constant inflation term is assumed.
+  - When None, k_inflate is set to 1, and exog_infl becomes a column of ones.
+- The number of observations in exog and exog_infl must match; otherwise a
+  ValueError is raised.
+- The inflation model is constructed as either Logit or Probit depending on
+  the inflation parameter ('logit' by default, or 'probit').
+
+Attributes
+----------
+- endog: endogenous response variable (counts).
+- exog: design matrix for the main count model.
+- exog_infl: design matrix for the inflation model (zero-inflation part).
+- infl: string naming the inflation family used ('logit' or 'probit').
+- inflation: same as infl (kept for backward compatibility).
+- k_inflate: number of inflation parameters (typically equal to the number of
+  columns in exog_infl, or 1 if exog_infl is None).
+- k_extra: alias for k_inflate (historical naming in code).
+- model_infl: the internal binary choice model used for inflation
+  (Logit or Probit).
+- _hessian_inflate: function handling the Hessian for the inflation part.
+- exog_names: updated to include inflation parameter names (e.g., inflate_0, inflate_1, ...).
+
+Core methods
+------------
+- loglike(params):
+  - Returns the total log-likelihood of the zero-inflated model evaluated at
+    params.
+  - It delegates to loglikeobs and sums the per-observation values.
+
+- loglikeobs(params):
+  - Computes the per-observation log-likelihood values for the zero-inflated
+    model.
+  - Splits params into inflation parameters and main-model parameters.
+  - For zero observations, uses:
+    log(w_i + (1 - w_i) * exp(llf_main_i))
+  - For non-zero observations, uses:
+    log(1 - w_i) + llf_main_i
+  - w_i is the predicted inflation probability from the inflation model.
+
+- fit(start_params=None, method='bfgs', maxiter=35, full_output=1,
+  disp=1, callback=None, cov_type='nonrobust', cov_kwds=None, use_t=None, **kwargs):
+  - Fits the model by maximizing the log-likelihood.
+  - If start_params is not provided, it computes them via _get_start_params and
+    may incorporate offset and exposure adjustments.
+  - Uses a callback (default is a no-op) to handle potential edge cases.
+  - Delegates to the parent CountModel.fit for optimization and returns the
+    fitted results object.
+
+Usage example
+-------------
+The following demonstrates how to construct and fit a zero-inflated Poisson model
+using GenericZeroInflated as the base for the specific ZIP class. The same pattern
+applies to ZeroInflatedGeneralizedPoisson and ZeroInflatedNegativeBinomialP.
+
+Example:
+.. code-block:: python
+
+    from discretemod import ZeroInflatedPoisson
+
+    # endog: count response, exog: main model predictors,
+    # exog_infl: predictors for the zero-inflation model (optional)
+    endog = np.asarray([...] , dtype=float)
+    exog = np.asarray([...], dtype=float)
+    exog_infl = None  # or provide a matrix
+
+    model = ZeroInflatedPoisson(endog, exog, exog_infl=exog_infl, inflation='logit')
+    result = model.fit()
+
+    print(result.summary())
+
+Notes
+-----
+- exog and exog_infl must have the same number of observations; otherwise,
+  a ValueError is raised as the code does not support missing-data alignment
+  between the two matrices.
+- The default inflation link is logit unless specified otherwise as 'probit'.
+- The public API exports three concrete zero-inflated models:
+  ZIP, ZeroInflatedGeneralizedPoisson, and ZeroInflatedNegativeBinomialP.
+  These use GenericZeroInflated to manage the shared zero-inflation logic.
+
+References to internal API (for advanced users)
+----------------------------------------------
+- _doc_zi_params: document string for zero-inflation related parameters
+  (exog_infl, offset, exposure, inflation).
+- _init_keys, _null_drop_keys: internal attributes used to manage model
+  state and documentation for results.
+
+See Also
+--------
+- statsmodels.discrete.discrete_model.DiscreteModel
+- statsmodels.discrete.discrete_model.CountModel
+- statsmodels.discrete.discrete_model.Poisson
+- statsmodels.discrete.discrete_model.Logit
+- statsmodels.discrete.discrete_model.Probit
+- statsmodels.distributions.zipoisson
+- statsmodels.distributions.zigenpoisson
+- statsmodels.distributions.zinegbin
+
+Internal implementation details
+-------------------------------
+- The inflation model is created as either Logit or Probit with:
+  - self.model_infl = Logit(np.zeros(self.exog_infl.shape[0]), self.exog_infl)
+  - or self.model_infl = Probit(...)
+- The gradient/Hessian for the inflation part is handled by
+  self._hessian_inflate, pointing to either _hessian_logit or _hessian_probit.
+- Inflation parameter names are prefixed as inflate_ and prepended to the
+  existing exog_names to reflect the combined parameter set.

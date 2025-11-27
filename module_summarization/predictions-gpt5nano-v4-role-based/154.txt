@@ -1,0 +1,143 @@
+ug-connect.rst
+
+Connecting Steps Together
+==========================
+
+This document explains how to connect multiple steps in a workflow by using the Edge and Step APIs exposed in edge.py and step.py. It focuses on the concepts and practical usage required to glue steps into a coherent data flow.
+
+Overview
+--------
+
+- A Step represents a unit of work in a build or workflow. It exposes:
+  - inputs: named input channels it consumes
+  - outputs: named output channels it produces
+  - commands: the shell commands to execute for the step
+  - metadata used to locate and manage the step within a graph
+- An Edge represents a connection between a source step’s output and a destination step’s input.
+- Connecting Steps Together is accomplished by creating Edge objects that reference the appropriate handles from two Steps and then registering those edges in a graph (Graph class not shown here).
+
+Key Concepts
+------------
+
+Edges (edge.py)
+- Edge is a simple container for a connection:
+  - src: a handle to the output of the source step
+  - dst: a handle to the input of the destination step
+- Accessors:
+  - get_src(): returns the source handle
+  - get_dst(): returns the destination handle
+
+Step (step.py)
+- Step is initialized with:
+  - step_path: path to the step’s directory
+  - default: if True, reads configuration from the top-level steps directory
+- YAML-based configuration (configure.yml) is loaded and validated:
+  - Must contain a "name" field
+  - Optional inputs/outputs are cleaned if empty
+  - Outputs that are tagged/dict-based must have exactly one key/value
+  - If commands are missing or empty, they default to [ 'true' ]
+  - Commands are normalized to strings (avoids Python booleans sneaking in)
+  - Outputs with shorthand tags are expanded to real files
+  - step_dir and source metadata are captured for provenance
+- Core API (relevant to connecting steps):
+  - get_input_handle(name): returns a handle (step_name, 'inputs', name)
+  - get_output_handle(name): returns a handle (step_name, 'outputs', name)
+  - i(name): shorthand for get_input_handle
+  - o(name): shorthand for get_output_handle
+  - all_input_handles(): list of handles for all inputs
+  - all_output_handles(): list of handles for all outputs
+  - extend_inputs(list): extend the step’s inputs
+  - extend_outputs(list): extend the step’s outputs
+  - pre_extend_commands(list): prepend commands
+  - extend_commands(list): append commands
+
+Connecting Steps Together
+-------------------------
+
+How connections are represented
+- Each connection between steps is represented by an Edge, which stores:
+  - src: the source step’s output handle
+  - dst: the destination step’s input handle
+- A handle is a triple (step_name, 'inputs'|'outputs', channel_name)
+  - Example: stepA.o('data_out') yields (stepA_name, 'outputs', 'data_out')
+  - Example: stepB.i('data_in') yields (stepB_name, 'inputs', 'data_in')
+
+Typical usage pattern
+- Create or obtain Step objects for the steps you want to connect.
+- Use Step.o('out') to reference an available output.
+- Use Step.i('in') to reference an available input.
+- Create an Edge that links the two handles.
+- Register the Edge with your Graph.
+
+Example
+- Consider Step A exporting 'data.txt' and Step B consuming 'data_in'.
+
+  edge = Edge( stepA.o('data.txt'), stepB.i('data_in') )
+  graph.connect(edge)
+
+Notes
+- The Graph class and its connect method are not shown in the provided code, but this is the conventional pairing with Edge.
+- Steps provide convenient helpers:
+  - stepA.o('data.txt') and stepB.i('data_in') are easy-to-use handles for wiring graphs.
+  - all_input_handles() and all_output_handles() facilitate bulk wiring when the channel names are known or when auto-connecting by name is desired.
+
+Practical Examples
+------------------
+
+1) Simple linear pipeline
+- Step1 produces 'raw_data', Step2 consumes it and produces 'processed_data'.
+
+  s1 = Step('path/to/step1')
+  s2 = Step('path/to/step2')
+  edge = Edge( s1.o('raw_data'), s2.i('input_data') )
+  graph.connect(edge)
+
+2) Multiple outputs feeding into a single consumer
+- Step1 outputs 'a', Step2 outputs 'b', Step3 consumes both as inputs 'in_a' and 'in_b'.
+
+  edge1 = Edge( s1.o('a'), s3.i('in_a') )
+  edge2 = Edge( s2.o('b'), s3.i('in_b') )
+  graph.connect(edge1)
+  graph.connect(edge2)
+
+3) Using shorthand handles and extending I/O
+- Extend a Step’s inputs/outputs and connect using the updated handles.
+
+  s = Step('path/to/step')
+  s.extend_inputs(['new_input'])
+  s.extend_outputs(['new_output'])
+  edge = Edge( s.o('new_output'), t.i('new_input') )
+  graph.connect(edge)
+
+Best Practices
+------------
+
+- Use the i/o shorthand methods (i, o) for readability and to minimize typos.
+- Validate that the source step indeed has the specified output and the destination step has the input before creating an Edge.
+- Leverage extend_inputs/extend_outputs when composing graphs dynamically (e.g., when a step’s I/O must adapt to different pipelines).
+- Keep configure.yml clean: ensure inputs/outputs only exist when defined and remove empty lists to avoid misinterpretation.
+
+Reference
+---------
+
+- Edge class: edge.py
+  - __init__(src, dst)
+  - get_src()
+  - get_dst()
+
+- Step class: step.py
+  - __init__(step_path, default=False)
+  - clone()
+  - get_input_handle(name)
+  - get_output_handle(name)
+  - i(name) / o(name)
+  - all_input_handles()
+  - all_output_handles()
+  - extend_inputs(new_list)
+  - extend_outputs(new_list)
+  - pre_extend_commands(new_list)
+  - extend_commands(new_list)
+
+Notes
+-----
+- The documentation above focuses on the Connecting Steps Together aspect. The Graph implementation and its full API are not included here, but Edge and Step provide the essential primitives to assemble a connected workflow.

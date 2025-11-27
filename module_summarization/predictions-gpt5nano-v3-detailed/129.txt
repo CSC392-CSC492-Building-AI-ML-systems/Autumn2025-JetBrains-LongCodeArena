@@ -1,0 +1,161 @@
+# Table Data Verification
+
+This module provides a lightweight verification framework for tabular data structures. It defines a standard way to report, group, and optionally fix issues found in table-like objects, with consistent messaging, warnings, and exceptions.
+
+## Overview
+
+The verification system centers around two core concepts:
+
+- A structured error container (_ErrList) that can hold nested groups of errors and present them in a readable, indented format.
+- A verifier base class (_Verify) that defines how to run verifications, report results, and optionally apply fixes.
+
+Key concepts include:
+- Verification options (VERIFY_OPTIONS) that determine reporting and fixing behavior.
+- Exceptions and warnings (VerifyError, VerifyWarning) used to signal failures or highlight issues.
+- The convention that verifications should return an _ErrList describing all issues found.
+
+This framework is designed to integrate with astropy-style verification semantics, including support for combining fixing and reporting modes (e.g., "fix+warn", "silentfix+ignore").
+
+## Core components
+
+### VerifyError and VerifyWarning
+- VerifyError: Exception raised when verification fails under the selected reporting option.
+- VerifyWarning: Warning class emitted for verifications that are reported as warnings.
+
+### VERIFY_OPTIONS
+A list of allowed option strings controlling verification behavior. Examples:
+- "ignore", "warn", "exception", "fix", "silentfix", and combinations such as "fix+warn", "silentfix+exception", etc.
+
+### _ErrList
+A specialized list used to accumulate and structure verification messages.
+
+- Structure:
+  - Top-level items are either tuples of the form (fixable, message) or nested _ErrList instances representing grouped issues.
+  - fixable is a boolean indicating whether the issue is fixable.
+  - unit is an optional label used when rendering grouped messages.
+
+- Key methods:
+  - __str__(): Returns a string representation of the errors.
+  - iter_lines(filter=None, shift=0): Iterates over error lines as (fixable, indented_message) pairs, with support for nested groups. The filter can be used to suppress certain lines.
+
+### _Verify
+A mixin-like base class providing the common verification workflow.
+
+- run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+  - Executes verification with a chosen option and optional fix.
+  - Returns a tuple (fixable, text), where fixable indicates whether the issue could be fixed and text is the assembled message.
+
+- verify(option="warn")
+  - Orchestrates verification for all values on the instance.
+  - Validates the option against VERIFY_OPTIONS.
+  - If option is "ignore", no verification is performed.
+  - Delegates actual checks to self._verify(opt), which concrete subclasses should implement to return an _ErrList describing issues.
+  - Supports splitting the option into fix and report components when "+" is present (e.g., "fix+warn").
+  - Handles silent fixing, filtering of lines, and the decision to warn or raise based on the chosen option.
+
+- Notes:
+  - The concrete implementation must provide a _verify(self, opt) method returning an _ErrList.
+  - The messaging includes a standard header and a note about zero-based indexing for consistency with the rest of the framework.
+
+## Using the verification framework
+
+The typical workflow is to subclass _Verify, implement _verify to examine the table data, returning an _ErrList describing any issues, and then call verify with a chosen option.
+
+Example 1: Simple verifier for a tabular object
+
+```python
+from type_of_table_module import _Verify, _ErrList
+
+class MyTableVerifier(_Verify):
+    def __init__(self, table):
+        self.table = table
+
+    def _verify(self, opt):
+        # Build an error list for the table
+        errs = _ErrList(unit="Table")
+
+        # Example checks (adjust to your table structure)
+        if not hasattr(self.table, "columns"):
+            errs.append((False, "Table object has no 'columns' attribute"))
+
+        required = ["time", "flux"]
+        cols = getattr(self.table, "columns", [])
+        for c in required:
+            if c not in cols:
+                errs.append((False, f"Missing required column: {c}"))
+
+        # Example of a grouped issue
+        if hasattr(self.table, "dtype_map"):
+            group = _ErrList(unit="ColumnDtypes")
+            if self.table.dtype_map.get("time") != "datetime64[ns]":
+                group.append((False, "Column 'time' should be datetime64[ns]"))
+            if len(group) > 0:
+                errs.append(group)
+
+        return errs
+
+# Usage
+table = ...  # your table object
+verifier = MyTableVerifier(table)
+verifier.verify(option="warn")  # will warn or raise based on option
+```
+
+Example 2: Fixable issue with a fix function
+
+```python
+class MyTableVerifier(_Verify):
+    def __init__(self, table):
+        self.table = table
+
+    def _verify(self, opt):
+        errs = _ErrList(unit="Table")
+        if getattr(self.table, "example_issue", False):
+            # This is fixable; provide a fix function
+            def fix():
+                self.table.correct_issue()
+
+            errs.append((True, "Fixed example_issue."))  # fixable message
+        return errs
+
+    # (Optional) method to perform the actual fix could be invoked via run_option
+```
+
+In practice, your _verify implementation should populate the _ErrList with messages and, when appropriate, nested _ErrList groups to represent structured issues.
+
+## Important considerations and edge cases
+
+- Option validation
+  - If option is not in VERIFY_OPTIONS, a ValueError is raised.
+  - The framework follows the convention used in Astropy’s verify, including support for combined options via “+” (e.g., "fix+warn").
+
+- ignore behavior
+  - option == "ignore" causes verify to return immediately without reporting any issues.
+
+- Fixing vs reporting
+  - When fixing is requested, a provided fix() function is invoked, and the message can be augmented with a fix note (default "Fixed.").
+  - Special handling exists for silentfix and related combinations to suppress or control output.
+
+- Messaging
+  - Messages are prefixed with a standard header when issues are reported.
+  - A note about zero-based indexing is appended to the final messages when reporting.
+
+- Structure of _ErrList
+  - Use top-level (fixable, message) pairs for simple issues.
+  - Use nested _ErrList instances to group related issues (with a header such as "<unit> <index>:" when rendered).
+  - The unit attribute (e.g., "Table" or "Column") is used to label grouped messages.
+
+- Dependency on _verify
+  - The actual verification logic is provided by subclasses via _verify(opt). This framework provides the structure for reporting, grouping, and optional fixing.
+
+## When to use
+
+Use this verification framework when you need a consistent, extensible way to:
+- validate the integrity of tabular data structures
+- report multiple, potentially grouped issues
+- optionally fix issues in-place and report what was fixed
+- integrate with warning- and exception-based workflows
+
+## Reference notes
+
+- See the underlying implementation notes in the project’s verification reference for more details on how options interact and how error formatting is produced.
+- The verification flow is compatible with astropy's verify semantics, including the use of fixable vs. unfixable errors and reporting modes.

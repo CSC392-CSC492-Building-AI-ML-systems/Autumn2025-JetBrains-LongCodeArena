@@ -1,0 +1,118 @@
+# w_run — start/continue a WEST simulation
+
+## Overview
+w_run is the command-line entry point for starting or continuing a WEST simulation. It initializes the WESTPA runtime, configures the work manager and drivers, and orchestrates the execution lifecycle (prepare, run, finalize) under a master/worker model. A debugging option allows propagating only a single segment.
+
+Key behavior:
+- Loads configuration via westpa.rc and work manager environment
+- Instantiates and wires sim_manager, system, data_manager, we_driver, and propagator
+- Executes the simulation under a work manager with master/worker handling
+- Handles graceful shutdowns and exceptions
+
+## Key Components
+- entry_point(): CLI entry point that builds the argument parser, loads runtime configuration, and invokes the simulation.
+- run_simulation(): Core orchestration routine that:
+  - Creates and configures the work manager
+  - Loads and wires drivers and managers (sim_manager, system, data_manager, we_driver, propagator)
+  - Runs the simulation under the master/worker pattern
+  - Handles KeyboardInterrupt and general exceptions with appropriate status messages
+- --oneseg option: When provided, propagates only one segment (useful for debugging propagators)
+
+Code examples (from the provided source)
+
+- Entry point and argument handling
+```python
+def entry_point():
+    parser = argparse.ArgumentParser('w_run','start/continue a WEST simulation')
+    westpa.rc.add_args(parser)
+    parser.add_argument(
+        '--oneseg',
+        dest='only_one_segment',
+        action='store_true',
+        help='only propagate one segment (useful for debugging propagators)',
+    )
+
+    work_managers.environment.add_wm_args(parser)
+
+    args = parser.parse_args()
+    westpa.rc.process_args(args)
+    work_managers.environment.process_wm_args(args)
+
+    run_simulation()
+```
+
+- Simulation orchestration and run lifecycle
+```python
+def run_simulation():
+    work_manager = westpa.rc.work_manager = make_work_manager()
+
+    # Load the sim manager and other drivers
+    sim_manager = westpa.rc.get_sim_manager()
+    system = westpa.rc.get_system_driver()
+    data_manager = westpa.rc.get_data_manager()
+    we_driver = westpa.rc.get_we_driver()
+    propagator = westpa.rc.get_propagator()
+
+    propagator.system = system
+    data_manager.system = system
+    we_driver.system = system
+
+    sim_manager.data_manager = data_manager
+    sim_manager.system = system
+    sim_manager.propagator = propagator
+    sim_manager.we_driver = we_driver
+
+    with work_manager:
+        if work_manager.is_master:
+            work_manager.install_sigint_handler()
+            sim_manager.load_plugins()
+
+            log.debug('preparing run')
+            sim_manager.prepare_run()
+
+            try:
+                log.debug('beginning run')
+                sim_manager.run()
+
+                log.debug('finalizing run')
+                sim_manager.finalize_run()
+            except KeyboardInterrupt:
+                westpa.rc.pstatus('interrupted; shutting down')
+            except Exception as e:
+                westpa.rc.pstatus('exception caught; shutting down')
+                if str(e)!= '':
+                    log.error(f'error message: {e}')
+                log.error(traceback.format_exc())
+        else:
+            work_manager.run()
+```
+
+- Script entry point
+```python
+if __name__ == '__main__':
+    entry_point()
+```
+
+## Usage
+- Basic run (start or continue a WEST simulation)
+  - w_run
+- Run with single-segment propagation (debugging propagators)
+  - w_run --oneseg
+- Typical invocation (from installed package)
+  - w_run
+Note: The command integrates with WESTPA’s runtime config and work manager environment, so additional flags may be provided via westpa.rc and work_managers environment as needed.
+
+## Details
+- Argument handling:
+  - The CLI is created with argparse and given a description: 'w_run','start/continue a WEST simulation'
+  - WESTPA runtime arguments are added with westpa.rc.add_args(parser) and processed with westpa.rc.process_args(args)
+  - Work manager arguments are added via work_managers.environment.add_wm_args(parser) and processed with work_managers.environment.process_wm_args(args)
+- Options:
+  - --oneseg sets args.only_one_segment, which is intended to propagate only a single segment (useful for debugging propagators)
+- Run lifecycle:
+  - A work manager is created and assigned to westpa.rc.work_manager
+  - Major components (sim_manager, system, data_manager, we_driver, propagator) are retrieved from westpa.rc and wired together
+  - The master process installs a SIGINT handler, loads plugins, prepares the run, executes, and finalizes
+  - KeyboardInterrupt triggers a graceful shutdown; general exceptions are reported, logged, and shut down
+  - Non-master workers run via work_manager.run()
+

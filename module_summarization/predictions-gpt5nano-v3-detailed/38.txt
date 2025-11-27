@@ -1,0 +1,149 @@
+# fields.rst
+
+Introduction
+------------
+The fields module defines the base Field type used by the ORM to describe how model attributes are stored in the database. It provides a flexible mechanism for composing new field types from primitive Python types and for overriding behavior per database dialect.
+
+Key concepts
+------------
+- Field: The base class for all ORM fields. It encapsulates how a Python value is represented in the database and how values are converted back and forth between Python and DB types.
+- _FieldMeta: A metaclass that enables a convenient mixin-style approach to defining new field types. If you define a field as a combination like Field, SomePythonType, the metaclass will:
+  - Instantiate the new field using Field as the base class.
+  - Set the field_type on the class to the provided Python type (e.g., int, str, etc.).
+- Per-DB overrides: You can override attributes or methods for specific databases by declaring an inner class named _db__<dialect> (for example, _db_sqlite). This allows you to tailor SQL type hints, casting behavior, and more for each dialect.
+
+Core class and attributes
+-------------------------
+- Field (base class)
+  - field_type: The Python type of the field (set automatically by _FieldMeta when using mixins).
+  - SQL_TYPE: The SQL type to be used by the target DB (e.g., "VARCHAR(255)", "INTEGER").
+  - GENERATED_SQL: SQL that instructs the DB to auto-generate this field when applicable.
+  - indexable: Whether the field can be indexed. Default: True.
+  - has_db_field: Whether this field maps to a real DB column. Default: True.
+  - skip_to_python_if_native: If the driver natively supports this Python type, skip conversion. Default: False.
+  - allows_generated: Whether this field can be DB-generated. Default: False.
+  - function_cast: Optional callable that takes a pypika.Term and returns a Term for any custom casting needs.
+  - Other attributes (e.g., source_field, generated, pk, null, default, unique, index, description) are used to control behavior and schema generation.
+
+Important methods
+-----------------
+- to_db_value(value, instance): Convert a Python value to the DB representation.
+  - If value is None or already of field_type, returns value.
+  - Otherwise, casts using field_type(value).
+- to_python_value(value): Convert a DB value to the Python representation.
+  - If value is None or already of field_type, returns value.
+  - Otherwise, casts using field_type(value).
+- required: A property intended to indicate whether the field is required. (Note: The implementation detail is not shown in the snippet.)
+
+Initialization and constraints
+------------------------------
+When constructing a Field, several validations and implicit behaviors apply:
+
+- If not self.indexable and (unique or index) is True, a ConfigurationError is raised.
+- If pk is True and null is True, a ConfigurationError is raised (primary keys cannot be NULL).
+- If pk is True:
+  - index is forced to True
+  - unique is forced to True
+
+These checks help ensure sane defaults for primary keys and indexed fields.
+
+Defining new field types (mixins)
+----------------------------------
+The _FieldMeta metaclass enables a concise mixin-style approach to create new field types. Example pattern:
+
+- Define a new field type that combines Field with a Python type (e.g., int, str) as a base:
+  - class ID(Field, int):
+      SQL_TYPE = "INTEGER"
+      GENERATED_SQL = "IDENTITY"  # optional, for DB-generated keys
+
+    This yields a concrete field type where field_type is int.
+
+- You can then use this field type in your models:
+  - class User(Model):
+      id = ID(pk=True, generated=True)
+      # other fields...
+
+- If you need dialect-specific overrides, use an inner class named _db__<dialect> to override attributes for that dialect:
+  - class ID(Field, int):
+      SQL_TYPE = "INTEGER"
+
+      class _db_sqlite:
+          SQL_TYPE = "INTEGER"  # sqlite specific override
+          def function_cast(self, term):  # example override
+              return term  # customize as needed
+
+Usage examples
+--------------
+
+1) Simple custom integer field with a generated primary key
+
+```python
+from typing import Optional
+from tortoise.models import Model
+from tortoise.fields import Field
+
+# Define a concrete field type by pairing Field with int
+class ID(Field, int):
+    SQL_TYPE = "INTEGER"
+    GENERATED_SQL = "AUTOINCREMENT"
+
+class User(Model):
+    id = ID(pk=True, generated=True)
+    # other fields...
+```
+
+2) Simple string field using a mixin
+
+```python
+class CharField(Field, str):
+    SQL_TYPE = "VARCHAR(40)"
+```
+
+Usage in a model:
+
+```python
+class Product(Model):
+    code = CharField(pk=False, null=False)
+    name = CharField(null=False)
+```
+
+3) Per-dialect overrides
+
+```python
+class JsonField(Field, dict):
+    SQL_TYPE = "JSON"
+
+    class _db_sqlite:
+        SQL_TYPE = "TEXT"  # SQLite stores JSON as text
+
+    class _db_postgres:
+        SQL_TYPE = "JSONB"
+```
+
+4) Converting values with to_db_value / to_python_value
+
+```python
+class MyInt(Field, int):
+    SQL_TYPE = "INTEGER"
+
+f = MyInt()
+
+# Python -> DB
+assert f.to_db_value("123", None) == 123
+
+# DB -> Python
+assert f.to_python_value("456") == 456
+```
+
+Note on behavior
+----------------
+- Default values (default parameter) are used when creating model instances but are not included in the schema.
+- The system supports a lightweight form of composition for field types via the _FieldMeta mechanism, enabling clear and reusable field definitions with optional per-dialect overrides.
+
+Edge cases and considerations
+-----------------------------
+- Attempting to index a non-indexable field (indexable = False) with unique or index set to True will raise ConfigurationError.
+- A primary key field cannot be nullable (pk=True and null=True is invalid) and automatically becomes indexed and unique.
+- Per-DB overrides must be defined as inner classes named _db__<dialect> or similar (e.g., _db_sqlite) to take effect for the target database dialect.
+
+This documentation provides a practical overview and concrete examples to help you define and use custom field types effectively, leveraging the mixin-based field type system and per-dialect overrides.

@@ -1,0 +1,236 @@
+Running
+=======
+
+Overview
+--------
+
+This section documents the running.rst content for the migration running module. The module provides utilities to undo (reverse) migrations, including a back‑wards migration manager, helper functions to orchestrate reversions, and a status-checking component. It is designed to be used by developers integrating Piccolo migrations into async Python workflows.
+
+Public API
+----------
+
+Classes and functions exported by the module:
+
+- BackwardsMigrationManager
+  - __init__(self, app_name: str, migration_id: str, auto_agree: bool = False, clean: bool = False, preview: bool = False)
+  - async def run_migrations_backwards(self, app_config: AppConfig) -> MigrationResult
+  - async def run(self) -> MigrationResult
+
+- run_backwards(app_name: str, migration_id: str = "1", auto_agree: bool = False, clean: bool = False, preview: bool = False) -> MigrationResult
+
+- backwards(app_name: str, migration_id: str = "1", auto_agree: bool = False, clean: bool = False, preview: bool = False)
+  - Async wrapper that calls run_backwards and handles non-success by exiting the process.
+
+- CheckMigrationManager
+  - __init__(self, app_name: str)
+
+- MigrationStatus (dataclass)
+  - app_name: str
+  - migration_id: str
+  - description: str
+  - has_ran: bool
+
+Key data structures
+-------------------
+
+- MigrationResult
+  - Imported from piccolo.apps.migrations.commands.base
+  - Represents the outcome of a migration operation with fields such as success (bool) and message (str)
+
+- Migration (table)
+  - Imported from piccolo.apps.migrations.tables
+  - Used to track which migrations have run for an app
+
+- AppConfig, MigrationModule
+  - Imported from piccolo.conf.apps
+  - Used to locate and load migration modules for an app
+
+How it works
+------------
+
+High-level flow for reversing migrations (backwards):
+
+1. Prepare migration modules
+   - Retrieve a mapping of migration_id to MigrationModule from the app’s migrations folder.
+
+2. Determine ran migrations
+   - Query the Migration table to obtain the IDs of migrations that have already run for the specified app.
+
+3. Validate the target range
+   - If the user requests all migrations, the earliest ran migration is selected.
+   - If the user requests the first previously run migration, the earliest or latest depending on the input is chosen.
+   - Validate that the target earliest migration is among the ran migrations.
+
+4. Build the reversal list
+   - Compute the subset of migrations to undo (from earliest to latest ran).
+   - Reverse the order to obtain the correct backwards sequence.
+
+5. Confirm and execute
+   - Prompt for user confirmation unless auto_agree is True.
+   - For each migration in the reversed sequence:
+     - Call the migration module’s forwards() to ensure the migration logic is prepared for reversal.
+     - If the response is a MigrationManager and preview is enabled, adjust its preview flag.
+     - Run the migration backwards.
+     - If not in preview mode, delete the corresponding Migration record.
+     - If clean is True and the migration module file exists, delete the file from disk.
+
+6. Completion
+   - Return a MigrationResult indicating success or failure and an accompanying message.
+
+Usage examples
+--------------
+
+Note: All examples assume an async context (i.e., inside an async function or using asyncio).
+
+1) Reverse the most recent migration for a single app
+
+.. code-block:: python
+
+    from piccolo.migrations.run import backwards
+    # Inside an async function
+    result = await backwards(app_name="my_app", migration_id="1", auto_agree=True)
+    print(result)
+
+2) Reverse all migrations for all apps with auto confirmation
+
+.. code-block:: python
+
+    from piccolo.migrations.run import backwards
+    result = await backwards(app_name="all", auto_agree=True)
+    print(result)
+
+3) Preview mode (no changes are applied, but SQL is produced)
+
+.. code-block:: python
+
+    from piccolo.migrations.run import backwards
+    result = await backwards(app_name="my_app", migration_id="1", preview=True, auto_agree=True)
+    print(result)
+
+4) Reverse a specific range and delete migration files after completion (clean)
+
+.. code-block:: python
+
+    from piccolo.migrations.run import backwards
+    result = await backwards(app_name="my_app", migration_id="2", clean=True, auto_agree=True)
+    print(result)
+
+5) Using the BackwardsMigrationManager directly
+
+.. code-block:: python
+
+    from piccolo.migrations.run import BackwardsMigrationManager
+    mgr = BackwardsMigrationManager(
+        app_name="my_app",
+        migration_id="1",
+        auto_agree=True,
+        clean=False,
+        preview=False,
+    )
+    result = await mgr.run()
+    print(result)
+
+Implementation notes
+--------------------
+
+- The operations are asynchronous (async/await) to integrate cleanly with async I/O in applications.
+- The module interacts with:
+  - The migrations folder to load migration modules
+  - The Migration table to determine and record migration state
+- The preview mode allows safe inspection of the SQL/operations without applying changes.
+- The clean flag optionally removes migration modules from disk after reversal.
+- When reversing, the code ensures the operation is idempotent where possible for idempotent migrations and provides clear success/failure feedback.
+
+API reference (summary)
+-----------------------
+
+- BackwardsMigrationManager
+  - Purpose: Encapsulates the logic to reverse a sequence of migrations for an app.
+  - Key methods:
+    - run_migrations_backwards(app_config: AppConfig) -> MigrationResult
+    - run() -> MigrationResult
+
+- run_backwards(app_name, migration_id="1", auto_agree=False, clean=False, preview=False) -> MigrationResult
+  - Orchestrates the backwards operation across a single app or multiple apps when app_name == "all".
+
+- backwards(app_name, migration_id="1", auto_agree=False, clean=False, preview=False)
+  - Public entry point for reversing migrations; handles non-success by exiting the process.
+
+- CheckMigrationManager
+  - Purpose: Provide status information about migrations for an app.
+  - Key data structure: MigrationStatus
+
+Documentation generation
+------------------------
+
+Developer-oriented notes on generating docs for this module with Sphinx:
+
+- Docstring coverage
+  - Ensure public classes, public methods, and top-level functions have docstrings.
+  - The current code includes a docstring for backwards(), but other public members (e.g., BackwardsMigrationManager.run_migrations_backwards) should be documented to maximize autodoc accuracy.
+
+- Sphinx setup (typical workflow)
+  - Install Sphinx if needed: pip install sphinx
+  - Create a Sphinx project or extend your existing docs:
+    - sphinx-quickstart
+  - Generate API docs from the code:
+    - sphinx-apidoc -o docs/source your_package
+
+- Autodoc usage snippet (example)
+  - In docs/source/running.rst (or your preferred path):
+    .. autoclass:: piccolo.migrations.run.BackwardsMigrationManager
+       :members:
+       :undoc-members:
+       :show-inheritance:
+
+    .. autofunction:: piccolo.migrations.run.run_backwards
+    .. autofunction:: piccolo.migrations.run.backwards
+
+- Build docs
+  - Run: sphinx-build -b html docs/source docs/build/html
+
+- Recommendations
+  - Add comprehensive docstrings to all public API elements to maximize autodoc usefulness.
+  - Consider including small code examples in docstrings or dedicated example sections.
+
+Related modules
+---------------
+
+- piccolo.apps.migrations.commands.base: BaseMigrationManager, MigrationResult
+- piccolo.apps.migrations.tables: Migration
+- piccolo.conf.apps: AppConfig, MigrationModule
+- piccolo.apps.migrations.auto.migration_manager: MigrationManager
+- piccolo.utils.printing: print_heading
+
+Notes for maintainers
+---------------------
+
+- This file relies on asynchronous flows and user prompts; unit tests should simulate user input (auto_agree) and verify both success and failure branches.
+- Test coverage should include:
+  - No migrations to reverse
+  - Unrecognized migration name
+  - Reversing all migrations across apps
+  - Preview mode behavior
+  - Clean flag behavior
+  - Proper handling of the Migration table state
+
+Appendix: Quick reference
+-------------------------
+
+- BackwardsMigrationManager
+  - Init: app_name, migration_id, auto_agree, clean, preview
+  - Run backwards: run_migrations_backwards(app_config)
+
+- run_backwards
+  - Params: app_name, migration_id, auto_agree, clean, preview
+  - Returns: MigrationResult
+
+- backwards
+  - Async wrapper around run_backwards
+  - Exits with non-zero code on failure
+
+- CheckMigrationManager
+  - Init: app_name
+  - get_migration_statuses(): Async method to fetch statuses (implementation may be extended in future)
+
+End of Running Documentation

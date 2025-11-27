@@ -1,0 +1,128 @@
+Stateless Learning Rate Schedulers
+===================================
+
+Overview
+--------
+
+This module provides a collection of stateless learning rate schedulers designed to interface directly with Composer's time abstraction. Stateless schedulers expose a simple, pure function interface that computes a learning-rate multiplier (alpha) based on the current trainer state and an optional scale-schedule ratio (SSR). The actual learning rate applied to the optimizer is eta(t) = eta_initial * alpha(t).
+
+Key ideas
+- Stateless design: schedulers are pure functions of the trainer state; no internal state is stored between steps.
+- Time-aware: schedulers operate using Composer's Time abstraction, allowing explicit usage of arbitrary time units (epochs, batches, duration, etc.).
+- SSR support: schedulers can be “stretched” via the scale schedule ratio (ssr) to alter the effective progression of the schedule.
+- Composable: multiple schedulers can be stacked multiplicatively to yield complex schedules.
+
+What you can do
+- Define lightweight, explicit schedulers as plain callables or small classes implementing the ComposerScheduler protocol.
+- Convert stateless schedulers into PyTorch-compatible schedulers using compile_composer_scheduler.
+- Use helper utilities to work with different time units and SSR.
+
+Usage examples
+- Simple functional scheduler
+  The following defines a scheduler that keeps the learning rate multiplier at 1.0 for the first 10 epochs and then halves it.
+
+  .. code-block:: python
+
+     from composer.core import State
+
+     def ten_epoch_decay_scheduler(state: State) -> float:
+         if state.timestamp.epoch < 10:
+             return 1.0
+         return 0.5
+
+     # ten_epoch_decay_scheduler is a valid ComposerScheduler
+     # Attach to a Trainer via the schedulers argument
+     # trainer = Trainer(schedulers=[ten_epoch_decay_scheduler], ...)
+
+- Stateless callable class scheduler
+  Schedulers can be implemented as callable classes for richer configuration.
+
+  .. code-block:: python
+
+     from typing import Protocol
+
+     class VariableEpochDecayScheduler(ComposerScheduler):
+         def __init__(self, num_epochs: int):
+             self.num_epochs = num_epochs
+
+         def __call__(self, state: State) -> float:
+             if state.time.epoch < self.num_epochs:
+                 return 1.0
+             return 0.5
+
+     ten_epoch_decay_scheduler = VariableEpochDecayScheduler(num_epochs=10)
+
+     # Attach to a Trainer
+     # trainer = Trainer(schedulers=[ten_epoch_decay_scheduler], ...)
+
+- Using with SSR
+  The schedule can be scaled by a factor ssr, such that alpha_sigma(t) = alpha(t / sigma). By default, ssr = 1.0.
+
+  .. code-block:: python
+
+     # Example use with an SSR
+     # from composer.schedulers import compile_composer_scheduler
+     # pytorch_scheduler = compile_composer_scheduler(ten_epoch_decay_scheduler, state, ssr=2.0)
+
+Notes
+- The documentation above is representative of the designed interface described in the module docstring. The actual schedulers are intended to be used through the provided API (ComposerScheduler protocol, compile_composer_scheduler, etc.).
+- Time units:
+  - Time can be specified in various units (epochs, batches, duration). The internal utilities handle conversions so that schedulers can be defined in intuitive time units.
+
+API reference
+-------------
+
+- ComposerScheduler (Protocol)
+  - A protocol for stateless schedulers. A valid scheduler is any callable taking a State and an optional ssr (default 1.0) and returning a float multiplier alpha. The multiplier is applied to the optimizer’s base learning rate.
+  - Parameters:
+    - state: The current Composer Trainer state.
+    - ssr: Scale Schedule Ratio. Affects how the schedule progresses over time.
+  - Returns:
+    - alpha: Learning-rate multiplier to apply to the optimizer’s base learning rate.
+
+  Notes:
+  - Scheduling results are multiplicative when multiple schedulers are used.
+  - The multiplier alpha is defined such that the effective learning rate is eta(t) = eta_initial * alpha(t).
+
+- _convert_time(time, state, ssr=1.0)
+  - Internal helper to convert a given Time (string or Time object) into a Time aligned with the trainer state and SSR.
+  - Converts time units (DURATION, EPOCH, etc.) into compatible units for the scheduling calculation.
+  - Requires that state.max_duration be set.
+
+- compile_composer_scheduler(scheduler, state, ssr=1.0)
+  - Converts a stateless ComposerScheduler into a PyTorch-compatible scheduler (a LambdaLR-based scheduler) that can be used with standard PyTorch optimizers.
+  - Binds the current trainer State to the scheduler such that .step() advances the schedule according to the current state.
+  - Parameters:
+    - scheduler: A ComposerScheduler (callable/class implementing __call__).
+    - state: The current State instance.
+    - ssr: Optional scale-schedule ratio.
+  - Returns:
+    - A PyTorchScheduler (an object compatible with torch.optim.lr_scheduler API).
+
+- Scheduler family (listed in __all__)
+  - StepScheduler
+  - MultiStepScheduler
+  - ConstantScheduler
+  - LinearScheduler
+  - ExponentialScheduler
+  - CosineAnnealingScheduler
+  - CosineAnnealingWarmRestartsScheduler
+  - PolynomialScheduler
+  - MultiStepWithWarmupScheduler
+  - ConstantWithWarmupScheduler
+  - LinearWithWarmupScheduler
+  - CosineAnnealingWithWarmupScheduler
+  - PolynomialWithWarmupScheduler
+
+Example usage (summary)
+- Define a scheduler as a function or callable class.
+- Attach to Trainer via the schedulers argument.
+- Optionally convert to a PyTorch scheduler with compile_composer_scheduler for compatibility with PyTorch training loops.
+- Optionally apply SSR to stretch/compress the schedule in time.
+
+Reference implementations
+- See the module source for the precise function signatures, type hints, and serialization behavior:
+  - ComposerScheduler Protocol
+  - _convert_time(time, state, ssr)
+  - compile_composer_scheduler(scheduler, state, ssr)
+  - The suite of scheduler classes enumerated above.

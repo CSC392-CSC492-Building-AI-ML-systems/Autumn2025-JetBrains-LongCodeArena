@@ -1,0 +1,199 @@
+Less Frequently Used FITS Data Structures
+==========================================
+
+This document describes data structures and extension types in FITS that are not part of everyday usage in typical astronomical data workflows. It focuses on around-the-edge formats and features that you may encounter in legacy data, specialized pipelines, or older FITS conventions. Where relevant, each section includes example code to illustrate typical usage with Astropy’s io.fits interface.
+
+Table of contents
+- Random Groups (obsolete/rare)
+- ASCII/Table Extensions (TableHDU)
+- Binary Tables with advanced features
+- Variable-length array columns (VLEN) in binary tables
+- Compressed FITS structures (CompressedImageHDU, CompressedBinTableHDU)
+- Long header keywords and HIERARCH convention
+
+1) Random Groups (obsolete / rarely used)
+------------------------------------------
+
+What they are
+- Random Groups were an early mechanism in FITS to store multiple related data blocks within a single extension. They are largely obsolete and not commonly used in modern data sets. Most contemporary workflows rely on binary tables or image extensions instead.
+
+What to expect
+- Data and alignment are organized in groups with a GSIZE/ GCOUNT type of metadata in the header.
+- Many modern FITS readers and writers (including Astropy) provide limited or no support for random-group structures beyond basic read/write compatibility with older files.
+
+Usage notes
+- Prefer reading with a general FITS reader and inspecting header keywords to determine if a file uses Random Groups.
+- If you must work with such data, consider converting to a more modern representation (e.g., a binary table or separate image extensions) for long-term usability.
+
+Example (conceptual)
+- Detecting a random-group extension by inspecting header keywords:
+  .. code-block:: python
+
+     from astropy.io import fits
+
+     with fits.open('legacy_random_groups.fits') as hdul:
+         ext = hdul[1]
+         print(ext.header.get('GCOUNT', 1))  # number of groups
+         print(ext.data)  # structure depends on old convention
+
+Notes
+- Because Random Groups are deprecated in the FITS standard, new projects should avoid them when possible.
+- If you are maintaining legacy data, aim to document the transformation to a modern structure and provide a readable conversion path.
+
+2) ASCII/Table Extensions (TableHDU)
+-------------------------------------
+
+What they are
+- ASCII Table extensions store tabular data in human-readable ASCII format. They are represented in Astropy as TableHDU (as opposed to BinTableHDU, which stores data in binary form).
+- They were more common in earlier data releases and remain supported mostly for legacy compatibility.
+
+Key characteristics
+- Data is stored as text; formatting is defined by the column formats in the header.
+- Access is similar to Binary Table extensions, but performance is generally lower for large datasets.
+
+Usage notes
+- ASCII tables are convenient for quick inspection or exchange with non-Python tools, but are less space- and time-efficient than binary tables.
+- When possible, prefer BinTableHDU for new work.
+
+Example: creating and writing an ASCII table
+.. code-block:: python
+
+   from astropy.io import fits
+   import numpy as np
+
+   col1 = fits.Column(name='id', format='K', array=np.array([1, 2, 3]))
+   col2 = fits.Column(name='flux', format='E', array=np.array([1.1, 2.2, 3.3]))
+   ascii_hdu = fits.TableHDU.from_columns([col1, col2])
+   ascii_hdu.writeto('example_ascii_table.fits', overwrite=True)
+
+Reading an ASCII/table extension
+.. code-block:: python
+
+   from astropy.io import fits
+
+   with fits.open('example_ascii_table.fits') as hdul:
+       tbl_hdu = hdul[1]  # or appropriate extension index
+       print(tbl_hdu.columns)
+       for row in tbl_hdu.data:
+           print(row['id'], row['flux'])
+
+Notes
+- The TableHDU class represents ASCII tables; its interface is similar to BinTableHDU but uses ASCII storage.
+- For new datasets, consider using BinTableHDU for performance unless ASCII exchange is explicitly required.
+
+3) Binary Tables with Advanced Features
+----------------------------------------
+
+What they are
+- Binary tables (BinTableHDU) are the primary means of tabular data storage in FITS today due to compact storage and fast I/O.
+- Less frequently used advanced features include:
+  - Multi-dimensional and complex column formats
+  - Variable-length array columns (VLEN)
+  - Explicitly defined column metadata and type handling for non-rectangular data
+
+Key characteristics
+- Columns are defined with explicit formats (e.g., 'E' for 32-bit float, 'K' for 64-bit integer, etc.) and data arrays per column.
+- Highly optimized for performance and compactness.
+
+Usage notes
+- When storing irregular or nested data, consider whether a VLEN column or an external FITS extension is appropriate.
+- Inspect column definitions (format, array shape) to understand how to read and manipulate the data.
+
+Example: inspecting a Binary Table extension
+.. code-block:: python
+
+   from astropy.io import fits
+
+   with fits.open('example_binary_table.fits') as hdul:
+       btbl = hdul[1]  # BinTableHDU
+       print(btbl.columns)
+       # Access a specific column
+       col = btbl.data.field('flux')
+       print(col)
+
+Example: creating a simple binary table with two columns
+.. code-block:: python
+
+   import numpy as np
+   from astropy.io import fits
+
+   col1 = fits.Column(name='id', format='K', array=np.arange(5))
+   col2 = fits.Column(name='flux', format='E', array=np.random.random(5))
+
+   bin_table = fits.BinTableHDU.from_columns([col1, col2])
+   bin_table.writeto('example_bin_table.fits', overwrite=True)
+
+VLEN (variable-length) columns
+- VLEN columns store variable-length arrays in a single row. This is useful for datasets where entries may be of different lengths per row.
+- Support and behavior depend on the specific FITS reader/writer and the column format used (e.g., PJ-like formats in legacy specifications).
+
+Notes
+- VLEND columns require careful handling when reading back the data; you will typically obtain object-dtype arrays or nested structures per row.
+- If you rely on cross-tool interoperability, test end-to-end with your intended toolchain.
+
+4) Compressed FITS structures
+-----------------------------
+
+What they are
+- Compressed FITS formats store image and/or table data in a compressed form to save disk space and potentially speed I/O for large datasets.
+- Astropy supports compressed image data (CompImageHDU) and compressed binary tables (CompBinTableHDU) as part of the FITS standard extensions.
+
+Usage notes
+- Compression is transparent to many users: you write data as a normal HDU, but the file stores compressed data under the hood.
+- When reading, Astropy automatically handles decompression to provide the original data in memory.
+
+Example: writing a compressed image
+.. code-block:: python
+
+   import numpy as np
+   from astropy.io import fits
+
+   data = np.random.rand(100, 100)
+
+   comp_hdu = fits.CompImageHDU(data)
+   comp_hdu.writeto('compressed_image.fits', overwrite=True)
+
+Reading a compressed image
+.. code-block:: python
+
+   from astropy.io import fits
+
+   with fits.open('compressed_image.fits') as hdul:
+       img = hdul[0].data
+       print(img.shape)
+
+Notes
+- Compressed FITS is especially useful for large image datasets or long-term archival storage.
+- Ensure downstream tools in your workflow support compressed FITS if you plan to exchange files.
+
+5) Long header keywords and the HIERARCH convention
+---------------------------------------------------
+
+What they are
+- FITS headers are a sequence of 80-character keyword records. When keywords become lengthy, the HIERARCH convention allows for longer, hierarchical keyword names and values.
+- This is commonly used by software that needs to store more descriptive metadata or nested metadata structures.
+
+Usage notes
+- HIERARCH keywords are not part of the original FITS standard but are widely supported by modern FITS readers (including Astropy) as an optional convention.
+- When writing, you can use Hierarchical keywords to add verbose metadata without compromising standard keyword compatibility.
+
+Example: using a long keyword with HIERARCH
+.. code-block:: python
+
+   from astropy.io import fits
+
+   hdu = fits.PrimaryHDU(np.zeros((2, 2)))
+   hdu.header['HIERARCH.TECTYPE'] = 'SCIENCE'
+   hdu.header['HIERARCH.TECTIME'] = '2025-01-01T00:00:00'
+
+   hdu.writeto('hierarch_example.fits', overwrite=True)
+
+Notes
+- When exchanging data with tools that do not support HIERARCH, keep important metadata in standard keywords or in an accompanying document.
+- If you rely on long metadata, consider documenting the meaning of HIERARCH keys in your project guidelines.
+
+See also
+- Astropy documentation for FITS: TableHDU, BinTableHDU, CompImageHDU, and Hierarch keywords
+- FITS standard references for Random Groups and VLEN in legacy contexts
+
+This document focuses on the less common FITS data structures you may encounter. In day-to-day work, most users will interact primarily with PrimaryHDU/ImageHDU and either Binary Tables (BinTableHDU) or Simple ASCII Tables (TableHDU). The structures described here are provided for completeness and for scenarios involving legacy data, specialized pipelines, or archival formats.

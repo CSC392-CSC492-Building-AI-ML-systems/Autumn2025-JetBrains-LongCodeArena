@@ -1,0 +1,149 @@
+# Contingency Tables (contingency_tables.rst)
+
+Overview
+--------
+This module provides utilities for analyzing two-way contingency tables (cross-tabulations of two categorical variables). It focuses on statistical tests of association, both for nominal (un-ordered) and ordinal (ordered) factors, and exposes a lightweight API suitable for developers who want to build on top of contingency-table analysis.
+
+Key concepts
+- Contingency table: a two-dimensional array of counts for combinations of two categorical variables.
+- Zero-handling: an option to offset zero cells (by 0.5) to stabilize certain statistical calculations.
+- Nominal association test: assesses independence between the two factors using a chi-squared test.
+- Ordinal association test: assesses trend/linear-by-linear association using weighted scores (Cochran-Armitage style).
+
+Public API
+- _make_df_square(table)
+  - Internal helper to reindex a pandas DataFrame to be square, ensuring the same set of category values appear on rows and columns.
+- _Bunch
+  - Simple container used to return multiple results from tests with readable __repr__/__str__.
+- Table
+  - A two-way contingency table wrapper with convenience methods.
+  - Core methods:
+    - __init__(table, shift_zeros=True)
+      - table: array-like counts.
+      - shift_zeros: if True and any cell is zero, add 0.5 to all cells (to avoid zeros in some tests).
+    - from_data(cls, data, shift_zeros=True)
+      - Build a Table from raw data using the first two columns to form a cross-tabulation.
+      - data can be a pandas DataFrame or a NumPy array-like.
+    - test_nominal_association(self)
+      - Chi-squared test of independence for nominal factors.
+      - Returns a _Bunch with attributes: statistic, df, pvalue.
+    - test_ordinal_association(self, row_scores=None, col_scores=None)
+      - Linear-by-linear (trend) test for ordinal factors.
+      - Returns a _Bunch with attributes: statistic, null_mean, null_sd, zscore, pvalue.
+      - row_scores and col_scores define the ordering of the categories; defaults are 0..n-1 for each dimension.
+
+Notes
+- The implementation relies on NumPy, SciPy (stats), and pandas.
+- Inference assumes iid sampling of independent units classified by the two categorical variables.
+- The module includes references to standard tests such as chi2_contingency.
+
+Usage examples
+--------------
+Example 1: Construct a contingency table from raw data and run a nominal association test
+
+```python
+import numpy as np
+import pandas as pd
+from contingency_tables import Table
+
+# Sample raw data: two categorical variables A and B
+data = pd.DataFrame({
+    'A': ['x', 'x', 'y', 'y', 'x', 'y', 'x', 'y', 'y'],
+    'B': ['m', 'n', 'm', 'm', 'n', 'n', 'm', 'n', 'm']
+})
+
+# Build a Table from the first two columns
+T = Table.from_data(data)
+
+print(T)  # shows the 2x2/2xN contingency table
+
+# Nominal association test (independence)
+nominal = T.test_nominal_association()
+print("statistic:", nominal.statistic)
+print("df:", nominal.df)
+print("p-value:", nominal.pvalue)
+```
+
+Example 2: Ordinal association test with optional scores
+
+```python
+# Define possible row/column scores (defaults are 0..n-1 if not provided)
+row_scores = np.arange(T.table.shape[0])
+col_scores = np.arange(T.table.shape[1])
+
+ordinal = T.test_ordinal_association(row_scores=row_scores, col_scores=col_scores)
+print("statistic:", ordinal.statistic)
+print("null_mean:", ordinal.null_mean)
+print("null_sd:", ordinal.null_sd)
+print("zscore:", ordinal.zscore)
+print("p-value:", ordinal.pvalue)
+```
+
+Example 3: Handling zeros by shifting (via constructor)
+
+```python
+# When constructing directly from an existing array-like table
+table = np.array([[0, 2], [3, 0]], dtype=float)
+T0 = Table(table, shift_zeros=True)
+
+print(T0)
+```
+
+Implementation details
+----------------------
+- Table.__init__(table, shift_zeros=True)
+  - Stores the original table as table_orig and a numeric copy as self.table.
+  - If shift_zeros is True and any cell is zero, zeros are replaced by 0.5 to avoid issues with certain tests.
+
+- Table.from_data(data, shift_zeros=True)
+  - If data is a pandas DataFrame, constructs the cross-tabulation using the first two columns.
+  - If data is an array-like, uses the first two columns to form the cross-tabulation.
+  - Returns a Table instance with the given shift_zeros policy.
+
+- Table.test_nominal_association()
+  - Computes the chi-squared statistic as the sum of the contributions for each cell (chi-square components).
+  - df is computed as (rows - 1) * (cols - 1).
+  - p-value is obtained from the chi-squared distribution.
+
+- Table.test_ordinal_association(row_scores, col_scores)
+  - Implements a linear-by-linear association test for ordered categories.
+  - statistic is computed using the provided row and column scores.
+  - Returns:
+    - statistic: test statistic
+    - null_mean, null_sd: mean and standard deviation under the null hypothesis
+    - zscore: standardized statistic
+    - pvalue: corresponding p-value
+
+Notes and limitations
+- The module's inference assumes iid sampling of units classified by two categorical variables.
+- The implementation shown here focuses on two-way tables and provides helpers for 2x2 and general r x c cases via the same interface.
+- If you need explicit 2x2-specific methods or stratified table handling, you may look for additional classes (e.g., SquareTable, Table2x2, StratifiedTable) as part of the broader package, though the provided snippet centers on Table and testing utilities.
+- The internal _make_df_square helper standardizes DataFrame inputs to square form by uniting the union of row and column indices and reindexing accordingly.
+
+API references
+-------------
+- _make_df_square(table): internal utility for ensuring square DataFrames
+- _Bunch: lightweight container for test results
+- Table
+  - __init__(table, shift_zeros=True)
+  - from_data(data, shift_zeros=True)
+  - test_nominal_association()
+  - test_ordinal_association(row_scores=None, col_scores=None)
+
+Dependencies
+------------
+- numpy
+- scipy (scipy.stats)
+- pandas
+
+References
+----------
+- chi-squared tests for independence
+- Cochran-Armitage trend test (for ordinal association in the default scoring)
+- See Also: scipy.stats.chi2_contingency for a related, conventional approach to contingency table analysis
+
+Notes for developers
+--------------------
+- If you extend this module with SquareTable, Table2x2, or StratifiedTable, maintain consistent return types (e.g., _Bunch) for test results to simplify downstream usage.
+- Consider adding input validation tests (e.g., non-numeric table entries, non-rectangular inputs) and documenting behavior for unusual shapes.
+- Ensure that zero-handling semantics (shift_zeros) align with downstream statistical assumptions across all tests.

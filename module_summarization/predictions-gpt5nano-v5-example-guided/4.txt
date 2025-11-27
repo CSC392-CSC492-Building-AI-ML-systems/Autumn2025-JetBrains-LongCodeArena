@@ -1,0 +1,138 @@
+Sync users with LDAP
+====================
+
+Overview
+--------
+This documentation describes how the ftrack API client can be used in the context of synchronising users from LDAP to ftrack. The core components involved are responsible for authenticating to an ftrack server and establishing a session that can be used to perform server-side operations (including potential LDAP-driven user synchronization on the server). The key building blocks are:
+
+- SessionAuthentication: attaches ftrack session credentials to HTTP requests.
+- Session: an isolated client session for interacting with an ftrack server, with support for environment-based defaults, caching, plugin loading, and event hub connectivity.
+
+Key Components
+--------------
+
+- SessionAuthentication
+  - Purpose: Attach ftrack session authentication information to requests.
+  - Constructor: SessionAuthentication(api_key, api_user)
+    - api_key: API key to authenticate with the ftrack server.
+    - api_user: Username in ftrack against which operations are performed.
+  - Behavior: When called with a request, it injects the following headers:
+    - ftrack-api-key
+    - ftrack-user
+  - Usage (conceptual):
+    - Used by HTTP request handling to ensure requests are authenticated against the ftrack server.
+
+  Example (from source):
+  .. code-block:: python
+
+      class SessionAuthentication(requests.auth.AuthBase):
+          def __init__(self, api_key, api_user):
+              self.api_key = api_key
+              self.api_user = api_user
+              super(SessionAuthentication, self).__init__()
+
+          def __call__(self, request):
+              request.headers.update({
+                  'ftrack-api-key': self.api_key,
+                  'ftrack-user': self.api_user
+              })
+              return request
+
+- Session
+  - Purpose: Manage an isolated connection to an ftrack server, including authentication, caching, event hub behavior, and plugin loading.
+  - Constructor:
+    - Session(
+        server_url=None,
+        api_key=None,
+        api_user=None,
+        auto_populate=True,
+        plugin_paths=None,
+        cache=None,
+        cache_key_maker=None,
+        auto_connect_event_hub=None,
+        schema_cache_path=None,
+        plugin_arguments=None
+      )
+  - Required parameters (via arguments or environment fallbacks):
+    - server_url: URL to the ftrack server (including port). If omitted, the FTRACK_SERVER environment variable is used.
+    - api_key: API key for authentication. If omitted, FTRACK_API_KEY or FTRACK_APIKEY environment variables are used.
+    - api_user: ftrack username for operations. If omitted, FTRACK_API_USER is used or the system user (via getpass) may be used as a fallback.
+  - Behavior and features:
+    - Automatically handles environment-based defaults, with explicit errors if required values are not provided.
+    - Maintains a collection of pending operations and supports recording operations.
+    - Provides a pluggable cache system (with a default top-level in-memory cache).
+    - Supports automatic or manual connection of an embedded event hub for publishing/subscribing to events.
+    - Supports optional schema caching to improve startup performance.
+  - Example (conceptual usage):
+  .. code-block:: python
+
+      import ftrack_api
+
+      session = ftrack_api.Session(
+          server_url='https://ftrack.example.com',
+          api_key='YOUR_API_KEY',
+          api_user='your_username'
+      )
+
+  - Environment variable fallbacks (as implemented):
+    - server_url -> FTRACK_SERVER (or raise error if not provided)
+    - api_key -> FTRACK_API_KEY or FTRACK_APIKEY
+    - api_user -> FTRACK_API_USER or fallback to system user via getpass
+
+  - Notes:
+    - If a required value is missing, a TypeError is raised with guidance on how to supply it.
+    - The session supports optional features (auto_populate, caching, event hub behavior) that can be configured to suit LDAP-sync workflows.
+
+Usage
+-----
+
+How LDAP-driven user synchronization can leverage this module:
+
+- Establish a session to the ftrack server using server_url, api_key, and api_user. This session can then be used to run server-side operations that manage users, including LDAP-synchronization tasks implemented on the server or via plugins.
+
+- Authenticate HTTP requests with SessionAuthentication so that all requests carry the necessary ftrack credentials.
+
+  Example (creating a session and performing a request context):
+  .. code-block:: python
+
+      import ftrack_api
+
+      # Create a session (credentials can also be sourced from environment variables)
+      session = ftrack_api.Session(
+          server_url='https://ftrack.example.com',
+          api_key='YOUR_API_KEY',
+          api_user='your_username'
+      )
+
+      # Example: obtain an entity or perform operations using the session
+      # (Actual LDAP sync logic would be implemented server-side or via plugins)
+
+Details
+-------
+
+- Authentication model
+  - The client layer uses SessionAuthentication to attach the API key and user to requests.
+  - This enables secure communication with the ftrack server for actions such as user management, which may be invoked as part of LDAP synchronization workflows.
+
+- Session behavior
+  - Automatic population (auto_populate) allows lazy loading of entity attributes from the server when accessed.
+  - Caching layers reduce repeated server calls and improve performance during LDAP synchronization tasks.
+  - Event hub support enables non-local event publishing/subscribing when needed for integration workflows.
+
+- Configuration and environment
+  - Values can be supplied programmatically or via environment variables (FTRACK_SERVER, FTRACK_API_KEY, FTRACK_API_USER).
+  - Schema caching can be enabled by setting schema_cache_path to a folder, or disabled by setting it to False.
+
+- Error handling
+  - Missing required credentials raise TypeError with guidance on how to supply them.
+
+Notes
+-----
+- This document describes client-side components. LDAP synchronization, if implemented, would typically be orchestrated server-side (potentially via plugins) that the Session can interact with using authenticated requests.
+- The provided code excerpt focuses on session creation and request authentication rather than LDAP-specific logic.
+
+See Also
+--------
+- ftrack_api.Session for establishing authenticated sessions
+- ftrack_api.SessionAuthentication for request credential handling
+

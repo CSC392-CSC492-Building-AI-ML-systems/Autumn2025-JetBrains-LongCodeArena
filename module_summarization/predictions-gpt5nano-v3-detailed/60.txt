@@ -1,0 +1,159 @@
+Collection API
+==============
+
+Introduction
+------------
+This module provides the infrastructure SQLAlchemy ORM uses to observe and relay
+changes to collections of mapped entities. By instrumenting collection classes
+with decorators, arbitrary Python types (including built-ins) can participate in
+ORM-managed collections without requiring inheritance from a specific base class.
+
+The instrumentation notifies the ORM about membership changes, enabling features
+such as cascade operations, persistence, and relationship tracking. The system
+supports two complementary approaches for instrumentation:
+- Annotating decorators that mark existing methods as collection mutation points.
+- Targeted, hand-tuned decorators that wrap common mutation interfaces (list, set,
+  and dict style) for efficient, ORM-friendly event emission.
+
+Key concepts
+------------
+- Instrumentation by decoration: Methods in user collection classes are decorated
+  to emit append/remove events to the ORM's current collection adapter.
+- Two decorator families:
+  - Annotation decorators (e.g., appender, remover, iterator, converter, internally_instrumented)
+    indicate the method’s role and require no arguments.
+  - Recipe decorators (e.g., adds, removes_return)
+    require parens and model how inputs/outputs map to collection mutation events.
+- Collection classes can be supplied to relationships via collection_class=.
+  The ORM may instrument the collection class at mapper compilation time.
+- Built-in types: If a built-in type is used as the base, a trivial subclass is
+  substituted to host decoration logic.
+- Bulk operations: Decorators may map bulk methods (extend, update, etc.) into a
+  series of atomic append/remove events to align with ORM expectations.
+- Internal adapter access: collection_adapter and related APIs allow advanced
+  users to control or observe event firing, including exception management.
+
+API surface
+------------
+- collection: A namespace and classifier for the decoration system. It provides:
+  - Annotation decorators: appender, remover, iterator, converter, internally_instrumented
+  - Recipe decorators: adds, removes_return, and related helpers (when applicable)
+  These enable labeling and wrapping of methods that participate in collection mutation.
+- collection_adapter: Internal helper used by instrumented collections to communicate
+  with the owning object and the ORM’s collection implementation.
+- MappedCollection: A generic collection mapping helper used for keyed collections.
+- KeyFuncDict: Type alias representing a mapping of keys to functions for key extraction.
+- attribute_keyed_dict, column_keyed_dict: Internal dictionary types used by
+  keyed collection implementations.
+- __instrumentation_mutex: Thread-safety primitive guarding instrumentation-time
+  mutations to the collection’s surface.
+
+Usage examples
+--------------
+
+Example 1: Annotating mutation methods with recipe decorators
+This demonstrates how to map a pair of mutation methods to the ORM’s event model
+without altering their primary Python semantics.
+
+.. code-block:: python
+
+    from sqlalchemy.orm.collections import collection
+
+    class MyCollection:
+        def __init__(self):
+            self._items = []
+
+        @collection.appender
+        def append_item(self, item):
+            # Underlying mutation
+            self._items.append(item)
+
+        @collection.removes_return()
+        def pop_item(self):
+            return self._items.pop()
+
+Example 2: Using recipe decorators with explicit mapping
+The adds/removes_return decorators are applied to methods that perform mutations,
+and the decorator logic translates arguments and return values into collection
+events consumed by the ORM.
+
+.. code-block:: python
+
+    from sqlalchemy.orm.collections import collection
+
+    class MyIndexedCollection:
+        def __init__(self):
+            self._items = []
+
+        @collection.adds('entity')
+        def insert(self, index, entity):
+            self._items.insert(index, entity)
+
+        @collection.removes_return()
+        def extract(self):
+            return self._items.pop(0)
+
+Example 3: Instrumenting a built-in-like collection via a subclass
+For built-in types like list, a trivial instrumented subclass is created to host
+decorations. Subclassing existing types is preferred to avoid duplicating
+instrumentation logic.
+
+.. code-block:: python
+
+    class InstrumentedList(list):
+        pass
+
+    # The ORM can instrument InstrumentedList (or a subclass) without re-wiring
+    # the underlying Python list methods.
+
+Example 4: Using collection_class in relationships
+When defining ORM relationships, you can specify a collection_class that will be
+instrumented at mapper compilation time. The callable will be executed to obtain
+a specimen, and its type will be instrumented.
+
+.. code-block:: python
+
+    from sqlalchemy.orm import relationship
+    from sqlalchemy.ext.declarative import declarative_base
+    Base = declarative_base()
+
+    class Parent(Base):
+        __tablename__ = 'parents'
+        id = Column(Integer, primary_key=True)
+
+        # The ORM will instrument the specified collection class
+        children = relationship("Child", collection_class=InstrumentedList)
+
+    class Child(Base):
+        __tablename__ = 'children'
+        id = Column(Integer, primary_key=True)
+        parent_id = Column(Integer, ForeignKey('parents.id'))
+
+Notes and considerations
+------------------------
+- Instrumentation is applied at mapper compile time. If you supply a collection_class
+  function, it will be invoked once to obtain a specimen whose type is then instrumented.
+- For built-in collection types, the instrumentation path substitutes a trivial subclass to host
+  decorations, avoiding direct mutation of built-ins.
+- To prevent duplicate events, avoid decorating methods that already perform instrumented mutations
+  (e.g., methods that call pre-instrumented APIs). The targeted decoration strategy is designed to
+  minimize such duplication.
+- Bulk operations may be re-expressed in terms of atomic per-item events to align with ORM
+  change-tracking semantics. If you need to coordinate transactions or exception handling manually,
+  internal instrumentation via collection_adapter is available.
+
+Internal mechanics (high-level)
+------------------------------
+- A mutex guards instrumentation to avoid races during runtime decoration of classes.
+- The instrumentation process may enhance methods, add bookkeeping properties, and
+  wrap interfaces for compatibility with the ORM’s change-tracking expectations.
+- The owning object and the collection’s ORM-facing adapter are accessible to enable
+  advanced scenarios and custom behavior.
+
+See also
+--------
+- SQLAlchemy ORM — Working with collections: related documentation on collection
+  instrumentation and relationship collection classes.
+- The collection-related helpers and types exported by this module:
+  collection_adapter, MappedCollection, KeyFuncDict, attribute_keyed_dict, column_keyed_dict.
+

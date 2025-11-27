@@ -1,0 +1,175 @@
+# Pairwise Metrics, Affinities and Kernels
+
+This section describes the pairwise computation utilities used to measure distances, similarities (affinities), and kernel values between samples. It covers the core validation and data handling used by the pairwise metrics implementation, along with guidance for developers extending or using these utilities.
+
+## Overview
+
+- Pairwise metrics compute a relationship between samples, either as a distance (dissimilarity), an affinity (similarity), or a kernel value.
+- Distances are typically non-negative and satisfy the triangle inequality depending on the metric.
+- Affinities are usually bounded (e.g., between 0 and 1) and tend to be inversely related to distances.
+- Kernels are functions that map pairs of samples to a similarity measure and often satisfy symmetry and positive semi-definiteness (PSD) properties when used in kernel methods.
+
+Developer-oriented note: The internal utilities described here provide robust input validation, dtype handling, and support for dense and sparse inputs. They are used by user-facing functions such as pairwise_distances, pairwise_kernels, and related affinity computations.
+
+---
+
+## Core Validation and Data Handling
+
+Important helper functions ensure inputs are well-formed before computation. They are intended to be used by all pairwise metric implementations.
+
+### _return_float_dtype(X, Y)
+
+- Purpose: Decide the appropriate floating dtype for pairwise computations.
+- Behavior:
+  - If both X and Y are float32, returns float32 as the target dtype.
+  - Otherwise returns a default real (floating) dtype (i.e., float).
+  - If Y is None, Y_dtype is X.dtype; otherwise Y_dtype is inferred from Y.
+- Input handling: Converts non-array-like inputs to numpy arrays when necessary.
+- Return: A tuple (X, Y, dtype) where X and Y may be coerced to numpy arrays and dtype is the chosen floating type.
+
+Usage pattern:
+- Used to determine a safe, consistent dtype before coercing inputs to arrays.
+
+### check_pairwise_arrays(X, Y, *, precomputed=False, dtype=None, accept_sparse="csr", force_all_finite=True, copy=False)
+
+- Purpose: Normalize and validate inputs for pairwise computations.
+- Behavior:
+  - Determines dtype via _return_float_dtype and coerces X (and Y if provided) to arrays using check_array.
+  - If Y is X or Y is None, both X and Y reference the same array (no copy). Otherwise, X and Y are validated separately.
+  - If precomputed is True, validates that X is a square distance matrix with compatible shapes to Y (X.shape[0] is the number of queries, X.shape[1] should match Y.shape[0]).
+  - If precomputed is False, requires X.shape[1] == Y.shape[1] (same number of features).
+  - Enforces force_all_finite to control handling of NaN/inf, with support for the string option 'allow-nan' in newer versions.
+  - accept_sparse controls whether sparse inputs are accepted and in which formats (e.g., 'csr', 'csc'). If True, any sparse format is allowed. If a string (or list of strings), inputs may be converted to the first allowed format.
+  - copy controls whether a copy is forced during conversion.
+- Returns:
+  - safe_X: Dense array representation (or sparse, depending on input and checks) of X.
+  - safe_Y: Dense array representation of Y; if Y was None, this is a reference to X.
+- Notes:
+  - This function ensures inputs are safe to use for distance-like computations, focusing on numeric types and shape compatibility.
+
+Usage example (conceptual):
+- X, Y = check_pairwise_arrays(X, Y, precomputed=False, dtype=None, accept_sparse='csr', force_all_finite=True)
+
+### check_paired_arrays(X, Y)
+
+- Purpose: Validate inputs for “paired” distances (where a consistent, paired interpretation is required between X and Y).
+- Behavior: Similar to check_pairwise_arrays but tailored for paired-distance metrics. Ensures inputs are arrays and have compatible shapes for pairwise operations.
+- This helper is intended for metrics that operate on paired data structures or require a one-to-one correspondence between samples in X and samples in Y.
+
+---
+
+## Input Formats and Options
+
+- Dense vs Sparse:
+  - The utilities support both dense NumPy arrays and SciPy sparse matrices.
+  - The accept_sparse option lets you restrict formats (e.g., 'csr', 'csc') or allow any format (True) or disallow sparse inputs (False).
+- Data types:
+  - Uses _return_float_dtype to pick a suitable floating dtype (float32 when both inputs are float32; otherwise float).
+  - Ensures downstream computations operate in a consistent numeric type.
+- Precomputation:
+  - When precomputed distance matrices are supplied, shapes must align with the expected interpretation:
+    - For a distance/similarity matrix, X.shape[1] must equal Y.shape[0] (if X is the distance matrix to Y’s samples).
+    - If not using precomputation, X and Y must have the same number of features (X.shape[1] == Y.shape[1]).
+- Finite values:
+  - force_all_finite controls handling of NaN and Inf. The 'allow-nan' option allows NaN but prohibits Inf.
+
+---
+
+## Workflows and Examples
+
+Below are representative usage patterns to guide developers and users.
+
+### Example: Distances with default behavior
+
+- Compute pairwise Euclidean distances between samples in X (Y=None).
+
+Code sketch:
+- from sklearn.metrics import pairwise_distances
+- D = pairwise_distances(X, Y=None, metric='euclidean')
+
+Notes:
+- Internally, check_pairwise_arrays validates X (and Y if provided). Y is treated as X when Y is None.
+
+### Example: Pairwise kernel (RBF)
+
+- Compute an RBF (Gaussian) kernel between samples in X.
+
+Code sketch:
+- from sklearn.metrics.pairwise import pairwise_kernels
+- K = pairwise_kernels(X, Y=None, metric='rbf', gamma=0.5)
+
+Notes:
+- The kernel function maps sample pairs to a similarity score. Internals ensure X and Y are valid, possibly converting to dense arrays and checking shapes.
+
+### Example: Using a precomputed distance matrix
+
+- If you already have a distance matrix D (n_queries by n_indexed), set precomputed=True.
+
+Code sketch:
+- D = some_precomputed_matrix  # shape (n_queries, n_indexed)
+- X, Y = check_pairwise_arrays(D, D, precomputed=True, dtype=None, accept_sparse=False)
+
+Notes:
+- The shape validation enforces D.shape[0] == D.shape[1] for a square matrix if appropriate to the metric interpretation, and that the second dimension matches the first dimension when aligning with Y.
+
+### Example: Handling sparse inputs
+
+- Compute pairwise distances between sparse feature matrices A and B, allowing a particular sparse format.
+
+Code sketch:
+- A, B = sparse_matrices  # e.g., CSR format
+- D = pairwise_distances(A, B, metric='cosine', accept_sparse='csr')
+
+Notes:
+- If inputs are sparse but not in an allowed format, they will be converted to the first allowed format in the accept_sparse list.
+
+### Example: NaN and Inf handling
+
+- Use force_all_finite='allow-nan' to permit NaN values but reject Infs.
+
+Code sketch:
+- X = np.array([[0, np.nan], [1, 2]])
+- D = pairwise_distances(X, Y=None, metric='euclidean', force_all_finite='allow-nan')
+
+Notes:
+- NaNs will be carried as NaNs in the result as appropriate; Infs are disallowed under this setting.
+
+---
+
+## API Reference (Developer-Facing)
+
+- _return_float_dtype(X, Y)
+  - Determines the appropriate floating dtype for pairwise computations and coerces inputs as needed.
+
+- check_pairwise_arrays(X, Y, precomputed=False, dtype=None, accept_sparse="csr", force_all_finite=True, copy=False)
+  - Validates and standardizes inputs for pairwise computations.
+  - Handles Y=None (Y points to X) and precomputed distance matrices.
+  - Ensures shape compatibility and finite values according to options.
+
+- check_paired_arrays(X, Y)
+  - Validates inputs for paired-distance metrics.
+  - Ensures arrays and compatible shapes for paired computations.
+
+---
+
+## Design Considerations
+
+- Consistency: All pairwise computations share the same validation and dtype handling path to ensure numerical consistency and predictable behavior across metrics.
+- Safety: Support for finite checks and conversion of inputs (including sparse inputs) minimizes runtime errors and undefined behavior.
+- Extensibility: New pairwise metrics (distances, affinities, or kernels) should use the same entry points (check_pairwise_arrays/check_paired_arrays) to benefit from established validation and precomputation handling.
+
+---
+
+## See Also
+
+- pairwise_distances, pairwise_kernels, pairwise_metrics (modules/functions that perform actual computations and rely on these validation utilities)
+- ArgKmin and related fast-path reductions for special-case distance computation
+- _chi2_kernel_fast and _sparse_manhattan for optimized kernel/metric implementations
+
+If you are implementing a new pairwise metric, follow the patterns in check_pairwise_arrays and ensure you correctly handle:
+- Dense vs sparse inputs
+- Precomputed vs non-precomputed paths
+- Finite value handling
+- Consistent dtype selection
+
+This will keep your metric interoperable with the existing suite of pairwise utilities.

@@ -1,0 +1,129 @@
+# Permutation feature importance
+
+Permutation feature importance estimates how much each feature contributes to a model’s predictive performance. By randomly shuffling the values of a single feature and measuring the drop in the model score, you quantify how essential that feature is for making accurate predictions. Features whose permutation causes a larger drop are considered more important.
+
+Key ideas
+- Score-based: uses a chosen scorer (e.g., accuracy, F1, neg log loss, R^2, etc.). The score is computed on a baseline (no permutation) and after permuting each feature.
+- Model-agnostic: works with any estimator that implements fit/predict and a compatible scoring function.
+- Robustness: n_repeats controls variability of the importance estimate; higher repeats yield more stable results but require more compute.
+- Comparability: scores are relative to the chosen scorer; results depend on the data split and random state.
+- Multi-metric support: can be used with single or multiple scoring metrics.
+
+Algorithm overview
+1. Compute the baseline score of the estimator on (X, y) (or on a provided validation set).
+2. For each feature (column):
+   - Permute (shuffle) the feature’s values across samples.
+   - Recompute the score with the permuted data.
+   - Repeat for n_repeats times and aggregate (mean/std) the score drops.
+3. Compute importances as the drop: baseline_score − permuted_score.
+4. Return a Bunch with:
+   - importances_mean: mean drop per feature
+   - importances_std: std dev of the drop per feature
+   - importances: raw drops for each repeat per feature
+
+API
+- permutation_importance(
+    estimator,
+    X,
+    y,
+    scoring=None,
+    n_repeats=5,
+    n_jobs=None,
+    random_state=None,
+    sample_weight=None,
+    max_samples=None
+  )
+  - estimator: fitted estimator with a fit method.
+  - X: array-like of shape (n_samples, n_features).
+  - y: array-like or None.
+  - scoring: scorer name, callable, or list/tuple/dict of scorers. If None, uses the estimator’s default scorer.
+  - n_repeats: number of permutation repeats per feature (>= 1).
+  - n_jobs: number of parallel jobs (None means using default parallelism).
+  - random_state: seed or RandomState for reproducibility.
+  - sample_weight: optional sample weights.
+  - max_samples: int or float in [0,1] for sub-sampling the dataset before permutation (helps with memory/time constraints).
+  - Returns: Bunch with
+    - importances_mean: shape (n_features,)
+    - importances_std: shape (n_features,)
+    - importances: shape (n_features, n_repeats)
+
+Notes on feature names
+- If you supply X as a Pandas DataFrame, feature names are taken from X.columns.
+- If you supply a NumPy array, feature names default to ["x0", "x1", ...].
+- You can provide custom feature_names via your input (consistent with how _check_feature_names resolves names).
+
+Examples
+1) Classification with a hold-out set
+- Dataset: Breast cancer
+- Model: RandomForestClassifier
+- Scoring: default accuracy
+- Settings: n_repeats=30, random_state=0
+
+```python
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.inspection import permutation_importance
+
+X, y = load_breast_cancer(return_X_y=True)
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=0, stratify=y)
+
+clf = RandomForestClassifier(n_estimators=100, random_state=0, n_jobs=-1)
+clf.fit(X_train, y_train)
+
+result = permutation_importance(
+    clf, X_val, y_val, n_repeats=30, random_state=0, n_jobs=-1
+)
+
+print("Mean importances:", result.importances_mean)
+```
+
+Interpretation
+- Sort features by result.importances_mean to identify the most influential features.
+- Consider result.importances_std for uncertainty; large std implies variability across repeats.
+
+2) DataFrame input with explicit feature names
+```python
+import pandas as pd
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.inspection import permutation_importance
+
+data = load_breast_cancer()
+X_df = pd.DataFrame(data.data, columns=data.feature_names)
+y = data.target
+
+X_train, X_val, y_train, y_val = train_test_split(X_df, y, test_size=0.2, random_state=0, stratify=y)
+
+clf = RandomForestClassifier(n_estimators=200, random_state=0, n_jobs=-1)
+clf.fit(X_train, y_train)
+
+result = permutation_importance(
+    clf, X_val, y_val, n_repeats=20, random_state=0, n_jobs=-1
+)
+
+# Feature ranking
+indices = result.importances_mean.argsort()[::-1]
+for i in indices[:5]:
+    print(f"{X_df.columns[i]}: {result.importances_mean[i]:.4f} ± {result.importances_std[i]:.4f}")
+```
+
+Practical considerations
+- Choice of scorer: The interpretation of importance depends on the scoring metric. A higher drop indicates greater importance for the chosen metric.
+- Feature correlation: Permutation importance can be biased when features are correlated; correlated features may share predictive power, causing underestimation of individual importance.
+- Sub-sampling (max_samples): Use max_samples to reduce computation on large datasets. Permutation importance can be computed on a subset to approximate results with less cost.
+- Reproducibility: Set random_state to obtain consistent results across runs.
+- Parallelism: Use n_jobs to speed up computation on multi-core machines.
+- Multi-metric scoring: When using multiple scorers, results may reflect per-metric behavior; ensure you interpret the correct metric for your task.
+
+Implementation notes (relevant for developers)
+- The computation uses a per-feature permutation loop with _calculate_permutation_scores, ensuring thread-safety by operating on a copy of X.
+- _weights_scorer handles optional sample_weight when computing scores.
+- The function supports both single and multi-metric scoring paths; it aggregates per-run scores with _aggregate_score_dicts when needed.
+- Feature name handling is performed via _check_feature_names to support both DataFrame columns and array-based inputs.
+- The final results are provided in a Bunch with importances_mean, importances_std, and importances (per-feature, per-repeat scores).
+
+For further customization
+- You can implement a custom scorer and pass it via scoring to tailor importance to your domain.
+- Combine permutation_importance with cross-validation to obtain more robust estimates across folds.

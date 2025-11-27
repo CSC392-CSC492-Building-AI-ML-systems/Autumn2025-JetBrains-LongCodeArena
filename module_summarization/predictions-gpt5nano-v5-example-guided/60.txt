@@ -1,0 +1,107 @@
+# Generate documentation for this module
+
+## Overview
+This module provides support for collections of mapped entities within the SQLAlchemy ORM. It implements the machinery that informs the ORM of collection membership changes using runtime instrumentation via decorators. Two decorator families are provided:
+
+- Annotating decorators: identify the purpose of a method (e.g., appender, remover, iterator, converter) by tagging it. They are used without parentheses, e.g. `@collection.appender`.
+- Recipe decorators: provide parameterized decoration that maps function arguments and return values to collection events, e.g. `@collection.adds(...)`, `@collection.removes_return()`.
+
+The instrumentation system can work with arbitrary collection types (including built-ins) by transforming them at runtime, enabling ORM-aware mutation tracking without requiring a specific base class.
+
+Key capabilities include:
+- Automatic instrumentation of collection classes declared via `relationship(collection_class=)` (types or factory callables).
+- A two-phase process for instrumenting known types (subclass built-ins when necessary, then apply generic and targeted decorations).
+- Bulk operation handling that translates bulk mutations into atomic add/remove events when possible.
+- Internal instrumentation control via `collection_adapter(self)` for explicit event management and interaction with the owning state and `CollectionAttributeImpl`.
+
+Code examples in this module show how to decorate methods to emit ORM events during collection mutation.
+
+## Key Components
+- collection: Primary decorator class that groups two families of decorators:
+  - Annotating decorators: `appender`, `remover`, `iterator`, `converter`, `internally_instrumented` (used without parentheses).
+  - Recipe decorators: `adds(...)`, `removes(...)`, `removes_return()`, and other helpers that require parentheses.
+  The class docstring explains the dual approach to instrumentation and the general transformation process for instrumenting collection classes.
+
+- _instrumentation_mutex: A module-level threading lock to serialize instrumentation-related changes.
+
+- _CollectionFactoryType: A type alias for a callable that produces a specimen collection instance.
+
+- Type variables: `_T`, `_KT`, `_VT`, `_COL`, `_FN` used for typing throughout the module.
+
+- Protocols:
+  - _AdaptedCollectionProtocol: Defines the protocol for adapted collection wrappers, including attributes like `_sa_adapter`, `_sa_appender`, `_sa_remover`, `_sa_iterator`, and `_sa_converter`.
+  - _CollectionConverterProtocol: Protocol for a converter that maps a collection to a possibly transformed collection.
+
+- Exports (__all__):
+  - `collection`, `collection_adapter`, `keyfunc_mapping`, `column_keyed_dict`, `attribute_keyed_dict`, `MappedCollection`, and related type aliases like `KeyFuncDict`.
+
+- TYPE_CHECKING block: Provides forward declarations for typing purposes (e.g., `AttributeEventToken`, `CollectionAttributeImpl`, and related modules).
+
+Useful example from the module:
+```python
+from sqlalchemy.orm.collections import collection
+
+class MyClass:
+    # ...
+
+    @collection.adds(1)
+    def store(self, item):
+        self.data.append(item)
+
+    @collection.removes_return()
+    def pop(self):
+        return self.data.pop()
+```
+
+## Usage
+- Instrumentation of collection classes:
+  - A collection_class can be a type or a function that returns an instance. During mapper compilation, the callable is invoked to obtain a specimen, and the type of that specimen is instrumented. If the specimen is a built-in (e.g., a list), a trivial subclass may be substituted to enable decoration.
+
+- Example of a typical instrumentation flow:
+  - If the class is a built-in, substitute a trivial subclass.
+  - Instrument only if not already instrumented.
+  - Add generic decorators.
+  - Detect collection interface via duck-typing.
+  - Add targeted decoration to any undecorated interface method.
+
+- Extending known types (like a subclass of `list`) often requires no extra decoration, because `append` and `pop` are already instrumented in the parent class. Decorating these again could emit duplicate events and should be avoided.
+
+- Bulk operations:
+  - The targeted decorators may implement adapter-like behavior (e.g., mapping bulk-set methods such as `extend`, `update`, or `__setslice__`) into the sequence of atomic mutation events the ORM expects.
+
+- Internal instrumentation and control:
+  - If you need precise control over triggering append/remove events (e.g., to manage exceptions), you can use `collection_adapter(self)` inside your method to obtain a tool for explicit event control while still having access to the owning object and the `CollectionAttributeImpl`.
+
+- Relationship integration:
+  - Collections can be associated with relationships via `relationship(collection_class=)`. The instrumented class will be used for collection management within the ORM.
+
+Code reference showing the complement of features:
+```python
+# The collection decorator exposes two usage styles:
+@collection.appender
+def append(self, item): ...
+
+@collection.adds('entity')
+def insert(self, position, entity): ...
+
+# Build-time instrumentation details are driven by mapper compilation.
+```
+
+## Details
+- Instrumentation philosophy:
+  - The system is designed to work with arbitrary collection types by decorating methods and providing a consistent event model (append/remove).
+  - Built-in types are treated specially by substituting a trivial subclass to enable decoration, since decorating built-ins directly is not generally feasible.
+
+- Method decoration strategy:
+  - Generic decorators provide mapping from function arguments and return values to ORM events.
+  - Targeted decorators are optimized for common Python collection interfaces (list, set, dict) and may translate bulk mutations into a sequence of atomic operations.
+
+- Read/write dependencies:
+  - Some decorations depend on read access methods to determine whether a mutation is a write operation. If these are missing, additional plumbing may be required.
+
+- Internal tooling:
+  - The module defines protocols and type aliases that enable strong typing and interoperability with the rest of the ORM’s instrumentation stack.
+
+- The module is designed to be part of the ORM’s collection management system, with integration points such as `collection_adapter` and `MappedCollection`, and support types like `KeyFuncDict`, `column_keyed_dict`, and `attribute_keyed_dict`.
+
+This documentation captures the high-level purpose, core components, usage patterns, and key design decisions behind the collection instrumentation API as implemented in this module.

@@ -1,0 +1,152 @@
+Imputation of Missing Values (impute.rst)
+=========================================
+
+Overview
+--------
+This module provides utilities for imputing (filling in) missing values in arrays or tabular data. The primary user-facing class is SimpleImputer, which fills missing values using simple per-feature strategies. The implementation also supports optional construction of a missing-value indicator that is appended to the imputed data.
+
+Key concepts
+------------
+- Missing values placeholder: missing_values specifies what is treated as “missing” in the data (default is np.nan). The code allows pandas' nullable missing value pd.NA to be used with numeric data.
+- Per-feature imputation: Imputation is performed independently for each feature (column).
+- Strategies:
+  - mean: replace missing values with the mean of the column (numeric data only)
+  - median: replace missing values with the median of the column (numeric data only)
+  - most_frequent: replace missing values with the most frequent value in the column
+  - constant: replace missing values with a user-provided fill_value
+- Data type validation: When missing_values is numeric (i.e., not a pandas NA placeholder), X must be numeric. This helps ensure consistent numerical imputation behavior.
+- Indicator matrix (optional): When add_indicator is True, a MissingIndicator is fitted and transformed to produce a binary indicator for missing values, which is then concatenated to the imputed data.
+- Feature name handling: If an indicator is added, feature names are extended to include indicator feature names.
+
+Core classes and helpers
+------------------------
+- _BaseImputer
+  - Base class for imputers with support for an optional missing-value indicator.
+  - Parameters:
+    - missing_values: value used to represent missing data (default np.nan)
+    - add_indicator: whether to append a missing-value indicator to the transformed data
+    - keep_empty_features: whether to keep features that contain only missing values
+  - Internal methods:
+    - _fit_indicator(X): Fit a MissingIndicator if add_indicator is True.
+    - _transform_indicator(X): Compute the indicator mask for X (original data).
+    - _concatenate_indicator(X_imputed, X_indicator): Concatenate the imputed data with the indicator mask.
+    - _concatenate_indicator_feature_names_out(names, input_features): Extend feature names when an indicator is added.
+- _check_inputs_dtype(X, missing_values)
+  - Validates the compatibility between X's dtype and missing_values.
+  - If missing_values is a pandas NA, numeric dtype checks are bypassed to allow pd.NA with numeric arrays.
+  - Otherwise, ensures X.dtype is numeric when missing_values is numeric.
+- _most_frequent(array, extra_value, n_repeat)
+  - Computes the most frequent value in a 1D array, extended with [extra_value] repeated n_repeat times.
+  - Handles object-dtype arrays efficiently using Counter; for non-object dtypes, uses the internal _mode routine.
+  - Tie-breaking rules mirror scipy.stats.mode behavior:
+    - If the array is empty, or the most frequent count is zero, NaN or a provided tie-break rule applies.
+    - When counts are equal, returns the smaller of the most_frequent_value and extra_value.
+
+SimpleImputer
+-------------
+Univariate imputer for completing missing values with simple strategies. It fills missing values along each column using a per-feature statistic or a constant value.
+
+References
+----------
+- User Guide: Imputation (impute)
+- Version history: Introduced in 0.20 as a successor to the deprecated Imputer
+
+Parameters
+----------
+missing_values : int, float, str, np.nan, None or pandas.NA, default=np.nan
+    Placeholder for the missing values. All occurrences of missing_values will be imputed.
+    For pandas dataframes with nullable integer dtypes, missing_values can be np.nan or pd.NA.
+
+strategy : {'mean', 'median', 'most_frequent', 'constant'}, default='mean'
+    Imputation strategy used to fill in missing values.
+
+    - 'mean': Replace missing values with the mean of each column (numeric data only).
+    - 'median': Replace missing values with the median of each column (numeric data only).
+    - 'most_frequent': Replace missing values with the most frequent value in each column.
+      Can be used with strings or numeric data.
+      If there is more than one such value, the smallest is returned.
+    - 'constant': Replace missing values with fill_value.
+
+fill_value : str or numeric, default=None
+    Value used to fill missing values when strategy='constant'. If None, defaults to 0 for numeric data
+    and 'missing_value' for strings/object data.
+
+copy : bool, default=True
+    If True, a copy of X is created. If False, imputation may be performed in-place when possible.
+
+add_indicator : bool, default=False
+    If True, a MissingIndicator is learned and used to append a binary indicator matrix
+    that denotes which samples had missing values in each feature.
+
+keep_empty_features : bool, default=False
+    If True, features that contain only missing values are kept in the transformed data.
+
+Attributes
+----------
+indicator_ : MissingIndicator instance (if add_indicator is True)
+    Fitted indicator that is used to create the appended missing-value indicator features.
+
+Notes on internals
+---------------
+- The imputer performs per-feature imputation with the selected strategy.
+- The internal checks ensure consistent behavior with respect to missing values, dtype, and indicator handling.
+- The indicator is appended to the transformed data when add_indicator is True, and feature names are updated accordingly via _concatenate_indicator_feature_names_out.
+
+Usage examples
+--------------
+Basic numeric imputation with mean:
+.. code-block:: python
+
+   from sklearn.impute import SimpleImputer
+   import numpy as np
+
+   X = np.array([[1.0, 2.0], [np.nan, 3.0], [7.0, 6.0]])
+   imp = SimpleImputer(strategy='mean')
+   X_imputed = imp.fit_transform(X)
+   # X_imputed == [[1.0, 2.0], [4.0, 3.0], [7.0, 6.0]] (column means replaced)
+
+Imputing with the most frequent value (works for numeric and string/object data):
+.. code-block:: python
+
+   X = np.array([[1, 2, 2], [1, np.nan, 3], [np.nan, 2, 3]])
+   imp = SimpleImputer(strategy='most_frequent')
+   X_imputed = imp.fit_transform(X)
+
+Constant imputation:
+.. code-block:: python
+
+   X = [[1, None], [3, 4]]
+   imp = SimpleImputer(strategy='constant', fill_value=0)
+   X_imputed = imp.fit_transform(X)
+
+Using a pandas DataFrame with nullable types:
+.. code-block:: python
+
+   import pandas as pd
+   df = pd.DataFrame({'a': pd.Series([1, None, 3], dtype='Int64'),
+                      'b': pd.Series(['x', None, 'y'], dtype='object')})
+   imp = SimpleImputer(strategy='mean', missing_values=pd.NA)
+   X_imputed = imp.fit_transform(df)
+
+Indicator features (optional):
+.. code-block:: python
+
+   imp = SimpleImputer(strategy='mean', add_indicator=True)
+   X_with_indicators = imp.fit_transform(X)
+   # The result includes original imputed features plus binary indicator features
+   # indicating where values were missing.
+
+Advanced notes
+--------------
+- The internal _check_inputs_dtype function ensures compatibility between the input data type and the missing_values parameter when missing_values is numeric.
+- The _most_frequent helper provides a robust mechanism for determining the most frequent value, including proper tie-breaking semantics that align with common statistical mode behavior.
+- The _BaseImputer class centralizes the management of the optional missing-value indicator, reducing duplication across different imputers.
+
+See also
+--------
+- sklearn.impute.MissingIndicator for details on the indicator feature construction
+- impute User Guide: Imputation
+
+Version
+-------
+Imputation support introduced in scikit-learn 0.20 (SimpleImputer as a replacement for the older Imputer).

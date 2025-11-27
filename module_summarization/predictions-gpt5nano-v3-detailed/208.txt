@@ -1,0 +1,201 @@
+# Utilities for Developers
+
+Introduction
+------------
+This module provides compatibility shims and helper utilities to maintain cross-version compatibility across Python, NumPy, SciPy, and threadpool control libraries. It centralizes small fixes and wrappers that avoid breaking changes when core dependencies evolve.
+
+Overview of key utilities
+-------------------------
+- Threadpool management: threadpool_limits and threadpool_info, backed by a singleton controller when available.
+- Deferred execution niceties: delayed wrapper to re-export from the recommended location.
+- NumPy/SciPy compatibility: percentile handling and mode retrieval across multiple versions.
+- SciPy sparse linear algebra: a compatibility wrapper for cg that adapts to differing argument names.
+- Python packaging resources: backported helpers (_open_text, _open_binary, _read_text, _path) supporting Python < 3.9.
+- Internal helpers and container type collections used to identify sparse matrix containers across SciPy versions.
+
+Public API
+----------
+Note: Several items in this module are internal helpers used by higher-level components. The following are the most relevant public entry points for developers integrating with compatibility behavior.
+
+threadpool_limits(limits=None, user_api=None)
+- Purpose: Apply thread limiting via a global controller when available, otherwise delegate to threadpoolctl.
+- Parameters:
+  - limits: Optional; the limit specification compatible with ThreadpoolController or threadpoolctl.
+  - user_api: Optional; API string to limit (e.g., "blas", "openmp").
+- Returns: Context manager or None. If a controller is present, returns the controller’s limit context; otherwise, returns threadpoolctl.threadpool_limits(...) return value.
+- Usage:
+  with threadpool_limits(limits=4):
+      # code that should run with up to 4 threads
+- Notes: If a centralized controller is not present, this falls back to the standard threadpoolctl behavior.
+
+threadpool_info()
+- Purpose: Retrieve information about the current threadpool configuration.
+- Returns: Information about the active thread limits and controller state (or threadpoolctl default info if no controller is used).
+- Usage:
+  info = threadpool_info()
+  print(info)
+
+delayed(function)
+- Purpose: Compatibility shim for moving delayed to sklearn.utils.parallel.
+- Behavior: Delegates to sklearn.utils.parallel.delayed.
+- Return: The decorator/function from sklearn.utils.parallel.
+- Usage:
+  @delayed
+  def my_task(x):
+      return x * 2
+
+_internal helpers and compatibility shims
+----------------------------------------
+_object_dtype_isnan(X)
+- Purpose: Detect NaN values in object-dtype arrays (X != X pattern).
+- Usage:
+  is_nan = _object_dtype_isnan(obj_array)
+
+_percentile(a, q, *, method="linear", **kwargs)
+- Purpose: NumPy < 1.22 compatibility wrapper for percentile; maps method keyword to the historical interpolation parameter.
+- Behavior:
+  - If NumPy version < 1.22, calls np.percentile(a, q, interpolation=method, **kwargs).
+  - Otherwise, uses NumPy’s built-in percentile.
+- Notes: This is internal; use numpy.percentile directly if you require NumPy 1.22+ semantics.
+- Version note: Obsolete when minimum supported NumPy version is 1.22+.
+
+ percentile
+- Public alias to NumPy’s percentile for NumPy >= 1.22; otherwise alias to _percentile.
+- Usage: from numpy import percentile; value = percentile(a, q)
+
+_sparse_linalg_cg(A, b, **kwargs)
+- Purpose: Compatibility wrapper for scipy.sparse.linalg.cg across SciPy versions.
+- Behavior:
+  - If SciPy base version >= 1.12.0, uses scipy.sparse.linalg.cg(A, b, **kwargs) directly.
+  - Otherwise, maps rtol -> tol and provides a default atol if not supplied.
+- Usage:
+  sol = _sparse_linalg_cg(A, b, rtol=1e-5)
+
+_get_threadpool_controller()
+- Internal: Returns a singleton ThreadpoolController if threadpoolctl supports it; otherwise None.
+- Usage: Used by threadpool_limits and threadpool_info.
+
+_open_text(_open_binary, _read_text, _path)
+- Backported helpers for importlib.resources to support Python < 3.9.
+- Functions:
+  - _open_text(data_module, data_file_name)
+  - _open_binary(data_module, data_file_name)
+  - _read_text(descr_module, descr_file_name)
+  - _path(data_module, data_file_name)
+- Notes: Switches behavior based on Python version to provide consistent resource access patterns.
+
+Data containers for sparse matrices
+-----------------------------------
+- CSR_CONTAINERS, CSC_CONTAINERS, COO_CONTAINERS, LIL_CONTAINERS, DOK_CONTAINERS, BSR_CONTAINERS
+- Purpose: Collections of SciPy sparse matrix container types to aid compatibility across versions.
+- Note: If SciPy >= 1.8, additional sparse array types (csr_array, csc_array, coo_array, lil_array, dok_array, bsr_array) are appended to the respective lists.
+
+Important considerations and edge cases
+---------------------------------------
+- Version sensitivity: Many shims are conditionally activated based on the installed NumPy, SciPy, or Python version. Ensure your environment aligns with the minimum supported versions for your target release.
+- Threadpool behavior: The global threadpool controller is created lazily on first use. If a controller isn’t available, threadpool_limits/info fall back to threadpoolctl’s defaults.
+- Deprecation path: delayed is a compatibility wrapper around sklearn.utils.parallel.delayed. If you rely on the original import path, plan to migrate to the canonical location.
+- Importlib.resources backport: The _open_* and _path helpers enable resource loading across Python versions; they rely on the availability of importlib.resources in the Python stdlib or backports.
+- Internal API stability: Many of these helpers are internal to maintain compatibility across versions. Use them with the understanding they may be changed or removed in future releases as minimum supported versions shift.
+
+Compatibility notes by component
+-------------------------------
+- NumPy percentile compatibility
+  - What it fixes: The 1.22 change to the percentile keyword argument (interpolation) vs. older behavior.
+  - Removal condition: Obsolete when minimum supported NumPy version is 1.22 or higher.
+  - Example:
+    a = np.array([1, 2, 3, 4])
+    p = percentile(a, 50)
+
+- Threadpool compatibility
+  - What it fixes: Efficient handling of threading control via a global controller (ThreadpoolController) for threadpoolctl >= 3.
+  - Removal condition: Obsolete when minimum supported threadpoolctl version and environment provide stable global controller via ThreadpoolController (as used here).
+
+- SciPy compatibility (mode and cg)
+  - _mode: Uses SciPy’s mode with keepdims handling for newer SciPy versions; backfills behavior for older versions.
+  - Removal condition: Obsolete when SciPy minimum is >= 1.11 (per current TODO note).
+  - _sparse_linalg_cg: Aligns parameter names (rtol -> tol) and defaults to maintain behavior across older SciPy releases.
+  - Removal condition: Obsolete when minimum SciPy version is >= 1.12 (for cg signature consistency) and when internal CG usage can rely on the newer API.
+
+- Python resources compatibility
+  - _open_text, _open_binary, _read_text, _path: Provide consistent resource access across Python versions, particularly when Python < 3.9 is in use.
+  - Removal condition: Obsolete when Python minimum is Python 3.9+.
+
+- Sparse container types
+  - CSR_CONTAINERS, CSC_CONTAINERS, COO_CONTAINERS, LIL_CONTAINERS, DOK_CONTAINERS, BSR_CONTAINERS
+  - Removal condition: Obsolete when minimum SciPy version and packaging no longer differentiate between “array” variants and classic sparse matrix classes.
+
+Usage examples
+--------------
+- Limit threads globally during a block of code:
+```
+from sklearn.utils. import threadpool_limits
+
+with threadpool_limits(limits=4, user_api="blas"):
+    # Code that should run with up to 4 BLAS threads
+    run_heavy_operation()
+```
+
+- Retrieve threadpool information:
+```
+info = threadpool_info()
+print(info)
+```
+
+- Use delayed from the compatibility shim:
+```
+from sklearn.utils.fixes import delayed
+
+@delayed
+def compute(x):
+    return x * x
+```
+
+- Backward-compatible percentile usage (NumPy < 1.22):
+```
+import numpy as np
+from sklearn.utils.utilities import percentile
+
+a = np.array([1, 2, 3, 4, 5])
+p50 = percentile(a, 50)
+```
+
+- Access a resource via the Python 3.9+ backport:
+```
+from sklearn.utils.utilities import _open_text
+with _open_text(module, "data.txt") as f:
+    text = f.read()
+```
+
+Code snippets
+-------------
+- Threadpool usage
+```
+from sklearn.utils.utilities import threadpool_limits
+
+def run():
+    with threadpool_limits(limits=2):
+        # perform operations using limited threads
+        pass
+```
+
+- Delayed decorator usage
+```
+from sklearn.utils.utilities import delayed
+
+@delayed
+def f(x):
+    return x * x
+```
+
+- SciPy-compatible cg wrapper usage (internal)
+```
+from scipy.sparse.linalg import cg
+# internal wrapper ensures compatibility across SciPy versions
+```
+
+Note: The above examples illustrate typical usage paths. Some functions (e.g., _mode, _sparse_linalg_cg) are internal helpers and intended for internal use or for advanced integration scenarios.
+
+End of documentation
+--------------------
+This documentation summarizes the purpose, usage, and compatibility considerations for the utilities.rst module. It highlights the main public APIs, their behavior across versions, and practical usage patterns for developers integrating with these compatibility shims.

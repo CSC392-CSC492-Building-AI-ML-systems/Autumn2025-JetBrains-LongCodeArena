@@ -1,0 +1,213 @@
+# Utilities for Developers
+
+A collection of compatibility shims and helpers used by the project to smooth differences across Python, NumPy, and SciPy versions. These utilities enable stable behavior across environments and simplify maintenance as dependencies evolve.
+
+Note: If you add content to this module, please record the package version at which the fix becomes unnecessary. This helps maintainers know when a compatibility path can be removed.
+
+---
+
+## Overview
+
+- Provides wrappers and fallbacks for version-specific behavior (NumPy, SciPy, Python).
+- Helps manage thread usage in libraries that rely on multi-threaded backends (threadpoolctl).
+- Backports and compatibility shims for importlib.resources (Python 3.9+ backport).
+- Internal helpers for handling sparse containers and legacy API shapes.
+- Deprecation path handling for moved functionality (e.g., delayed).
+
+This documentation is intended for developers contributing to the codebase or relying on these utilities in test suites, builds, or higher-level libraries.
+
+---
+
+## Public API (high level)
+
+- Threading and resource controls
+  - `threadpool_limits(limits=None, user_api=None)`: Apply limits to thread pools (wrapper around threadpoolctl with a backward-compatible path).
+  - `threadpool_info()`: Retrieve information about current thread pool usage (wrapper-compatible path).
+
+- Deprecation and helpers
+  - `delayed(function)`: Backwards-compatible import path for delayed; moved to `sklearn.utils.parallel`. Deprecated path is supported for migration.
+
+- NumPy/SciPy compatibility
+  - `_object_dtype_isnan(X)`: Internal helper to test for NaN in object dtype arrays.
+  - `_percentile(a, q, *, method="linear", **kwargs)`: Compatibility wrapper for NumPy’s `percentile` with a `method` kwarg (NumPy < 1.22 uses `interpolation`).
+  - `percentile`: Public alias resolved based on NumPy version (fallback to `_percentile` for older NumPy).
+
+- SciPy compatibility
+  - `_mode(a, axis=0)`: Compatibility wrapper around `scipy.stats.mode` to adapt to differences across SciPy versions.
+
+  - `_sparse_linalg_cg(A, b, **kwargs)`: Compatibility wrapper for `scipy.sparse.linalg.cg` to align parameter names across SciPy versions.
+
+- Sparse container compatibility
+  - Lists of container types (e.g., `CSR_CONTAINERS`, `CSC_CONTAINERS`, etc.) for handling and detecting sparse matrix container types across SciPy versions (including 1.8+ sparse arrays if available).
+
+- Importlib.resources backport (Python 3.9 compatibility)
+  - `_open_text(data_module, data_file_name)`, `_open_binary(data_module, data_file_name)`: Open text/binary resources in a version-compatible way.
+  - `_read_text(descr_module, descr_file_name)`: Read text resources in a version-compatible way.
+  - `_path(data_module, data_file_name)`: Obtain a path to a packaged resource in a version-compatible way.
+
+- Internal helpers (for use within the package)
+  - `_get_threadpool_controller()`: Obtain a shared threadpool controller (threadpoolctl >= 3) or create one for sklearn integration.
+  - `_mode` and `_sparse_linalg_cg` are internal, and intended for internal usage within the library.
+
+---
+
+## Details by area
+
+### Threading and resource controls
+
+- Purpose: Provide a stable interface for limiting and inspecting thread usage across different environments, while remaining compatible with legacy paths.
+
+- Key functions:
+  - `threadpool_limits(limits=None, user_api=None)`: Sets limits for thread pools. Returns a context manager-like handle or a legacy interface depending on the environment.
+  - `threadpool_info()`: Returns information about the current thread pool configuration.
+
+- Usage example:
+  - Limiting to 2 worker threads during a critical section:
+    with threadpool_limits(limits=2):
+        # Code that may benefit from reduced threading
+        ...
+
+### Deprecation and helpers
+
+- `delayed(function)`: A compatibility shim that forwards to `sklearn.utils.parallel.delayed`. The original import path in this module is deprecated and will be removed in a future release. Use `sklearn.utils.parallel.delayed` directly in new code.
+
+- Example:
+  - from sklearn.utils.parallel import delayed
+  - @delayed
+    def some_func(...): ...
+
+### NumPy/SciPy compatibility
+
+- `_object_dtype_isnan(X)`: Simple check for NaN in object-dtype arrays; helps avoid issues with `NaN != NaN` semantics in object types.
+
+- `_percentile` and `percentile`:
+  - NumPy < 1.22 uses an `interpolation` keyword; NumPy >= 1.22 uses a `method` keyword.
+  - The module exposes a `percentile` symbol that adapts to the installed NumPy version.
+
+- Example:
+  - If on NumPy < 1.22:
+    - `percentile = _percentile`
+  - If on NumPy >= 1.22:
+    - `from numpy import percentile`
+
+### SciPy compatibility
+
+- `_mode(a, axis=0)`:
+  - Wraps `scipy.stats.mode` to account for changes in return shapes and options across SciPy versions (including handling of `keepdims` and `axis=None` scenarios).
+
+- `_sparse_linalg_cg(A, b, **kwargs)`:
+  - Thin wrapper to harmonize keyword names across SciPy versions (e.g., mapping `rtol` to `tol` and setting a default `atol` for older SciPy).
+
+- Example:
+  - Solve a linear system with compatibility handling:
+    result = _sparse_linalg_cg(A, b, rtol=1e-5)
+
+### Sparse containers compatibility
+
+- The module maintains lists of container types that represent sparse matrices, with conditional augmentation for SciPy 1.8+ sparse array types when available. This allows code to treat a variety of sparse container types uniformly.
+
+- Example usage pattern:
+  - if isinstance(mat, tuple(CSR_CONTAINERS)):
+      # Handle CSR or CSR-like types
+      ...
+
+### Importlib.resources backport (Python 3.9 compatibility)
+
+- `_open_text`, `_open_binary`, `_read_text`, `_path`:
+  - Provide a consistent way to access packaged data across Python versions (pre- and post-3.9 resource APIs).
+
+- Example:
+  - with _open_text(mypkg, 'data.txt') as f:
+      text = f.read()
+
+  - path = _path(mypkg, 'data.txt')
+  - with path.open('r') as f:
+      ...
+
+---
+
+## Examples
+
+1) Limiting threads during a computation
+- Purpose: Restrict the number of worker threads used by underlying libraries to ensure predictable performance.
+
+Code:
+```python
+from utilities import threadpool_limits
+
+def compute_heavy_task():
+    # heavy computation here
+    pass
+
+with threadpool_limits(limits=2):
+    compute_heavy_task()
+```
+
+2) Using the compatibility mode function
+- Purpose: Compute the mode with compatibility across SciPy versions.
+
+Code:
+```python
+import numpy as np
+from utilities import _mode
+
+a = np.array([1, 2, 2, 3, 3, 3])
+mode_result = _mode(a, axis=0)
+print(mode_result)
+```
+
+3) Accessing a packaged text resource (Python 3.9+ backport)
+- Purpose: Read a data file shipped with the package in a version-agnostic way.
+
+Code:
+```python
+from utilities import _open_text
+import mypkg  # hypothetical package containing resources
+
+with _open_text(mypkg, 'data.txt') as f:
+    content = f.read()
+```
+
+---
+
+## Versioning and contributions
+
+- The utilities include compatibility shims that depend on the versions of Python, NumPy, SciPy, and threadpoolctl.
+- If you add new compatibility logic, document the minimum version at which the fix is no longer needed. This helps future maintainers prune old code paths.
+
+Changelog-style note:
+- For example: “Fix: _mode behavior for SciPy 1.9+ fixed; remove fallback path in SciPy 1.10+.” Include the version where the fallback can be dropped.
+
+---
+
+## API reference (quick glance)
+
+- Threading
+  - `threadpool_limits(limits=None, user_api=None)`
+  - `threadpool_info()`
+
+- Deprecation
+  - `delayed(function)` (deprecated path; use `sklearn.utils.parallel.delayed`)
+
+- NumPy/SciPy compatibility
+  - `_object_dtype_isnan(X)`
+  - `_percentile(a, q, *, method="linear", **kwargs)`
+  - `percentile` (version-adaptive)
+
+- SciPy compatibility
+  - `_mode(a, axis=0)`
+  - `_sparse_linalg_cg(A, b, **kwargs)`
+
+- Sparse containers (internal/backward-compat)
+  - `CSR_CONTAINERS`, `CSC_CONTAINERS`, `COO_CONTAINERS`, `LIL_CONTAINERS`, `DOK_CONTAINERS`, `BSR_CONTAINERS`
+  - Conditional: appended with sparse array variants on SciPy >= 1.8
+
+- Importlib.resources backport
+  - `_open_text(data_module, data_file_name)`
+  - `_open_binary(data_module, data_file_name)`
+  - `_read_text(descr_module, descr_file_name)`
+  - `_path(data_module, data_file_name)`
+
+---
+
+If you need more examples or a deeper dive into a specific compatibility path (e.g., a particular SciPy version quirk or a Python 3.9+ resource handling scenario), I can expand that section with targeted guidance.

@@ -1,0 +1,118 @@
+# Stateless Learning Rate Schedulers
+
+## Overview
+This module provides stateless learning rate schedulers that interface with MosaicML Composer's time abstraction. Schedulers express the learning-rate schedule as explicit, pure functions (or callable classes) that return a multiplier α to apply to the optimizer’s base learning rate η. Schedulers can be configured with arbitrary time units and can be combined multiplicatively to stack effects. A helper, compile_composer_scheduler, converts a stateless scheduler into a PyTorch-compatible scheduler bound to the current training state.
+
+Key concepts:
+- Schedulers output a multiplier α, not the learning rate itself.
+- Multiple schedulers stack multiplicatively: η(t) = η_i × α1(t) × α2(t) × ...
+- Scale Schedule Ratio (SSR) allows rescaling of time to stretch/shrink schedules.
+
+Core interfaces and utilities include:
+- ComposerScheduler: Protocol for stateless schedulers (function or callable class).
+- _convert_time(time, state, ssr): Converts time expressions to an appropriate unit considering SSR and trainer state.
+- compile_composer_scheduler(scheduler, state, ssr): Converts a stateless scheduler into a PyTorch-compatible scheduler bound to a State.
+
+Note: The module exposes a family of concrete schedulers (e.g., StepScheduler, LinearScheduler, CosineAnnealingScheduler, etc.), as listed in the exported API.
+
+A minimal example from the module documentation demonstrates the concept of a stateless scheduler:
+
+```
+def ten_epoch_decay_scheduler(state: State) -> float:
+    if state.timestamp.epoch < 10:
+        return 1.0
+    return 0.5
+
+# ten_epoch_decay_scheduler is a valid ComposerScheduler
+trainer = Trainer(
+    schedulers=[ten_epoch_decay_scheduler],
+    ...
+)
+```
+
+You can also implement schedulers as callable classes:
+
+```
+class VariableEpochDecayScheduler(ComposerScheduler):
+    def __init__(self, num_epochs: int):
+        self.num_epochs = num_epochs
+
+    def __call__(self, state: State) -> float:
+        if state.time.epoch < self.num_epochs:
+            return 1.0
+        return 0.5
+
+ten_epoch_decay_scheduler = VariableEpochDecayScheduler(num_epochs=10)
+trainer = Trainer(
+    schedulers=[ten_epoch_decay_scheduler],
+    ...
+)
+```
+
+## Key Components
+- ComposerScheduler (Protocol)
+  - Defines the interface for stateless schedulers.
+  - Signature: __call__(state: State, ssr: float = 1.0) -> float
+  - Output: a multiplier α to apply to the optimizer’s learning rate.
+  - SSR: The input ssr scales the effective time, with ασ(t) = α(t / σ).
+
+- _convert_time(time, state, ssr)
+  - Converts a Time expression (string or Time object) into an absolute Time[int] in an appropriate unit, taking SSR into account.
+  - Handles units: DURATION, EPOCH, and converts as needed using state.max_duration and state.dataloader_len.
+  - If necessary values are unavailable (e.g., dataloader_len is None), raises an error.
+
+- compile_composer_scheduler(scheduler, state, ssr)
+  - Converts a stateless ComposerScheduler into a PyTorchScheduler (bound to a State).
+  - Resulting scheduler provides a .step() interface similar to PyTorch schedulers.
+  - The bound state allows internal progress to be read by the scheduler during stepping.
+
+- Concrete schedulers (exported)
+  - StepScheduler, MultiStepScheduler, ConstantScheduler, LinearScheduler, ExponentialScheduler,
+    CosineAnnealingScheduler, CosineAnnealingWarmRestartsScheduler, PolynomialScheduler,
+    MultiStepWithWarmupScheduler, ConstantWithWarmupScheduler, LinearWithWarmupScheduler,
+    CosineAnnealingWithWarmupScheduler, PolynomialWithWarmupScheduler
+  - These are stateless variants designed to work with the time abstraction and SSR.
+
+## Usage
+- Basic function-style scheduler (as shown above) can be passed directly to a Trainer.
+- Callable classes provide a reusable, parameterized approach to defining schedules.
+- Schedulers can be composed multiplicatively to create complex schedules.
+- SSR (scale schedule ratio) allows time-rescaling without changing the underlying scheduler logic.
+
+Example: converting a stateless scheduler into a PyTorch scheduler
+
+```
+# Given a ComposerScheduler `scheduler` and a State `state`
+compiled_scheduler = compile_composer_scheduler(scheduler, state, ssr=1.0)
+
+trainer = Trainer(
+    schedulers=[compiled_scheduler],
+    ...
+)
+```
+
+This bound scheduler uses the current state to determine the appropriate multiplicative factor α for the optimizer’s base LR.
+
+## Details
+- Time units and SSR
+  - Time expressions may use units such as epochs or durations. The _convert_time helper translates expressions into concrete Time objects, adjusting for SSR as needed.
+  - When a time is expressed in epochs, conversion to a finer unit (e.g., batches) may be performed if required for SSR or granularity reasons. This may require state.dataloader_len to be defined.
+  - The conversion enforces that state.max_duration is set whenever schedulers are invoked.
+
+- Output semantics
+  - All stateless schedulers return a multiplier α, which multiplies the optimizer’s base LR.
+  - If multiple schedulers are provided, their effects multiply.
+  - The learning rate at time t is η(t) = η_i × α(t), where η_i is the optimizer’s initial learning rate.
+
+- SSR usage
+  - The documentation defines ασ(t) = α(t / σ). This means you can adjust the perceived time to slow down or speed up a schedule by choosing an appropriate SSR.
+
+- Extensibility
+  - The module is designed so that an ordinary function can implement ComposerScheduler, or a callable class with a __call__ method that matches the signature.
+  - The provided _convert_time and compile_composer_scheduler utilities support broad compatibility with various user-defined schedules and complex training configurations.
+
+- Practical considerations
+  - When using EPOCH units for time, ensure that state.dataloader_len is available to support conversion to batches for SSR-aware scheduling.
+  - The SSR parameter defaults to 1.0; if unused, schedulers behave identically to their non-SSR form.
+
+---

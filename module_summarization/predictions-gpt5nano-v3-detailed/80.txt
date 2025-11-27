@@ -1,0 +1,153 @@
+MapPlotter
+==========
+
+Overview
+--------
+
+The MapPlotter module provides an interactive plotting utility that creates a 2D map from a spectral cube and allows you to explore spectra associated with individual pixels. It integrates with APLpy when available to produce publication-quality plots, and falls back to Matplotlib's imshow when APLpy is unavailable. The interactive viewer supports actions such as plotting a pixel’s spectrum, overplotting spectra in an external window, and circular averaging of regions.
+
+Key concepts
+------------
+
+- MapPlotter: Central class that builds the map from a data cube and enables interactive exploration.
+- Cube/header handling: The class relies on the cube’s header (flattened for WCS compatibility) to construct the map’s projection. Header information is obtained via cubes.flatten_header.
+- Plot backends: If APLpy is available and requested, the map is rendered with APLpy.FITSFigure; otherwise, Matplotlib’s imshow is used.
+- Interactivity: Click, drag, and key presses enable spectrum plotting, overplotting, and disconnecting the interactive viewer.
+
+Public API
+----------
+
+MapPlotter
+~~~~~~~~~~
+
+Constructor
+-----------
+
+__init__(self, Cube=None, figure=None, doplot=False, **kwargs)
+
+Parameters
+- Cube: Optional cube object containing spectral data and header. When provided, the header is flattened and stored for map creation.
+- figure: Matplotlib Figure instance or an integer figure number. If None, a new figure is created on demand.
+- doplot: If True, immediately generate and display the map by calling mapplot.
+- kwargs: Additional keyword arguments consumed by the internal map plotting flow (not all kwargs are required; see mapplot for details).
+
+Notes
+- If Cube is provided, its header is flattened via cubes.flatten_header(self.Cube.header, delete=True).
+- If astropy.wcs is available, a WCS object is created from the header (self.wcs).
+
+__call__(self, **kwargs)
+------------------------
+
+Convenience wrapper that delegates to mapplot(**kwargs).
+
+mapplot
+-------
+
+Plot up a map based on an input data cube.
+
+Signature
+- mapplot(self, convention='calabretta', colorbar=True, useaplpy=True, vmin=None, vmax=None, cmap=None, plotkwargs={}, **kwargs)
+
+Parameters
+- convention: Projection convention for Galactic data. Allowed values include 'calabretta' or 'griesen'. Default: 'calabretta'.
+- colorbar: Whether to display a colorbar alongside the map. Default: True.
+- useaplpy: Whether to use APLpy for rendering if a FITS header is available. Default: True.
+- vmin, vmax: Explicit minimum/maximum values for scaling. If None, they are inferred from the data.
+- cmap: Colormap to use for the map. Passed to the rendering backend (APLpy or imshow).
+- plotkwargs: Additional keyword arguments passed to the rendering backend (APLpy’s show_colorscale or matplotlib.pyplot.imshow).
+- kwargs: Additional keyword arguments passed to makeplane(**kwargs). The estimator keyword, for example, can be supplied here and will be forwarded to makeplane.
+
+Returns
+- None. Renders the map in the specified figure and initializes interactive bindings for subsequent user actions.
+
+Behavior and rendering backends
+- If icanhasaplpy and useaplpy are true, the map is rendered using APLpy:
+  - A FITS HDU is created from self.plane and self.header.
+  - aplpy.FITSFigure is used to display the map with a colorscale.
+  - An internal axis reference (self.axis) is captured from the FITSFigure.
+  - A colorbar can be added via FITSFigure.add_colorbar().
+- If APLpy is unavailable or disabled, the map is rendered with Matplotlib:
+  - A standard axes (111) is created, and axis.imshow(self.plane, vmin=vmin, vmax=vmax, cmap=cmap, **plotkwargs) is used.
+  - A colorbar can be created via matplotlib.colorbar.
+- In both cases, self._origin is set to reflect the FITS convention (0) or ordinary convention (0 as well; note: this is a placeholder for origin handling).
+
+Interaction model
+- After rendering, the viewer connects to mouse and keyboard events to enable:
+  - Button 1 (or '1'): plot the clicked pixel’s spectrum in an external window and mark the clicked pixel with an 'x'.
+  - Button 2 (or 'o'): overplot a second (or more) spectrum in the external plot window.
+  - Button 3: disconnect the interactive viewer.
+  - Dragging with Button 1 can average over a circular region (c and r keys define circle center and radius).
+- Internally, _connect establishes event handlers for button_press_event, button_release_event, and key_press_event. _disconnect disconnects these handlers.
+
+Internal mechanics (high level)
+- makeplane(**kwargs) is invoked to construct self.plane and related metadata (header, wcs) for plotting.
+- The class maintains a set of interactive state, including _click_marks, _circles, and click coordinates (_clickX, _clickY).
+
+Important considerations and edge cases
+- Optional dependencies:
+  - APLpy availability is detected at import time. If APLpy is not installed, or if importing APLpy fails, rendering falls back to Matplotlib’s imshow.
+  - WCS (astropy.wcs) support is optional and guarded; if unavailable, some WCS-based features may not be available.
+- Header handling:
+  - The cube’s header is flattened via cubes.flatten_header, with delete=True to avoid duplications.
+- Figure management:
+  - If a figure object is supplied and valid, it is reused; otherwise a new figure is created as needed.
+  - If the specified figure is closed, a new figure is created automatically.
+- Colorbar handling:
+  - When using APLpy, colorbar addition is attempted; failures are logged but do not crash plotting.
+  - When using Matplotlib, colorbar is created via pyplot.colorbar if possible; errors are logged but plotting continues.
+- Estimator argument:
+  - The map to be plotted is produced by makeplane, which accepts an estimator keyword via kwargs. The estimator is removed from kwargs after map creation to avoid conflicts with visualization code.
+- Edge behavior:
+  - The interactive features rely on a live Matplotlib canvas. Some environments (headless or non-interactive backends) may not support interactivity.
+
+Usage examples
+--------------
+
+Basic usage (with a cube object)
+- Create a MapPlotter and display the map immediately.
+
+.. code-block:: python
+
+   # Assuming 'Cube' is your spectral data object with a header
+   from yourpackage import cubes  # replace with your actual import path
+
+   mp = cubes.MapPlotter(Cube=Cube, doplot=True)
+   # The map is created and displayed as soon as the MapPlotter is instantiated.
+
+Basic usage (explicit mapplot call)
+- Instantiate MapPlotter and render on demand.
+
+.. code-block:: python
+
+   mp = cubes.MapPlotter(Cube=Cube)
+   mp.mapplot(convention='calabretta', colorbar=True, useaplpy=True)
+
+Interactive usage overview
+- After rendering, click on the map to plot the corresponding pixel’s spectrum, or use drag-and-release to average over a circular region.
+
+.. code-block:: python
+
+   mp = cubes.MapPlotter(Cube=Cube, doplot=True)
+   # Interact with the figure:
+   # - Click to plot spectra
+   # - Press 'c' to center circle, then move and press 'r' to set radius
+   # - Press 3 to disconnect
+
+Notes
+- If APLpy is available and the data is FITS-based with a proper header, APLpy generally offers better visual quality. If not, the code gracefully falls back to imshow-based rendering.
+- The exact interactive behavior (key bindings, mouse actions) is documented in the class docstring and the inline help. If you need to customize, subclass MapPlotter and override _connect/_disconnect or mapplot to fit your workflow.
+
+Relation to the Cube data model
+-------------------------------
+
+- The class expects a cube-like object for the input data, with headers accessible as Cube.header.
+- The header is flattened for compatibility with WCS-based plotting.
+- The computed plane (self.plane) is derived from the cube via makeplane, which prepares the 2D map to be plotted.
+
+Implementation notes
+--------------------
+
+- The module is resilient to missing dependencies. It uses fallbacks and gracefully prints errors when optional features fail to initialize (e.g., colorbar creation with APLpy).
+- The design emphasizes interactive analysis rather than publication-quality plots by default, with optional integration for high-quality outputs when APLpy is available.
+
+End of documentation.

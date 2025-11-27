@@ -1,0 +1,239 @@
+# Querying
+
+A comprehensive guide to using the ftrack API’s querying facilities. This document explains how to build and execute queries against an ftrack server using the ftrack_api.query module. It covers core concepts, common operators, projection, sorting, pagination, and practical usage examples.
+
+## Prerequisites
+
+- A configured and authenticated ftrack session:
+  - Server URL or FTRACK_SERVER environment variable
+  - API key and user (FTRACK_API_KEY and FTRACK_API_USER)
+- Access to the ftrack_api.query module (usually via:
+  `import ftrack_api.query as query`)
+
+- Typical usage pattern:
+  - Create a Session (or reuse an existing one)
+  - Instantiate a Query object for the target entity type
+  - Apply filters, select fields, and set ordering/pagination
+  - Execute the query to retrieve results
+
+## Core concepts
+
+- Entity type: The primary type you want to query (e.g., Task, Shot, AssetVersion). The Query constructor takes the target type as a string.
+- Session: The connection context (provided by ftrack_api.Session) used for server interaction.
+- Filters: Expressions used to constrain results. They can be added progressively or as a single composite expression.
+- Projections/Fields: The subset of fields to retrieve for each result to reduce data transfer.
+- Sorting: Ordering of results using one or more fields.
+- Pagination: Controlling the number of returned results via limit and offset.
+- Traversal/Relations: Accessing related entities through field paths (e.g., project.id, task.assignee.name).
+
+## Building a query
+
+- Create a Query object for a given entity type and session.
+- Apply one or more filters (where/where-like expressions).
+- Specify the fields to project (retrieve) for each result.
+- Optionally apply sorting and pagination.
+- Execute to obtain results.
+
+Example pattern (pseudo-API; names shown are representative and commonly used):
+
+```python
+import ftrack_api.query as query
+
+# Assume `session` is an active ftrack_api.Session instance
+q = query.Query('Task', session=session)
+
+# Apply a filter
+q.where("project.id = 12345")
+
+# Restrict returned fields (projection)
+q.fields(['id', 'name', 'status', 'assignee'])
+
+# Sort results
+q.order_by("due_date desc", "name asc")
+
+# Limit results (pagination)
+q.limit(100).offset(0)
+
+# Execute and iterate
+results = q.execute()
+for t in results:
+    print(t.id, t.name, t.status)
+```
+
+Notes:
+- The exact method names may vary slightly depending on the version of ftrack_api your project uses. Commonly supported methods include where(), fields(), order_by(), limit(), offset(), and execute().
+
+## Filters and operators
+
+Query filters express constraints on entity fields. Common operators include:
+
+- is / equals
+  - Example: `where("status is 'In Progress'")`
+- is_not
+  - Example: `where("status is_not 'Done'")`
+- in / not_in
+  - Examples: `where("type in ('Task','Note')")`
+- contains
+  - Example: `where("name contains 'Render'")`
+- startswith / endswith
+  - Examples: `where("name startswith 'Shot_'")`
+- greater than / less than (and inclusive variants)
+  - Examples: `where("date > '2024-01-01'")`, `where("date >= '2024-01-01'")`
+
+Composite filters can be constructed by chaining multiple where() calls or by combining expressions using logical operators (and/or). For example:
+
+```python
+q.where("project.id = 12345").where("status is 'In Progress'")
+```
+
+Or a single composite expression:
+
+```python
+q.where("(project.id = 12345) and (status in ('In Progress','Open'))")
+```
+
+Tip:
+- When possible, prefer filtering via server-side paths (e.g., "project.id") rather than loading all results and filtering client-side.
+
+## Projections (fields)
+
+Fetching only the fields you need reduces network usage and memory. Use fields() to specify a projection.
+
+```python
+q.fields(['id', 'name', 'status', 'due_date'])
+```
+
+If you omit fields(), some or all default fields may be returned depending on the backend and version. Always prefer explicit field specification for performance and clarity.
+
+## Sorting
+
+Order results using order_by(). You can specify multiple fields and directions.
+
+```python
+q.order_by("due_date desc", "name asc")
+```
+
+Supported directions typically include asc and desc. You can mix multiple ordering criteria.
+
+## Pagination
+
+Control the number of results and the starting point:
+
+```python
+q.limit(50).offset(0)
+```
+
+- limit: maximum number of results to return
+- offset: index of the first result to return
+
+Chaining supports paging through large result sets.
+
+## Traversal and relationships
+
+Query expressions can traverse related entities using dot-path notation (e.g., `project.id`, `assignee.login`). This enables filtering, sorting, and projecting on related data without manual joins:
+
+```python
+# Get tasks in a specific project with the assignee's login available
+q.where("project.id = 12345").fields(['id', 'name', 'assignee.login'])
+```
+
+You can also filter on related fields:
+
+```python
+q.where("assignee.email contains '@example.com'")
+```
+
+Note:
+- The level of traversal and the exact field paths depend on the data model exposed by your ftrack server and version of the API.
+
+## Executing queries
+
+- execute(): Execute the query and return an iterable of result objects.
+- all()/first(): Common helpers to fetch all results or a single first result, depending on the API version.
+
+Example:
+
+```python
+results = q.execute()
+for result in results:
+    print(result.id, result.name)
+```
+
+If the API returns lightweight wrappers or dictionaries, adapt usage accordingly (e.g., attribute access vs. mapping access).
+
+## Practical examples
+
+1) Fetch open tasks for a project with limited fields
+
+```python
+import ftrack_api.query as query
+
+q = query.Query('Task', session=session)
+q.where("project.id = 12345 and status is 'Open'")
+q.fields(['id', 'name', 'status', 'due_date'])
+q.order_by("due_date asc")
+q.limit(50)
+
+for t in q.execute():
+    print(t.id, t.name, t.status, t.due_date)
+```
+
+2) Retrieve the latest 20 shots modified in the last 7 days, including related project and author
+
+```python
+import datetime
+days_ago = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+
+q = query.Query('Shot', session=session)
+q.where("modified_date >= '{}'".format(days_ago))
+q.fields(['id', 'name', 'modified_date', 'project.name', 'modified_by'])
+q.order_by("modified_date desc")
+q.limit(20)
+
+for s in q.execute():
+    print(s.id, s.name, s.modified_date, s.project.name, s.modified_by)
+```
+
+3) Complex filter on a nested relationship with projection and pagination
+
+```python
+q = query.Query('Task', session=session)
+q.where("(project.id = 12345) and (status in ('In Progress','Open'))")
+q.fields(['id', 'name', 'status', 'assignee.login', 'project.name'])
+q.order_by("priority desc", "due_date asc")
+q.limit(100).offset(0)
+
+for t in q.execute():
+    print(t.id, t.name, t.status, t.assignee.login, t.project.name)
+```
+
+## Performance considerations
+
+- Always project only the fields you need.
+- Filter as close to the data source as possible (on the server) to reduce transmitted data.
+- Use pagination for large result sets; avoid loading entire datasets into memory.
+- If supported, consider using indexed fields in filters (e.g., status, project.id) to improve latency.
+
+## Error handling
+
+- Handle connection errors, authentication failures, and invalid query expressions gracefully.
+- Validate entity types and field paths against your server’s schema (some paths may differ between versions).
+- Log or inspect server-side error messages when available to diagnose invalid filters or field access.
+
+## Migration tips
+
+- If upgrading ftrack_api versions, review any deprecations in query methods (e.g., renamed methods like where()/filter(), changes in default field sets).
+- Tests should verify both simple and composite queries to ensure behavior remains consistent.
+
+## API reference (quick lookup)
+
+- query.Query(entity_type, session=None): Create a query for the given entity type.
+- q.where(expression): Add a filter expression (string-based).
+- q.fields(field_list): Specify the projection fields to return.
+- q.order_by(*clauses): Define sorting criteria.
+- q.limit(n): Limit the number of results.
+- q.offset(n): Offset for pagination.
+- q.execute(): Execute the query and return results.
+- q.all(), q.first(): Convenience helpers for retrieval.
+
+If your project uses a specific version of ftrack_api, consult the exact docstring and source for the Query class in ftrack_api.query to align with supported methods and syntax.

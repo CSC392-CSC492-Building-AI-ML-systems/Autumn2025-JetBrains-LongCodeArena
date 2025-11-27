@@ -1,0 +1,125 @@
+Scheme to verify FITS data
+===========================
+
+Introduction
+------------
+
+This module provides a pluggable scheme for validating FITS data structures. It defines a lightweight contract for reporting verification issues, optionally attempting to fix them, and controlling how issues are reported (warnings, exceptions, or silent fixes). The system is designed to work with classes that can collect per-field or per-element verification results in a hierarchical structure.
+
+Public API and core concepts
+----------------------------
+
+Key components
+
+- VerifyError: Exception raised when verification fails in modes that do not tolerate errors.
+- VerifyWarning: Warning class used to report verification issues without interrupting execution.
+- VERIFY_OPTIONS: List of supported verification modes. Examples include:
+  - ignore: silently ignore all verification errors
+  - warn: emit warnings for issues
+  - exception: raise an exception for issues
+  - fix: attempt to fix issues, then report fixes
+  - silentfix: fix issues without reporting
+  - fix+ignore, fix+warn, fix+exception, silentfix+ignore, silentfix+warn, silentfix+exception: combinations of fixing behavior with reporting behavior
+- _Verify: Base mixin providing the verification flow
+  - run_option(option, err_text, fix_text, fix, fixable): execute a single verification action. Returns a tuple (fixable, text) describing whether the issue was fixable and the message to report.
+  - verify(option): orchestrates the verification across all collected issues. Validates the option, collects verification errors, splits the option into fixing and reporting components if needed, and then either warns, raises, or returns depending on the chosen mode.
+- _ErrList: Hierarchical error list structure
+  - A nested list structure used to represent verification messages across multiple levels (e.g., per-element, per-field). Each non-list item is a tuple (fixable, message). Nested _ErrList objects represent sub-sections of the verification results.
+  - __str__(): returns a human-readable string of top-level messages.
+  - iter_lines(filter=None, shift=0): iterates over the messages with appropriate indentation for nested levels. Supports filtering of lines and producing header lines for nested sections (e.g., “Element 0:”).
+
+How verification works (flow)
+----------------------------
+
+1. Call verify(option) with an option string (e.g., "warn", "fix+warn", "silentfix+ignore").
+2. Validate the option against VERIFY_OPTIONS. If invalid, a ValueError is raised.
+3. If option is "ignore", return immediately (no verification).
+4. Collect verification results via self._verify(opt). This should return an _ErrList representing all found issues.
+5. If the option contains a "+", split into fix_opt and report_opt. If the option is "fix" or "silentfix" (without "+"), adopt a default reporting behavior (the original default was to raise an exception for unfixable errors).
+6. Special-case handling:
+   - If fix_opt == "silentfix" and report_opt == "ignore": return (no output, no exception).
+   - If fix_opt == "silentfix": suppress output for fixable issues; only unfixable issues are reported.
+   - If fix_opt == "fix" and report_opt == "ignore": print only fixed issues; do not report unfixable ones.
+   - Otherwise, prepare to report issues according to report_opt.
+7. Build a list of messages from errs.iter_lines(). Optionally filter lines based on fixability to tailor the report.
+8. If any messages exist:
+   - Prepend "Verification reported errors:" and append a note about zero-based indexing.
+   - If fix_opt == "silentfix" and there were no unfixable issues, return without reporting.
+   - If report_opt == "warn" or (fix_opt == "fix" and there were no unfixable issues), emit warnings for each line.
+   - Otherwise, raise VerifyError with the combined messages.
+
+Notes on messages and output
+----------------------------
+
+- The output includes a header line and a note about zero-based indexing:
+  - "Verification reported errors:"
+  - "Note: astropy.io.fits uses zero-based indexing."
+- In silentfix modes, messages may be suppressed entirely if there are no unfixable issues.
+- The structure of _ErrList enables hierarchical grouping of errors (e.g., by element, by field). When printed, the structure is indented to reflect the hierarchy.
+
+Usage examples
+--------------
+
+Basic usage pattern (example class)
+
+```python
+from astropy.io.fits import _Verify, _ErrList  # internal mixin and structure
+
+class MyFITSData(_Verify):
+    def __init__(self, data):
+        self.data = data
+
+    def _verify(self, option):
+        # Build a hierarchical list of verification results
+        errs = _ErrList(unit="Pixel")
+
+        # Example check: value range
+        if not all(0 <= v <= 255 for v in self.data):
+            errs.append((False, "Pixel values must be in the range 0..255"))
+
+        # Example fixable issue
+        if any(v < 0 for v in self.data):
+            def fix_negative():
+                self.data = [0 if v < 0 else v for v in self.data]
+
+            errs.append((True, "Negative pixel values fixed"))
+            # Attach a nested sub-section to show more detail
+            sub = _ErrList(unit="Subpixel")
+            sub.append((True, "Clamped to 0"))
+            errs.append(sub)
+
+        return errs
+
+# Usage
+obj = MyFITSData([0, -1, 300])
+obj.verify("warn")       # emits warnings for issues
+obj.verify("fix+warn")   # attempts fixes, then warns
+obj.verify("silentfix+ignore")  # fixes are silent, no output
+```
+
+Notes on edge cases and considerations
+--------------------------------------
+
+- Unknown option: Passing an option not in VERIFY_OPTIONS raises ValueError.
+- Ignore mode: "ignore" exits verification without reporting or fixing.
+- Mixing fix with reporting:
+  - Options containing "+" separate fix behavior (fix or silentfix) from reporting (ignore, warn, exception).
+  - "silentfix" suppresses reporting of fixable issues, but will still fix when possible.
+- Unfixable errors: If an issue is not fixable, the behavior depends on the reporting mode. In warn or exception modes, issues may trigger warnings or a raised exception respectively.
+- Output formatting: The verification messages are constructed to be readable and hierarchical when multiple levels of checks are present.
+
+Edge case: zero-based indexing note
+------------------------------------
+
+- All reported indices in messages assume zero-based indexing, as noted in the verification output.
+
+Appendix: structure of verification messages
+--------------------------------------------
+
+- Top-level items in _ErrList are either:
+  - Tuples: (fixable, message)
+  - Nested _ErrList instances: representing a sub-section (e.g., per-element or per-field group)
+
+- When iterating, top-level lines are yielded first. Nested sections introduce a header like "<Unit> <Index>:" and then their lines, with indentation indicating depth.
+
+End of documentation

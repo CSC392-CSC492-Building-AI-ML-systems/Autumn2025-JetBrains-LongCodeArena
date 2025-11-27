@@ -1,0 +1,126 @@
+w_red.rst
+---------
+
+w_red is a command-line tool in the WESTPA toolkit that estimates the rate constant between two states (istate -> fstate) and, optionally, applies RED (Duration-Event Based) correction to account for observed event durations. The RED correction is implemented via the DurationCorrector class, which builds a histogram of event durations and computes a correction factor that adjusts raw rates.
+
+Overview
+--------
+
+- Purpose: Compute the rate constant k_ij between istate and fstate, with an option to apply a RED correction derived from observed transition durations.
+- Core idea: RED correction adjusts the observed flux by weighting durations and integrating a derived function f_tilde(tau) to produce a multiplicative correction factor for the rate.
+
+Key concepts
+------------
+
+- DurationCorrector
+  - Builds a mapping from observed transition durations to discrete tau bins.
+  - Computes f_tilde(tau): proportional to the distribution of durations, corrected for the theta - tau factor, and normalized so that integrating f_tilde over tau yields 1.
+  - Computes a double-integrated quantity (integral of f_tilde, then integral of that result) to obtain a final normalization used to produce the RED correction factor.
+  - Important properties:
+    - event_duration_histogram: f_tilde
+    - cumulative_event_duration_histogram: integral of f_tilde over tau
+- from_kinetics_file(directh5, istate, fstate, dtau, n_iters=None)
+  - Builds a DurationCorrector from a kinetics file (either an open H5File or a path).
+  - Filters durations by istate, fstate, and positive weight.
+  - Used when RED correction is requested to derive the correction factor from observed durations.
+- correction(iters, freqs=None)
+  - Returns the RED correction factor for a given subset of iterations.
+  - Requires:
+    - iters: array of iteration indices to include
+    - freqs: optional per-iteration weights (defaults to 1.0)
+  - The factor is computed by aggregating duration-based weights within tau bins and normalizing by the available time window (maxduration - tau + 1), followed by a normalization and a double integration.
+- get_raw_rates(directh5, istate, fstate, n_iters=None)
+  - Retrieves the raw (unrestricted) rate evolution for a given state pair from directh5.
+- calc_avg_rate(directh5_path, istate, fstate, …, red=False)
+  - Returns either the raw rate or the RED-corrected rate, along with optional callback support.
+  - dtau is derived from the requested time-step parameters (report_interval and n_steps_iter).
+  - If red=True, constructs a DurationCorrector and computes the correction factor to apply to the rate.
+- calc_rates(directh5_path, istate, fstate, …)
+  - Intended to return raw and RED-corrected rate constants across iterations (implementation details depend on the full code path; the function is designed to provide per-iteration results).
+
+CLI interface (w_red)
+---------------------
+
+The w_red command computes the rate constant for a given istate -> fstate pair and optionally applies RED correction. Core inputs and options include:
+
+- --directh5 PATH
+  - Path to the direct kinetics HDF5 file (or an open file handle).
+- --istate INT
+  - Initial state index.
+- --fstate INT
+  - Final state index.
+- --n_iters INT (optional)
+  - Number of iterations to use. If omitted, all iterations are used.
+- --report_interval INT (optional)
+  - dtau calculation parameter; defaults to a typical WESTPA setting (e.g., 20).
+- --n_steps_iter INT (optional)
+  - Number of steps per iteration; used to determine dtau.
+- --red (flag)
+  - Apply the RED correction. If provided, w_red constructs a DurationCorrector from the kinetics file and applies the correction to the rate.
+- --callback NAME (optional)
+  - Callback function name to receive the correction object. When provided, the tool will pass the correction object to the callback as correction=<object>.
+
+Outputs
+-------
+
+- Rate (float)
+  - The estimated rate constant for istate -> fstate.
+  - If --red is supplied, the returned rate is RED-corrected.
+- Optional: correction object
+  - If --callback is used, the callback receives a keyword argument correction=<DurationCorrector>.
+
+Algorithmic details
+-------------------
+
+- dtau calculation
+  - dtau = report_interval / n_steps_iter
+  - This dtau sets the resolution of the duration binning (taugrid) and the mapping of durations to discrete bins.
+- Duration histogram and mapping
+  - Durations are binned into taugrid with a mapping f_map; each duration is assigned to the corresponding tau-bin index or -1 if outside range.
+- f_tilde and normalization
+  - f_tilde[i] is the sum of weights in bin i divided by (maxduration - tau + 1) for all bins with tau < maxduration.
+  - If the sum of f_tilde is non-zero, f_tilde is normalized so that sum(f_tilde) * dtau = 1.
+- Correction factor
+  - The correction factor is obtained by integrating f_tilde twice over taugrid and forming maxduration / integral2, provided integral2 is non-zero.
+  - If no correction is possible (integral2 == 0), a correction of 0.0 is returned.
+- Application
+  - The raw rate is multiplied by the correction factor to yield the RED-corrected rate.
+
+Example scenarios
+-----------------
+
+- Raw rate only (no RED correction):
+  - w_red --directh5 my_direct.h5 --istate 0 --fstate 1
+  - Returns the raw rate for istate=0 to fstate=1.
+
+- RED-corrected rate:
+  - w_red --directh5 my_direct.h5 --istate 0 --fstate 1 --n_iters 100 --report_interval 20 --n_steps_iter 1000 --red
+  - Internal: Constructs DurationCorrector from the kinetics file and applies correction to the raw rate.
+
+- With a callback to inspect correction:
+  - w_red --directh5 my_direct.h5 --istate 0 --fstate 1 --red --callback my_cback
+  - The callback receives correction=<DurationCorrector> for inspection or logging.
+
+Implementation notes
+--------------------
+
+- Datasets expected in directh5:
+  - rate_evolution: contains per-iteration rate_info; the field 'expected' holds the rate value.
+  - durations: used to compute RED correction; requires fields such as 'istate', 'fstate', 'weight', and 'duration'.
+- Dependencies:
+  - h5py for HDF5 I/O
+  - numpy for numerical arrays and operations
+  - westpa.rc and WESTParallelTool (for integration with WESTPA tooling and parallel execution)
+
+See also
+--------
+
+- DurationCorrector class in the RED module for details on the histogram construction, f_tilde, and correction logic.
+- calc_avg_rate for raw vs RED-corrected rate computation and callback mechanism.
+- get_raw_rates and calc_rates for additional rate retrieval and batch results across iterations.
+
+Notes
+-----
+
+- The exact CLI syntax and available options may depend on the WESTPA version. The above reflects the functional capabilities visible in the code excerpt and typical WESTPA command conventions.
+- This documentation assumes the w_red command is used to obtain a single rate between istate and fstate, with optional RED correction, and to optionally expose a correction object via a callback.

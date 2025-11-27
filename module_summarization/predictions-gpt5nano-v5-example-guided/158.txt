@@ -1,0 +1,170 @@
+Migrating to Nextcord
+======================
+
+Overview
+--------
+Nextcord’s widget API provides lightweight, partial representations of a guild’s channels and members as exposed by the Discord widget endpoint. This guide describes the WidgetChannel, WidgetMember, and Widget classes, their behavior, and how to migrate existing widget-related code to Nextcord.
+
+Key Components
+--------------
+
+WidgetChannel
+-------------
+Represents a "partial" widget channel.
+
+- id: int
+  The channel's ID.
+- name: str
+  The channel's name.
+- position: int
+  The channel's position.
+
+Notes:
+- The string representation returns the channel’s name.
+- mention property yields a mention string for the channel: <#id>.
+- created_at returns the channel’s creation time (UTC) derived from the channel ID.
+
+Usage example:
+.. code-block:: python
+
+    channel = WidgetChannel(id=12345, name="General", position=0)
+    print(channel)            # General
+    print(channel.mention)    # <#12345>
+    print(channel.created_at) # datetime in UTC
+
+WidgetMember
+------------
+Represents a "partial" member of the widget’s guild. This class inherits from BaseUser and contains a subset of member data provided by the widget.
+
+Attributes include:
+- id: int
+  The member's ID.
+- name: str
+  The member's username.
+- discriminator: str
+  The member's discriminator.
+- bot: bool
+  Whether the member is a bot.
+- status: Status
+  The member's status (e.g., online, idle, dnd, offline).
+- nick: Optional[str]
+  The member's nickname.
+- avatar: Optional[str]
+  The member's avatar hash.
+- activity: Optional[Union[BaseActivity, Spotify]]
+  The member's activity (if present).
+- deafened: Optional[bool]
+  Whether the member is currently deafened.
+- muted: Optional[bool]
+  Whether the member is currently muted.
+- suppress: Optional[bool]
+  Whether the member is being suppressed.
+- connected_channel: Optional[WidgetChannel]
+  The channel the member is connected to (if any).
+
+Notes:
+- The widget data uses keys like 'nick', 'status', 'deaf'/'self_deaf', 'mute'/'self_mute', 'suppress', and may include a 'game' payload to describe activity. Nextcord converts these to the corresponding fields and activity via create_activity.
+
+Example:
+.. code-block:: python
+
+    data = {
+        'id': 2222,
+        'name': 'User',
+        'discriminator': '1234',
+        'nick': 'U',
+        'status': 'online',
+        'game': {'name': 'Playing something'},
+        'deaf': False,
+        'self_deaf': False,
+        'mute': False,
+        'self_mute': False
+    }
+    # Assuming you have a valid state/ConnectionState object named `state`
+    # and optionally a connected channel
+    member = WidgetMember(state=state, data=data)
+
+    print(member.display_name)  # U or User
+    print(member.status)        # Status.online
+    print(member.activity)      # Activity created from 'game'
+
+Widget
+------
+Represents a guild widget.
+
+- id: int
+  The guild’s ID.
+- name: str
+  The guild’s name.
+- channels: List[WidgetChannel]
+  The accessible voice channels in the guild.
+- members: List[WidgetMember]
+  The online members in the server. Offline members do not appear in the widget.
+
+Notes:
+- Due to a Discord limitation, widget data includes online members only.
+
+Usage example:
+.. code-block:: python
+
+    # Assuming `widget` is an instance obtained from Nextcord representing a guild widget
+    for ch in widget.channels:
+        print(ch.name)
+
+    for m in widget.members:
+        print(m.display_name, m.status)
+
+Details
+-------
+
+Migration considerations
+- Payload keys differ slightly between widget data and your previous implementation. Nextcord maps:
+  - deaf / self_deaf and mute / self_mute to deafened and muted respectively.
+  - game to an activity via create_activity.
+- Status values are converted to the Status enum via try_enum(Status, data.get('status')).
+- Widget data only includes online members; offline members won't appear in widget.members.
+
+Code references (from Nextcord widget module)
+- WidgetChannel.__init__(id: int, name: str, position: int)
+- WidgetChannel.mention -> str
+- WidgetChannel.created_at -> datetime (via snowflake_time)
+
+- WidgetMember.__init__(state: ConnectionState, data: WidgetMemberPayload, connected_channel: Optional[WidgetChannel] = None)
+- WidgetMember.display_name -> str
+- WidgetMember.status -> Status
+- WidgetMember.activity -> Optional[Union[BaseActivity, Spotify]]
+- WidgetMember.connected_channel -> Optional[WidgetChannel]
+
+- Widget.__init__ (implicit in the module) exposes:
+  - id, name, channels, members
+
+Migration tips
+- When adapting existing code to Nextcord:
+  - If you previously consumed raw widget JSON, convert into Widget, WidgetChannel, and WidgetMember objects as shown.
+  - Use WidgetChannel.mention and WidgetMember.display_name to interact with widget data in a user-friendly way.
+  - Be mindful that widget.members only contains online members.
+
+Code example: Migrating a widget payload to Nextcord objects
+.. code-block:: python
+
+    # Example payloads
+    channel_payload = {'id': 1111, 'name': 'general', 'position': 0}
+    member_payload = {
+        'id': 2222, 'name': 'User', 'discriminator': '1234',
+        'nick': 'U', 'status': 'online',
+        'game': {'name': 'Playing something'},
+        'deaf': False, 'self_deaf': False,
+        'mute': False, 'self_mute': False
+    }
+
+    # Assuming you have a ConnectionState `state` from Nextcord
+    wc = WidgetChannel(**channel_payload)
+    wm = WidgetMember(state=state, data=member_payload, connected_channel=wc)
+
+    print(wc.name)            # general
+    print(wm.display_name)    # U
+    print(wm.activity)        # Activity created from 'game'
+
+Conclusion
+----------
+Nextcord’s widget classes provide a straightforward, type-safe way to work with guild widget data. By mapping widget payloads to WidgetChannel, WidgetMember, and Widget, migration from other libraries becomes a matter of adopting the provided classes and respecting the nuanced payload keys (deaf/mute, game, etc.). Ensure you handle online-only widget members and utilize the helpful properties (mention, display_name, created_at) to build your widget-aware features.

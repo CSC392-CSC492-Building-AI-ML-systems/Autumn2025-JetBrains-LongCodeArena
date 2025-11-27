@@ -1,0 +1,218 @@
+contracts.rst
+
+Contract Base Class
+===================
+
+
+Overview
+--------
+
+This module provides the base Contract proxy class used to interact with
+compiled Solidity contracts via a Web3 connection.
+
+Key ideas
+
+- Subclasses are created from a contract ABI (and optionally code and source)
+  using a factory function (construct_contract_factory). The resulting class is
+  a subclass of this Contract base class.
+- A Contract subclass must be initialized with a Web3 instance (assigned to
+  the class attribute `web3`) before being instantiated.
+- Once created, you can deploy new contracts, encode ABI calls, and listen to
+  contract events.
+
+Prerequisites
+
+- A Web3 instance must be associated with the Contract subclass (set on the class
+  as `web3`). This is typically done by the contract factory that creates the
+  subclass.
+- A contract ABI is required to work with function calls and event decoding.
+
+
+API Reference
+-------------
+
+Class: Contract
+~~~~~~~~~~~~~~~~
+
+Attributes
+~~~~~~~~~~
+
+- web3 (class attribute): The Web3 instance used for all interactions. Must be set
+  on the subclass before creating instances.
+- _abi, _code, _code_runtime, _source (class attributes): Optional defaults that
+  can be overridden per-instance. If not provided, accessing these properties will
+  raise AttributeError.
+- address (instance attribute): The deployed contract address.
+
+Initialization
+~~~~~~~~~~~~~~
+
+__init__(abi=None, address=None, code=None, code_runtime=None, source=None)
+
+- Purpose: Create a new smart contract proxy object bound to a specific address.
+- Behavior:
+  - Requires Contract.web3 to be initialized; otherwise raises AttributeError.
+  - Optional overrides for ABI, code, runtime code, and source can be provided
+    per-instance.
+  - Sets the contract address for subsequent interactions.
+
+Examples
+
+.. code-block:: python
+
+   # Assuming a generated Contract subclass MyContract and a Web3 instance
+   MyContract.web3 = web3  # initialize the class with a Web3 instance
+
+   # Create a proxy for an already-deployed contract
+   my_contract = MyContract(address='0x1234...abcd', abi=abi)
+
+ABI / Code / Source properties
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- abi: Returns the contract ABI if provided at the class level or instance level.
+  If not set, raises AttributeError.
+- code: Returns the compiled bytecode if provided; otherwise raises AttributeError.
+- code_runtime: Returns the runtime bytecode if provided; otherwise raises AttributeError.
+- source: Returns the contract source if provided; otherwise raises AttributeError.
+
+Deployment
+~~~~~~~~~~
+
+classmethod deploy(transaction=None, args=None, kwargs=None)
+
+- Purpose: Deploy a new instance of the contract to the blockchain.
+- Behavior:
+  - Requires that the contract has associated bytecode (`code` must be set).
+  - Rejects deployment if the transaction dictionary contains:
+    - 'data' (not allowed for deployments)
+    - 'to' (cannot specify a recipient for deployment)
+  - Encodes constructor arguments into the deployment data using `_encode_constructor_data`.
+  - Sends the deployment transaction via `web3.eth.sendTransaction` and returns the transaction hash.
+
+Usage example
+
+.. code-block:: python
+
+   # Deploy a contract with constructor args
+   txn_hash = MyContract.deploy(
+       transaction={'from': web3.eth.accounts[0], 'gas': 3000000},
+       args=('DGD', 18),
+   )
+   # txn_hash is the transaction hash string
+
+
+Public API
+~~~~~~~~~~
+
+encodeABI
+~~~~~~~~~
+
+@classmethod
+@coerce_return_to_text
+def encodeABI(cls, fn_name, args=None, kwargs=None, data=None)
+
+- Purpose: Encode the arguments for a contract function into Ethereum ABI-compatible data.
+- Parameters:
+  - fn_name: Name of the contract function to encode.
+  - args / kwargs: Arguments for the function.
+  - data: Optional; if provided, used as the payload instead of the function selector.
+- Behavior:
+  - Determines the function ABI, 4-byte selector, and argument layout via
+    internal helpers.
+  - If `data` is not supplied, the function selector is used as the initial payload.
+  - Returns the encoded ABI as a hex string (text form due to coerce decorator).
+
+Usage example
+
+.. code-block:: python
+
+   data = MyContract.encodeABI('transfer', args=[recipient, amount])
+   # data is the hex-encoded ABI call data, suitable for a transaction
+
+
+on
+~~
+
+@combomethod
+def on(self, event_name, filter_params=None, *callbacks)
+
+- Purpose: Register callbacks to be triggered for emitted contract events.
+- Parameters:
+  - event_name: Name of the event to listen for.
+  - filter_params: Optional dict of filter parameters (e.g., to narrow events by indexed args).
+  - callbacks: One or more callback callables to be invoked when events match.
+- Behavior:
+  - Builds argument filters, resolves the matching event ABI, and constructs
+    the event filter parameters using helper utilities.
+  - Creates a filter via `web3.eth.filter(...)`, wires up data extraction
+    via `get_event_data`, and associates a formatter for log entries.
+- Notes:
+  - The exact callback interface depends on the surrounding event handling logic.
+  - This method is available both as a classmethod and as an instance-method
+    due to the @combomethod decorator.
+
+Usage example
+
+.. code-block:: python
+
+   def handle_event(event):
+       print("Event received:", event)
+
+   contract = MyContract(address=address, abi=abi)
+   contract.on('Transfer', filter_params={'filter': {'from': some_address}}, handle_event)
+
+Examples
+--------
+
+Quick Start: Create, deploy, encode, and listen
+
+.. code-block:: python
+
+   # 1) Prepare subclass and Web3
+   # (Typically provided by construct_contract_factory from the ABI)
+   MyContract.web3 = web3
+   MyContractClass = construct_contract_factory(abi)  # returns a subclass
+   MyContractInstance = MyContractClass(address='0x1234...abcd')
+
+   # 2) Deploy a new contract (if you have the runtime code)
+   if not MyContractClass.code:
+       raise RuntimeError("Cannot deploy without contract bytecode.")
+   txn_hash = MyContractClass.deploy(
+       transaction={'from': web3.eth.accounts[0]},
+       args=('DGD', 18),
+   )
+
+   # 3) Encode a function call
+   data = MyContractClass.encodeABI('transfer', args=[recipient, amount])
+
+   # 4) Listen to events
+   def on_transfer(event):
+       print("Transfer event:", event)
+
+   MyContractInstance.on('Transfer', filter_params={'from': address}, on_transfer)
+
+
+Error handling and notes
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+- If Contract.web3 is not initialized on the subclass, instantiating a Contract
+  will raise AttributeError.
+- Accessing abi, code, code_runtime, or source without providing the corresponding
+  class/instance data raises AttributeError.
+- Deployment enforces that code must be present and disallows overriding
+  deployment transaction data ('data') or recipient ('to').
+
+Reference links
+---------------
+
+- See also: :func:`construct_contract_factory` for creating contract proxies from ABIs.
+- See also: :meth:`Contract.encodeABI` for ABI encoding details.
+- See also: :meth:`Contract.deploy` for deployment workflow.
+
+Notes
+-----
+
+This documentation reflects the Contract base class interface shown in the source
+code. The complete contract interaction workflow typically involves generating
+a concrete subclass via a contract factory and supplying a concrete Web3
+instance, ABI, and optionally bytecode and source.

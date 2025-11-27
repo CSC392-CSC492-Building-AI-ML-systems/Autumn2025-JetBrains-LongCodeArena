@@ -1,0 +1,113 @@
+w_ntop.rst
+==============
+
+Select walkers from bins
+
+Overview
+--------
+The w_ntop tool selects walkers from bin states using an assignment file that maps walkers to bins at each timepoint. By default, it selects the highest-weight walkers within each bin, but it can also select the lowest-weight or randomly chosen walkers. The selection is performed for each iteration and for each bin.
+
+Key Components
+-------------
+- WNTopTool class
+  - Program: w_ntop
+  - Description: Implements the walker-bin selection logic. Uses an assignment file to determine bin membership across timepoints and iterations.
+  - Output: Writes an output HDF5 file (default ntop.h5) containing the following datasets:
+    - /n_iter: iteration numbers for entries in the other datasets
+    - /n_segs: number of segments in each bin/state for each iteration
+    - /seg_ids: matching segment identifiers per iteration, bin, and segment
+    - /weights: weights for each matching segment
+- Input requirements
+  - Assignments file (default: assign.h5) containing:
+    - An assignments dataset mapping walkers to bins per iteration and timepoint
+    - An nsegs dataset indicating how many segments exist per bin per iteration
+    - File-level attribute nbins (used to compute the number of bins)
+- Command-line arguments
+  - Input options
+    - -a, --assignments: assignments file (default: assign.h5)
+  - Selection options
+    - -n, --count: number of walkers to select per bin (default: 1)
+    - -t, --timepoint: timepoint within each iteration (default: -1; last timepoint)
+    - Mutually exclusive: --highweight, --lowweight, --random to choose selection strategy
+      - --highweight: select COUNT highest-weight walkers (default)
+      - --lowweight: select COUNT lowest-weight walkers
+      - --random: select COUNT walkers randomly
+  - Output options
+    - -o, --output: output file name (default: ntop.h5)
+  - Progress reporting
+    - Progress indicator options (via ProgressIndicatorComponent)
+- Output format
+  - ntop.h5 contains:
+    - /n_iter: integer array of iteration numbers
+    - /n_segs: 2D array [iteration][bin] of the number of segments kept
+    - /seg_ids: 3D array [iteration][bin][segment] of matching segment identifiers
+    - /weights: 3D array [iteration][bin][segment] of corresponding weights
+  - Shapes depend on the selected iteration range and the requested count; if there are fewer walkers than requested, n_segs may be smaller than the requested count.
+
+Usage
+-----
+Basic usage (uses all defaults):
+w_ntop -a assign.h5
+
+Example with non-default options:
+- Select 2 walkers per bin from the last-timepoint of each iteration:
+w_ntop -a assign.h5 -n 2 -t -1
+
+- Randomly select 3 walkers per bin:
+w_ntop -a assign.h5 -n 3 --random -o ntop.h5
+
+Notes
+- See w_assign --help for guidance on generating a suitable assignment file.
+- The tool writes to ntop.h5 by default unless you specify --output.
+- The output reflects the iterations and bins present in the assignments file; the number of bins is derived from the assignments file attribute nbins plus one.
+
+Details
+-------
+- Output datasets
+  - /n_iter: 1D integer array containing iteration indices for each entry in /seg_ids and /weights.
+  - /n_segs: 2D array with shape [iter_count, nbins]; stores the number of valid segments kept per iteration and bin.
+    - The value may be smaller than the requested count if fewer walkers exist for a bin in a given iteration.
+  - /seg_ids: 3D array with shape [iter_count, nbins, count]; contains the matching segment identifiers for each iteration, bin, and selection index.
+    - For a given iteration n_iter and bin b, the valid segments are seg_ids[n_iter][b][:n_segs[n_iter][b]].
+  - /weights: 3D array with shape [iter_count, nbins, count]; contains the corresponding weights for each matching segment.
+- Data sources and access
+  - The tool reads assignments from the assignments dataset within the assignments file.
+  - It determines nbins via assignments_file.attrs['nbins'] + 1.
+  - Timepoint selection is performed by slicing the assignments for the specified timepoint:
+    - timepoint can be set with -t/--timepoint; -1 means use the last timepoint.
+  - Weights are retrieved from the current iteration’s data via:
+    - self.data_reader.get_iter_group(n_iter)['seg_index']['weight']
+- Iteration handling
+  - The iterations processed are defined by the range [iter_start, iter_stop) from the IterRangeSelection.
+  - The code ensures the iteration range is valid against the assignments data:
+    - nsegs is read for the iterated range to determine valid entries.
+- Implementation highlights
+  - The tool uses a Cython-accelerated loop for per-segment processing (described in comments in the source).
+  - Output datasets leverage chunking, shuffling, and compression for efficiency:
+    - seg_ids and weights datasets are chunked and compressed for performance on large datasets.
+- Reference
+  - The core behavior is implemented in the WNTopTool class, with key parameters and datasets defined in its description and argument parsing.
+
+Example source references (from the code):
+- Program and description: prog = 'w_ntop'; description includes the default high-weight selection and alternative modes.
+- Output format documentation included in the tool’s description block (n_iter, n_segs, seg_ids, weights).
+- Argument parsing and defaults:
+  - -a/--assignments, -n/--count, -t/--timepoint
+  - --highweight, --lowweight, --random (mutually exclusive)
+  - -o/--output
+  - Default select_what is 'highweight'
+- Core processing flow is implemented in the go() method, which reads:
+  - assignments_ds, nbins, iter_start/iter_stop, nsegs
+  - creates datasets for output
+  - iterates over iterations to extract assignments for the chosen timepoint and fill output datasets with matching segments and weights
+
+Code excerpt (conceptual)
+- Reading assignments for a given iteration and timepoint:
+  assignments = np.require(
+      assignments_ds[h5io.get_iteration_entry(assignments_ds, n_iter) + np.index_exp[:, timepoint]],
+      dtype=westpa.core.binning.index_dtype,
+  )
+- Accessing weights for the current iteration:
+  all_weights = self.data_reader.get_iter_group(n_iter)['seg_index']['weight']
+
+This documentation captures the essential behavior, inputs, outputs, and usage of the w_ntop command as implemented in the provided source.

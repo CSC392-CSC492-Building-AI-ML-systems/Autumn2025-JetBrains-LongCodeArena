@@ -1,0 +1,183 @@
+# Logging Module (log.py)
+
+This document provides technical documentation for the Logging module implemented in log.py. It describes how the module initializes log handlers, how configuration drives behavior, and how to use and extend the logging system in your application.
+
+## Overview
+
+- Introduces a custom log level named NOTICE (value 25) and registers it with the standard logging module.
+- Creates a global root logger and optionally configures:
+  - Console logging (TTY detection or ASABFORCECONSOLE environment flag)
+  - File-based logging via a rotating file handler
+  - Syslog logging (local or remote) with multiple formatters
+- Supports asynchronous log rotation scheduling via a Timer, driven by a configuration option.
+- Uses a structured formatter for file logging and several formatters for syslog.
+
+Key components defined in the module:
+- `LOG_NOTICE` (custom log level 25)
+- `_NAME_TO_LEVEL` (mapping from human-readable levels to numeric levels)
+- `Logging` class (orchestrator for all logging handlers)
+- Integration points with application lifecycle (e.g., `app.Loop`, `Timer`)
+
+Note: Some formatter classes (e.g., `StructuredDataFormatter`, `MacOSXSyslogFormatter`, `SyslogRFC5424Formatter`, `SyslogRFC5424microFormatter`, `SyslogRFC3164Formatter`) are assumed to be defined elsewhere in the codebase.
+
+---
+
+## Key Concepts
+
+- Custom log level: NOTICE (25)
+  - Visible in non-verbose mode, not a replacement for warnings or errors.
+  - Registered with Python's logging system via `logging.addLevelName(LOG_NOTICE, "NOTICE")`.
+- Console logging:
+  - Enabled when the process is attached to a TTY or when `ASABFORCECONSOLE` environment variable is set to a non-zero value.
+- File logging:
+  - Optional; controlled by `logging:file:path`. If the path is non-empty, a `RotatingFileHandler` is configured.
+  - Rotation settings:
+    - `logging:file:backup_count` – number of backup files to keep
+    - `logging:file:backup_max_bytes` – maximum size per log file
+  - Logs are formatted with `StructuredDataFormatter` (requires `fmt`, `datefmt`, and `sd_id`).
+  - Optional automatic rotation scheduling controlled by `logging:file:rotate_every` (e.g., "5M" for 5 minutes). If configured, a timer is created to trigger rotation checks.
+- Syslog logging:
+  - Enabled via `logging:syslog:enabled`.
+  - Target addresses support:
+    - Unix domain (path beginning with '/')
+    - TCP/UDP over IPv4/IPv6 (via URL-like syntax, e.g., `tcp://host:514`, `udp://host:514`)
+    - Unix connect/sendto modes (`unix-connect`, `unix-sendto`)
+  - Log formatters:
+    - `m` → `MacOSXSyslogFormatter`
+    - `5` → `SyslogRFC5424Formatter`
+    - `5micro` → `SyslogRFC5424microFormatter`
+    - otherwise → `SyslogRFC3164Formatter`
+  - The formatter uses an `sd_id` from `Config["logging"]["sd_id"]`.
+
+---
+
+## API
+
+- `LOG_NOTICE`:
+  - Integer constant for the custom log level (25).
+- `_NAME_TO_LEVEL`:
+  - Mapping from common string level names to `logging` levels, including aliases such as `"NOTICE"`, `"LOG_NOTICE"`, and `"LOG NOTICE"`.
+- `Logging(app)`:
+  - Constructor that initializes logging based on application context.
+  - Parameters:
+    - `app`: An application object that provides:
+      - `Loop` (asyncio event loop)
+      - Access to configuration via `Config`
+  - Behavior:
+    - Creates the root logger and attaches appropriate handlers if none exist.
+    - Configures console, file, and syslog handlers as described in the configuration reference.
+    - Schedules log rotation checks if `rotate_every` is configured.
+
+---
+
+## Configuration Reference
+
+Configure the following sections to control logging behavior.
+
+- logging:file
+  - path: string
+    - Path to the log file. If empty, file logging is disabled.
+  - backup_count: int
+    - Number of rotated backups to keep (for `RotatingFileHandler`).
+  - backup_max_bytes: int
+    - Maximum size in bytes per log file before rotation.
+  - format: string (optional)
+    - Date/formatting for file logs (passed to `StructuredDataFormatter`).
+  - datefmt: string (optional)
+    - Date format for file logs (passed to `StructuredDataFormatter`).
+  - rotate_every: string (optional)
+    - Rotation interval in the form `"<number><unit>"` where unit is one of `d` (days), `H` (hours), `M` (minutes), `s` (seconds).
+    - Example values: `5M` (rotate every 5 minutes), `1H` (rotate every 1 hour).
+
+- logging:syslog
+  - enabled: boolean
+  - address: string
+    - Destination for syslog (supports UNIX domain sockets or URL-like schemes such as `tcp://host:514`, `udp://host:514`, `unix-connect:/path`, `unix-sendto:/path`).
+  - format: string
+    - Formatter selector: `m`, `5`, `5micro`, or default to RFC3164.
+  - sd_id: string
+    - Source deployment ID used by some RFC5424 formatters.
+
+- logging
+  - sd_id: string
+    - Default SD-ID used across formatters that require it.
+
+- Other considerations
+  - Environment:
+    - If stdout is a TTY or `ASABFORCECONSOLE` is non-zero, console logging is configured by default.
+  - The module relies on a `Timer` to schedule periodic log rotation checks when `rotate_every` is configured.
+
+---
+
+## Usage
+
+Minimal usage pattern:
+
+- Ensure your application provides an asyncio loop and a configuration backend compatible with `Config`.
+- Instantiate the Logging module early in your startup sequence.
+
+Example:
+
+```python
+from log import Logging
+# app is your application object with an asyncio loop (app.Loop)
+# and a working Config object (populated from your config source)
+log = Logging(app)
+```
+
+Logging usage in application code:
+
+```python
+import logging
+
+logger = logging.getLogger(__name__)
+
+logger.info("Application started")
+logger.log(LOG_NOTICE, "Custom NOTICE level message")
+logger.error("An error occurred")
+```
+
+Note: To emit messages at the custom NOTICE level, use `logger.log(LOG_NOTICE, "message")` or adjust the logger with the appropriate level name via `_NAME_TO_LEVEL` mapping if needed.
+
+---
+
+## Examples
+
+1) Enable file logging with rotation every 10 minutes, and keep 7 backups of up to 10 MB each.
+
+- logging:file:path: "/var/log/myapp/app.log"
+- logging:file:backup_count: 7
+- logging:file:backup_max_bytes: 10_000_000
+- logging:file:rotate_every: "10M"
+
+2) Enable syslog over UDP with RFC5424 format.
+
+- logging:syslog:enabled: true
+- logging:syslog:address: "udp://syslog.local:514"
+- logging:syslog:format: "5"  (RFC5424)
+- logging:sd_id: "myapp"
+
+3) Disable file logging but enable console logging (typical in a container environment).
+
+- logging:file:path: ""  (empty to disable)
+- ASABFORCECONSOLE environment variable set to a non-zero value, or run in a TTY.
+
+---
+
+## Troubleshooting
+
+- No logs emitted to console or file:
+  - Verify that a TTY is present or `ASABFORCECONSOLE` is set as required.
+  - Check that `logging:file:path` is non-empty if file logging is expected; ensure the directory exists or can be created.
+- Rotation not occurring:
+  - Confirm `logging:file:rotate_every` is in the expected format (e.g., `5M`, `1H`).
+  - Ensure the timer integration (via `Timer`) is active in your application lifecycle.
+- Syslog not delivering:
+  - Ensure the destination address is reachable and the chosen protocol matches the syslog receiver.
+  - Confirm the chosen format is supported and properly installed (formatters exist in the codebase).
+- Custom NOTICE level messages not appearing:
+  - Ensure the logger is using a level that allows NOTICE (the level is between NOTSET and CRITICAL as defined).
+
+---
+
+If you need further customization guidance or want to add a new formatter, refer to the associated formatter classes (e.g., StructuredDataFormatter, Syslog RFC5424/3164 formatters) and wire them into the `Logging` class in a similar fashion to the existing code paths.

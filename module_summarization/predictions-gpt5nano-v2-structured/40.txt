@@ -1,0 +1,149 @@
+# pydantic.rst
+
+How to generate Pydantic Models from Tortoise Models
+
+This documentation explains how to create Pydantic models from Tortoise ORM models using the pydantic_model_creator utility. It covers configuration through PydanticMeta, usage options, and representative examples including nested, computed, and recursive models.
+
+Overview
+- Purpose: Generate Pydantic models that mirror Tortoise models for data validation, serialization, and API schemas.
+- Core tool: pydantic_model_creator(cls, ...) builds a dynamic Pydantic model from a given Tortoise Model class.
+- Key features: include/exclude control, computed fields, backward relations, recursion limits, cycle handling, and alphabetical field sorting.
+
+PydanticMeta: Configuring Generated Models
+You can configure the generated Pydantic model by defining a PydanticMeta class inside your Tortoise model.
+
+Example:
+```python
+from tortoise import fields
+from tortoise.models import Model
+
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=50)
+    email = fields.CharField(max_length=100)
+    # example computed field (defined as a property on the model)
+    @property
+    def display_name(self) -> str:
+        return self.username or self.email
+
+    class PydanticMeta:
+        exclude = ("password_hash",)  # exclude sensitive/raw fields
+        computed = ("display_name",)  # include computed properties
+        include = ()  # or explicitly include specific fields
+        backward_relations = True
+        max_recursion = 3
+        allow_cycles = False
+        exclude_raw_fields = True
+        sort_alphabetically = False  # set to True to sort fields alphabetically
+```
+
+PydanticMeta fields and their purpose
+- include: Tuple[str, ...]
+  - Only include fields listed here in the generated Pydantic model. If empty, all fields (subject to other options) are included.
+- exclude: Tuple[str, ...]
+  - Fields listed here are excluded from the generated Pydantic model.
+- computed: Tuple[str, ...]
+  - Names of computed properties/methods on the model to include in the Pydantic model.
+- backward_relations: bool
+  - Whether to include backward relations (reverse relations) without explicit annotations. May produce large outputs; use with caution.
+- max_recursion: int
+  - Maximum recursion depth allowed when expanding related models.
+- allow_cycles: bool
+  - Allow cycles in recursion. Enabling this can yield large/cyclic structures; use with explicit includes/excludes and sane max_recursion.
+- exclude_raw_fields: bool
+  - Exclude raw relation fields (the fields ending with _id). Helps keep the output clean and prevents leaking internal identifiers.
+- sort_alphabetically: bool
+  - If True, sort fields alphabetically in the generated model. Default is to preserve declaration order.
+
+Generating Pydantic Models
+Usage
+- The main helper is pydantic_model_creator, which builds a Pydantic model from a Tortoise Model.
+
+Signature (highlights):
+- cls: The Tortoise Model class to convert.
+- name: Optional explicit name for the generated Pydantic model.
+- exclude: Fields to exclude from the generated model.
+- include: Fields to include from the generated model.
+- computed: Extra computed fields to include.
+- allow_cycles: Enable cycles in the generated model (useful for recursive/self-referential models).
+- sort_alphabetically: Sort fields alphabetically in the generated model.
+- _stack: Internal parameter used to manage recursion (not for public use).
+- exclude_readonly: Build a subset model excluding readonly fields.
+
+Key behavior
+- Unique model classes per combination of include/exclude/computed and other options. If options differ, a new Pydantic model class is created with a unique name (often suffixed with a hash).
+- Recursion protection: When building models with relationships, recursion is guarded to avoid infinite loops. Using allow_cycles and max_recursion can help control this behavior.
+
+Basic Example
+```python
+from tortoise.contrib.pydantic import pydantic_model_creator
+from tortoise import fields
+from tortoise.models import Model
+
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=50)
+    email = fields.CharField(max_length=100)
+
+class Post(Model):
+    id = fields.IntField(pk=True)
+    author = fields.ForeignKeyField('models.User', related_name='posts')
+    title = fields.CharField(max_length=200)
+    content = fields.TextField()
+
+# Generate a simple User schema (all fields)
+UserSchema = pydantic_model_creator(User)
+
+# Generate a Post schema with nested author model (default recursion)
+PostSchema = pydantic_model_creator(Post, name="PostSchema")
+
+# Include computed field from User (if defined) and exclude password-related fields
+# Assuming User has a computed property 'display_name'
+UserSchemaWithComputed = pydantic_model_creator(
+    User, computed=("display_name",), exclude=("password_hash",)
+)
+```
+
+Advanced Usage: Nested Models and Recursion
+- Including related models by default can lead to deep/nested schemas. Use max_recursion and allow_cycles to manage complexity.
+- Example with self-referential model:
+```python
+class Category(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=50)
+    parent = fields.ForeignKeyField('models.Category', related_name='children', null=True)
+
+# Enable recursion handling for nested categories
+CategorySchema = pydantic_model_creator(Category, max_recursion=3, allow_cycles=True)
+```
+
+Controlling Output with PydanticMeta
+- If you want to strictly control which fields appear for a given model, define PydanticMeta on the source model and adjust include/exclude/computed accordingly.
+- You can also use exclude_raw_fields to avoid raw relation identifiers (e.g., author_id) in your Pydantic output.
+
+Practical Tips
+- Use explicit name when you expect multiple variants of the same Tortoise model (e.g., different subsets of fields). The generator will create a distinct Pydantic model per configuration.
+- For API schemas (e.g., FastAPI), prefer including only the necessary fields and computed values, and enable max_recursion with a safe value when dealing with related models.
+- If you encounter cycles, either:
+  - Enable allow_cycles=True with a reasonable max_recursion, or
+  - Refine include/exclude/computed to cut down the recursion path.
+
+Common Scenarios
+- Simple DTO for a User:
+  - Include: all fields except sensitive ones (password_hash)
+  - Exclude: password_hash
+- API response with computed display name:
+  - Include: id, username, email
+  - Computed: display_name
+- Nested representations with a Post and its Author:
+  - PostSchema = pydantic_model_creator(Post, include=("id","title","content","author"), max_recursion=1)
+
+Notes
+- The internal implementation uses a caching/index mechanism to manage generated models and ensures deterministic naming when options are default.
+- Computed fields rely on model properties or methods exposed on the Tortoise model.
+
+References
+- pydantic_model_creator: Core utility to generate Pydantic models from Tortoise ORM models.
+- PydanticMeta: Optional configuration class for controlling which fields are included, excluded, and how computed fields are handled.
+
+This documentation provides practical guidance for generating and configuring Pydantic models from Tortoise models, with examples for common use cases and guidance on handling recursion and cycles.

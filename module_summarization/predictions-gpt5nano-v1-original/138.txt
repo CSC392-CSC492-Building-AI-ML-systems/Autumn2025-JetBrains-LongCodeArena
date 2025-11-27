@@ -1,0 +1,104 @@
+Array best practices
+====================
+
+This document summarizes recommended patterns for working with Dask Array, with a focus on backend dispatch, and compatibility and utilities for numpy.ma masked arrays.
+
+Backend dispatch and extending array operations
+----------------------------------------------
+
+Dask Array uses dispatch registries to enable backend-specific implementations of core operations. Examples in the codebase include:
+
+- concatenate
+- tensordot
+- einsum
+- empty
+- divide
+- percentile
+- numel
+- nannumel
+- to_numpy_dispatch
+- to_cupy_dispatch
+
+Best practices
+
+- Add backend-specific implementations by registering your backend with the appropriate Dispatch registry.
+- Keep implementations aligned with the numpy API semantics where possible, to preserve user expectations.
+- Use the dispatch registrations to select the most appropriate backend at runtime, avoiding premature materialization or backend-specific branching in user code.
+
+Example (illustrative; adapt to your codebase’s import paths and backend name):
+
+.. code-block:: python
+
+    # Suppose `MyBackend` is a registered backend for Dask Array
+    @concatenate_lookup.register(MyBackend)
+    def my_backend_concatenate(x, y, axis=0, out=None):
+        # backend-specific concatenation
+        ...
+
+    @to_numpy_dispatch.register(MyBackend)
+    def my_backend_to_numpy(x):
+        # convert to NumPy array using the backend
+        ...
+
+Interoperability with numpy.ma masked arrays
+--------------------------------------------
+
+To support masked arrays efficiently, the code provides wrappers that map numpy.ma behavior to Dask Array blocks without materializing full arrays.
+
+Key components
+
+- normalize_masked_array(x): Normalizes a masked array into its constituent parts (data, mask, fill_value) for downstream processing.
+- _wrap_masked(f): Internal helper that adapts a NumPy masked array function to operate over Dask Array blocks by applying the operation in a blockwise fashion.
+- Masked operations exposed as Dask-friendly wrappers:
+  - masked_greater, masked_greater_equal, masked_less, masked_less_equal, masked_not_equal
+  - masked_equal (supports scalar value; raises if a non-scalar value with shape is provided)
+  - masked_invalid
+  - masked_inside, masked_outside
+  - masked_where
+  - masked_values
+  - fix_invalid
+  - getdata
+  - getmaskarray
+
+Best practices
+
+- Use asanyarray to ensure inputs become Dask Arrays where appropriate, then apply operations via map_blocks or blockwise to avoid materializing the full array.
+- Prefer the wrappers over directly calling NumPy’s masked operations when working with Dask Arrays, to preserve lazy evaluation and chunked processing.
+- For most elementwise masked operations, rely on the blockwise/map_blocks approach to apply the NumPy masked functions to each block.
+- When using masked_where, ensure condition and input shapes are compatible; mismatches raise clear errors to aid debugging.
+
+Example: applying masked operations on Dask Arrays
+
+.. code-block:: python
+
+    import dask.array as da
+    import numpy as np
+
+    a = da.random.random((1000, 1000), chunks=(250, 250))
+    condition = (a > 0.5)
+
+    # Use a masked operation that works with Dask
+    from dask.array import ma as dam
+
+    b = dam.masked_greater(a, 0.5)          # elementwise mask-based comparison
+    c = dam.masked_where(condition, a)      # apply mask where condition is True
+
+Notes and caveats
+-----------------
+
+- masked_equal only supports scalar values for the RHS; passing an array with a shape will raise a ValueError.
+- masked_where validates shapes of condition and input; a mismatch raises an IndexError with a helpful message.
+- Derived-from annotations keep NumPy.ma semantics in function docstrings and help with introspection and API consistency.
+
+Performance considerations
+-------------------------
+
+- Avoid materializing complete arrays; operate on blocks via map_blocks and blockwise.
+- Normalize inputs early (e.g., using normalize_masked_array) to simplify downstream logic and improve consistency across backends.
+- When adding new masked-array capabilities, implement in terms of blockwise/map_blocks to preserve lazy evaluation and parallelism.
+
+Additional references
+---------------------
+
+- For backend-specific behavior, consult the Dispatch registries used by Dask Array, which enable backend-aware optimizations and integration.
+- For NumPy.ma compatibility, leverage the derived_from metadata to maintain consistent documentation and API expectations.

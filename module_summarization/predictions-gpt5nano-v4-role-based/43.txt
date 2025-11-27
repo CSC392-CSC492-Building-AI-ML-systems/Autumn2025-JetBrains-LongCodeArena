@@ -1,0 +1,277 @@
+Config usage
+==============
+
+This document describes how the enhanced configuration system works and how to use it in your codebase. It is based on the ConfigParser subclass shown in the provided code, including default values, includes, zookeeper-based loading, and sensible security-related features.
+
+Overview
+--------
+
+- The ConfigParser class extends Python's configparser to provide:
+  - A rich set of default values for multiple sections (general, logging, metrics, doc, passwords, housekeeping, etc.).
+  - Automatic reading and inclusion of additional configuration files.
+  - Support for including configuration from Zookeeper.
+  - Environment-variable expansion and safe handling of sensitive values (passwords).
+  - Daemonization-related defaults (pidfile handling, working directory, etc.).
+
+- Default values can be augmented with add_defaults, letting you layer project-specific defaults on top of the built-in ones.
+
+- Configuration can be loaded from a file and can reference additional files via an include mechanism. Includes can be nested and can come from Zookeeper.
+
+Default configuration values
+----------------------------
+
+The implementation defines a comprehensive set of defaults in _default_values. Key sections and notable keys include:
+
+- general
+  - config_file: Path to the main configuration file (read from ASAB_CONFIG env var by default).
+  - tick_period: 1 (seconds between main loop iterations).
+  - var_dir: Expanded path ~/<script-name> for runtime data.
+  - changelog, manifest: Optional paths/identifiers.
+  - pidfile: "!" (special meaning: platform-specific location for the pid file).
+  - working_dir: "."
+  - uid, gid: Optional process ownership hints.
+
+- asab:metrics
+  - native_metrics: "true" enables native metrics collection.
+  - web_requests_metrics: False by default (web-request metrics are not generated unless enabled).
+  - expiration: 60 (seconds).
+
+- asab:doc
+  - default_route_tag: "module_name"
+
+- logging
+  - verbose: Controlled by ASAB_VERBOSE env var.
+  - app_name: basename of the current script (sys.argv[0]).
+  - sd_id: "sd" (RFC5424 structured data ID).
+  - level: "NOTICE"
+  - levels: (empty by default)
+
+- logging:console
+  - format: "%(asctime)s %(levelname)s %(name)s %(struct_data)s%(message)s"
+  - datefmt: "%d-%b-%Y %H:%M:%S.%f"
+
+- logging:syslog
+  - enabled: "false"
+  - address: platform-aware default (Darwin uses a specific path; others default to /dev/log or similar).
+  - format: platform-aware default (Darwin uses "m", others default to "3")
+
+- logging:file
+  - path, format, datefmt
+  - backup_count, backup_max_bytes
+  - rotate_every
+
+- library
+  - azure_cache: "false" by default (can be a boolean or a path to the cache)
+
+- passwords
+  - A dedicated section for secrets. It is not shown in the default API output, but it is intended to store sensitive data securely.
+
+- housekeeping
+  - at, limit: Time bounds for housekeeping tasks
+  - run_at_startup: "no" by default
+
+- zookeeper (optional)
+  - If ASAB_ZOOKEEPER_SERVERS is present in the environment, a default zookeeper servers value is injected:
+    - zookeeper/servers = <value from ASAB_ZOOKEEPER_SERVERS>
+
+Key behaviors derived from the defaults
+---------------------------------------
+
+- Environment-driven defaults:
+  - ASAB_CONFIG (ASAB_CONFIG) defines the default config_file in general.
+  - ASAB_VERBOSE controls verbose logging.
+  - ASAB_ZOOKEEPER_SERVERS, when present, injects default Zookeeper servers.
+
+- Security-conscious defaults:
+  - The passwords section is meant to securely store secrets; actual usage in the config refers to these values via references like ${passwords:NAME}.
+
+- Daemonization and file layout:
+  - pidfile uses a special interpretation ('!') to allow platform-specific behavior.
+  - var_dir expands to a user-owned, script-named directory for runtime data.
+
+Extending defaults
+------------------
+
+- add_defaults(dictionary: dict) merges a new dictionary of defaults into the current configuration.
+  - Sections not present are created.
+  - Existing keys are not overwritten.
+  - Values are stringified if present.
+  - If a value contains "$", environment variables and other substitutions are expanded (os.path.expandvars).
+
+- Keys are canonicalized using optionxform, making keys case-insensitive in practice.
+
+Includes and file loading
+-------------------------
+
+The configuration supports including additional files and loading configuration in a flexible way.
+
+- _traverse_includes(includes, this_dir)
+  - Reads additional configuration files declared in a "include" directive.
+  - Includes can be provided as either:
+    - newline-separated list (one per line)
+    - space-separated list (space-delimited)
+  - Supports including from Zookeeper via a zookeeper: prefix (zookeeper-specific handling is delegated to _include_from_zookeeper).
+  - For each include glob:
+    - Expands environment variables and glob patterns.
+    - Resolves to absolute paths.
+    - Prevents including the same file more than once (prevents infinite include loops).
+    - Temporarily pushes the directory of the included file on a stack to correctly resolve relative includes.
+
+- _load()
+  - Entry point to initialize the internal state.
+  - Prepares:
+    - _load_dir_stack (directories for relative includes)
+    - config_contents_list and config_name_list (collections used during loading)
+  - Reads the main configuration from the default location (derived from general.config_file).
+  - If the file does not exist or fails to load, behavior is defined by the surrounding code (not fully visible in snippet).
+
+- Include semantics
+  - general.include can contain:
+    - Paths to other INI-style config files
+    - zookeeper: references (handled by _include_from_zookeeper)
+  - Included files are read in turn, and their values become part of the effective configuration.
+
+- Nested includes
+  - Includes can themselves contain other includes, enabling complex, layered configuration setups.
+
+- Infinite loops
+  - The code tracks which files have already been included to avoid recursive cycles, logging a warning when a file would be included more than once.
+
+- Zookeeper
+  - If a zookeeper include is encountered (e.g., include = zookeeper:...), the loader delegates to _include_from_zookeeper to fetch and apply configuration.
+  - Environment variable ASAB_ZOOKEEPER_SERVERS can contribute a default zookeeper servers value.
+
+Practical usage patterns
+------------------------
+
+- Minimal configuration (relying mainly on defaults)
+  - Only override what you need; many values come from the defaults.
+  - Example: enable verbose logging and adjust the tick period.
+
+  Example (INI):
+  [general]
+  tick_period = 2
+  config_file = /etc/asab/config.ini
+
+  [logging]
+  level = INFO
+  verbose = true
+
+- Overriding defaults via a configuration file
+  - Place overrides in a file that is read by the system (via general.config_file or direct read operations).
+  - Use add_defaults to augment the built-in defaults if you are programmatically initializing ConfigParser.
+
+  Example (INI):
+  [general]
+  tick_period = 5
+  var_dir = /var/lib/asab
+  pidfile = /var/run/asab.pid
+
+  [logging:syslog]
+  enabled = true
+  address = /dev/log
+
+- Including additional configuration files
+  - Use the include directive to compose configurations from multiple files.
+
+  Example (INI):
+  [general]
+  include = /etc/asab/common.ini
+  # or
+  include =
+    /etc/asab/common.ini
+    /etc/asab/extra.ini
+
+- Using Zookeeper for configuration
+  - If your deployment uses Zookeeper, you can include configuration sections from Zookeeper.
+  - Ensure ASAB_ZOOKEEPER_SERVERS is set to the appropriate servers string.
+
+  Example (conceptual, zookeeper-based include is handled by the loader):
+  include = zookeeper:config/moduleA
+
+- Secrets management
+  - Add secrets to the passwords section (e.g., kafka_password) and reference them from other sections.
+
+  Example (INI):
+  [connection:KafkaConnection]
+  password=${passwords:kafka_password}
+
+  [passwords]
+  kafka_password=supersecret
+
+Notes and recommendations
+-------------------------
+
+- Environment-driven behavior:
+  - Prefer environment variables for toggling verbose output and enabling/disabling optional features.
+  - Use ASAB_CONFIG to point to the main configuration file; otherwise, defaults will be used.
+
+- Security:
+  - Store sensitive strings in the passwords section.
+  - Avoid printing or logging passwords; use the documented mechanism to reference secrets without exposing them.
+
+- Performance and safety:
+  - Use include directives sparingly; deeply nested includes can complicate debugging.
+  - Be mindful of circular includes and Zookeeper-based configurations that could introduce latency or partial loads.
+
+API usage points (internal vs. public)
+---------------------------------------
+
+- Public-like API:
+  - ConfigParser.add_defaults(dictionary)
+    - Merge external defaults into the current configuration.
+    - Non-destructive: existing keys are preserved.
+
+- Internal mechanics (to be aware of when extending or debugging):
+  - _load()
+  - _traverse_includes(includes, this_dir)
+  - _include_from_zookeeper (referenced but not shown in snippet)
+  - _load_dir_stack, _included, config_contents_list, config_name_list
+  - optionxform usage to normalize keys
+  - os.path.expandvars to expand environment variables in values
+
+Example configuration snippet (for quick reference)
+---------------------------------------------------
+
+Minimal config relying on built-in defaults:
+.. code-block:: ini
+
+[general]
+config_file = /etc/asab/config.ini
+tick_period = 2
+var_dir = /var/lib/asab
+
+[logging]
+level = INFO
+
+Enabling syslog in a POSIX environment:
+.. code-block:: ini
+
+[logging:syslog]
+enabled = true
+address = /dev/log
+format = 3
+
+Referencing a password stored in the secrets section:
+.. code-block:: ini
+
+[connection:KafkaConnection]
+password=${passwords:kafka_password}
+
+[passwords]
+kafka_password=supersecret
+
+Including additional configuration files:
+.. code-block:: ini
+
+[general]
+include = /etc/asab/common.ini
+# or a newline-separated list
+# include =
+#   /etc/asab/common.ini
+#   /etc/asab/extra.ini
+
+Conclusion
+----------
+
+The configuration system provides a robust, extensible, and secure way to manage runtime behavior, logging, metrics, and external integrations. It supports layered defaults, file-based overrides, and dynamic loading from Zookeeper, making it suitable for complex deployments while remaining straightforward for local development.

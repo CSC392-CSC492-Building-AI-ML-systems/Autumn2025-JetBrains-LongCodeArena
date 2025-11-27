@@ -1,0 +1,173 @@
+Camera Geometry
+===============
+
+Work with images or data cubes related to Cherenkov Cameras
+---------------------------------------------------------
+
+This section documents how to work with camera geometry data when handling images or data cubes from Cherenkov telescope arrays. The core building block is SubarrayDescription, which represents a collection of telescopes (a subarray) along with their ground positions and telescope descriptions. This enables robust mapping between per-telescope camera data and their physical layout on the ground, which is essential when combining data from multiple telescopes or when projecting camera data into a common coordinate frame for visualization or analysis.
+
+Overview
+--------
+
+- SubarrayDescription aggregates telescope descriptions and their ground coordinates.
+- Provides convenient access to:
+  - The number of telescopes in the subarray
+  - The ground coordinates of all telescopes
+  - Mappings between telescope IDs and fixed-length array indices
+  - Convenience utilities to convert IDs to indices or boolean masks
+- Built with Astropy quantities and coordinates, ensuring consistency with units (meters, degrees, etc.) and robust coordinate handling.
+
+Key Concepts
+------------
+
+- tel_positions: position of each telescope on the ground, stored as a dict {tel_id: [x, y, z]} with units (e.g., meters).
+- tel_descriptions: a dict of TelescopeDescription objects, one per telescope, keyed by tel_id.
+- reference_location: EarthLocation that serves as the reference for the telescope positions.
+- tel_coords: the ground positions exposed as an Astropy SkyCoord array in the GroundFrame.
+- tel_ids: array of telescope IDs in this subarray.
+- tel_indices: mapping from tel_id to a compact index (0 .. n_tels-1).
+- tel_index_array: an expanded index array mapping tel_id to its corresponding fixed-length index (or -1 for missing/unused IDs).
+- tel_ids_to_indices(tel_ids): map one or more tel_ids to their fixed-length indices.
+- tel_ids_to_mask(tel_ids): convert a list of tel_ids to a boolean mask over the subarray, useful for selecting data associated with a subset of telescopes.
+
+Public API
+----------
+
+SubarrayDescription
+^^^^^^^^^^^^^^^^^^
+
+- name: str
+  Name of the subarray.
+
+- positions: Dict[int, numpy.ndarray]
+  Ground positions of telescopes by tel_id. Internally converted to GroundFrame coordinates.
+
+- tels: Dict[int, TelescopeDescription]
+  Telescope descriptions by tel_id.
+
+- reference_location: EarthLocation
+  Reference Earth location for the array coordinate system.
+
+- __str__(): str
+  Human-readable representation (typically the subarray name).
+
+- __repr__(): str
+  Programmatic representation including the number of telescopes.
+
+- info(printer=print): None
+  Print a compact summary of the subarray, including the number of telescopes per type and the ranges of tel_ids. The default printer is the built-in print function, but you can supply a different one (e.g., a logger).
+
+- tel_coords (lazyproperty): SkyCoord
+  Return telescope positions as an Astropy SkyCoord object in the GroundFrame.
+
+- tel_ids (lazyproperty): numpy.ndarray
+  Telescope IDs as a 1D array, in sorted order.
+
+- tel_indices (lazyproperty): dict
+  Mapping from tel_id to a compact index (0-based) for fixed-length array representations.
+
+- tel_index_array (lazyproperty): numpy.ndarray
+  Expanded array mapping tel_id to its fixed-length index. If tel_ids are not contiguous, gaps are filled with -1.
+
+- tel_ids_to_indices(tel_ids): numpy.ndarray
+  Given a telescope ID or a list/array of IDs, return the corresponding fixed-length indices.
+
+- tel_ids_to_mask(tel_ids): numpy.ndarray
+  Convert a list of telescope IDs to a boolean mask of length n_tels where the mask[i] is True if tel_id i is in the input list.
+
+Usage Notes
+-----------
+
+- SubarrayDescription is designed to support workflows where camera data from multiple telescopes must be integrated or compared. For example, when stacking images from all telescopes in a subarray, you can use tel_indices or tel_index_array to align per-telescope pixel data in a fixed-size data structure.
+- The tel_coords property provides a convenient way to relate telescope positions to sky coordinates or projection to a common footprint for visualization or cross-comparison with reconstructed events.
+- The info() method prints a compact, type-based summary of the subarray, including per-type telescope counts and ID ranges, which is helpful for quick inspection of the array layout when working with instrument data.
+
+Code Examples
+--------------
+
+Example 1: Inspect a Subarray’s basic information and coordinates
+
+.. code-block:: python
+
+    from ctapipe.instrument import SubarrayDescription, TelescopeDescription
+    from astropy.coordinates import EarthLocation
+    import numpy as np
+    import astropy.units as u
+
+    # Example telescope positions (in meters)
+    tel_positions = {
+        1: np.array([0.0, 0.0, 0.0]) * u.m,
+        2: np.array([100.0, 0.0, 0.0]) * u.m,
+        3: np.array([200.0, 50.0, 0.0]) * u.m,
+    }
+
+    # Example telescope descriptions (you would normally construct real TelescopeDescription objects)
+    tel_descriptions = {
+        1: TelescopeDescription(/* ... */),
+        2: TelescopeDescription(/* ... */),
+        3: TelescopeDescription(/* ... */),
+    }
+
+    ref_loc = EarthLocation.from_geodetic(lon=0.0*u.deg, lat=0.0*u.deg, height=0.0*u.m)
+
+    sub = SubarrayDescription(
+        name="DemoSubarray",
+        tel_positions=tel_positions,
+        tel_descriptions=tel_descriptions,
+        reference_location=ref_loc,
+    )
+
+    # Basic access
+    print(sub)                # DemoSubarray
+    print(sub.n_tels)         # 3
+    print(sub.tel_coords)      # Ground-frame coordinates
+
+    # Tel IDs and indices
+    ids = sub.tel_ids        # array([1, 2, 3])
+    indices = sub.tel_ids_to_indices([1, 3])  # e.g., array([0, 2])
+    mask = sub.tel_ids_to_mask([1, 3])        # e.g., array([ True, False, True])
+
+Example 2: Use telescope mappings to align per-telescope data
+
+.. code-block:: python
+
+    # Suppose you have an image for each telescope stored as a 2D array per telescope.
+    # You want to assemble a single stacked data structure with one entry per telescope.
+
+    per_tel_images = {
+        1: image1,  # shape (n_pix,)
+        2: image2,
+        3: image3,
+    }
+
+    # Create a fixed-length array aligned to the subarray's tel_ids order
+    n = sub.n_tels
+    stacked = np.zeros((n, image1.size))  # example shape
+
+    for tel_id, img in per_tel_images.items():
+        idx = sub.tel_ids_to_indices([tel_id])[0]
+        stacked[idx] = img
+
+    # Alternatively, use tel_indices for packing/unpacking logic
+    # indices = sub.tel_ids_to_indices([1, 3])
+    # ...
+
+Notes
+-----
+
+- The SubarrayDescription class is publicly exposed as part of the camera geometry tooling and is intended to facilitate work with multi-telescope data in Cherenkov camera analyses.
+- All position data and coordinates use Astropy units and frames, ensuring consistent integration with camera images, data cubes, and coordinate transforms.
+
+Related API
+-----------
+
+- __all__ = ["SubarrayDescription"]
+- UnknownTelescopeID (exception raised for unknown telescope IDs in certain operations)
+- Internal helpers _group_consecutives and _range_extraction (used for formatting outputs in info())
+
+Version
+-------
+
+This API is part of the package CTApipe. The current version is reflected in the package version constant CTAPIPE_VERSION.
+
+For more details, see the implementation of SubarrayDescription in camera_geometry.rst and the surrounding module docstrings.

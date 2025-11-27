@@ -1,0 +1,410 @@
+# Models API: Usage and Patterns
+
+This document describes how to define and work with models using the Model base class and related helpers in this codebase. It covers defining models, fields and relationships, querying, saving/updating, transactions, signals, and some internal utilities that automate common tasks.
+
+---
+
+## Table of contents
+
+- [Overview](#overview)
+- [Defining a Model](#defining-a-model)
+  - [Fields](#fields)
+  - [Primary keys and table metadata](#primary-keys-and-table-metadata)
+  - [Meta options](#meta-options)
+  - [Automatic field comments (docs extraction)](#automatic-field-comments-docs-extraction)
+- [Relationships](#relationships)
+  - [ForeignKey (One-to-Many)](#foreignkey-one-to-many)
+  - [OneToOne](#onetoone)
+  - [ManyToMany](#manytomany)
+  - [Backward and reverse relations](#backward-and-reverse-relations)
+- [Querying Data](#querying-data)
+  - [Basic queries](#basic-queries)
+  - [Ordering](#ordering)
+  - [Prefetching and selecting related](#prefetching-and-selecting-related)
+- [Creating, Updating, and Deleting](#creating-updating-and-deleting)
+- [Transactions](#transactions)
+- [Signals](#signals)
+- [Error Handling](#error-handling)
+- [Internal Helpers and Behaviors](#internal-helpers-and-behaviors)
+- [Examples](#examples)
+
+---
+
+## Overview
+
+- Models are defined by subclassing the base `Model` class.
+- Each model can declare fields (scalars, relations) and an inner `Meta` class to control table-level options like table name, app label, ordering, unique constraints, and indexes.
+- Relationships are expressed with ForeignKey, OneToOne, and ManyToMany field types.
+- Data access is performed via asynchronous queryset APIs (e.g., `Model.all()`, `Model.filter(...)`), with convenient helpers for related data loading.
+- Field-level documentation can be auto-extracted using specially formatted comments placed directly above field declarations.
+
+---
+
+## Defining a Model
+
+```python
+from tortoise import fields
+from tortoise.models import Model
+from tortoise import Order
+
+class Group(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=50, unique=True)
+
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=20, unique=True)
+    age = fields.IntField(null=True)
+
+    # Relationships (see section "Relationships" below)
+    # ...
+    
+    class Meta:
+        # Optional: abstract = True
+        table = "auth_user"  # custom table name
+        app = "accounts"     # optional app label
+        ordering = (("-created_at",),)  # default ordering
+        unique_together = (("username", "age"),)  # example composite constraint
+```
+
+Key points:
+- Fields are declared as class attributes using field types from `tortoise.fields`.
+- Use `pk=True` to designate a primary key (commonly an integer ID).
+- The inner `Meta` class controls table name, app, default ordering, unique constraints, and indexes.
+
+---
+
+### Fields
+
+Common field types include:
+- `IntField`, `CharField`, `BoolField`, `FloatField`, `TextField`, etc.
+- `DateTimeField`, `DatetimeField` (depending on your version)
+- `ForeignKeyField` (One-to-Many)
+- `OneToOneField` (One-to-One)
+- `ManyToManyField` (Many-to-Many)
+
+Example:
+
+```python
+class Profile(Model):
+    id = fields.IntField(pk=True)
+    bio = fields.TextField(null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+```
+
+Notes:
+- Use `null=True` to allow a field to be nullable in the database.
+- `auto_now_add`/`auto_now` patterns can be used to auto-manage timestamps.
+
+---
+
+### Primary keys and table metadata
+
+- Primary keys are declared by `pk=True` on a field (commonly an `IntField`).
+- The `Meta` class allows you to override the database table name with `table`, and optionally set an app label with `app`.
+
+---
+
+### Meta options
+
+Common Meta options include:
+- `abstract` (bool): If True, the model is abstract (no table is created).
+- `table` (str): Custom database table name.
+- `app` (str): Optional application label.
+- `ordering` (Tuple[Tuple[str, Order], ...]): Default ordering for queries. Uses `Order` enum (e.g., `Order.DESC`).
+- `unique_together` (Tuple[Tuple[str, ...], ...]): Composite unique constraints.
+- `indexes` (Tuple[Tuple[str, ...], ...]): Additional database indexes.
+
+Ordering examples:
+- `ordering = (("created_at", Order.DESC), ("name", Order.ASC))`
+- Ordering strings are parsed by the internal `_resolve_ordering_string` helper. You can also use shorthand strings (e.g., `"-created_at"`).
+
+---
+
+### Automatic field comments (docs extraction)
+
+Field docs can be embedded in the class source via special comments that are extracted to generate documentation for each field. Use the `#: ...` syntax directly above the field.
+
+Example:
+
+```python
+class User(Model):
+    #: User login name
+    username = fields.CharField(max_length=20)
+
+    #: The user email
+    email = fields.CharField(max_length=255, unique=True)
+```
+
+At runtime, a helper (`_get_comments`) scans the class source and builds a mapping of field -> comment, replacing placeholders like `{model}` with the actual class name. This is useful for generating docs or self-contained metadata.
+
+---
+
+## Relationships
+
+### ForeignKey (One-to-Many)
+
+Declare a foreign key to another model. Access the related model instance via the field name and the related objects via a reverse relation.
+
+```python
+class Group(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=50)
+
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=20)
+    group = fields.ForeignKeyField('models.Group', related_name='users')
+```
+
+Usage:
+- Access the group from a user: `user.group` (returns a `Group` instance or `None`).
+- Access all users in a group: `await group.users.all()` (reverse relation via `related_name`).
+
+Notes:
+- The library provides a reverse relation object (e.g., `group.users`) that supports loading related items via `.all()`, `.filter(...)`, etc.
+
+### OneToOne
+
+Declare a one-to-one relation with a single related object.
+
+```python
+class User(Model):
+    id = fields.IntField(pk=True)
+    profile = fields.OneToOneField('models.Profile', related_name='user')
+```
+
+Usage:
+- Access the related profile: `await user.profile` or `user.profile` depending on lazy loading.
+- Access the linked user from a profile: `await profile.user` (via reverse relation).
+
+### ManyToMany
+
+Declare a many-to-many relation.
+
+```python
+class Tag(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=30)
+
+class Post(Model):
+    id = fields.IntField(pk=True)
+    title = fields.CharField(max_length=200)
+    tags = fields.ManyToManyField('models.Tag', related_name='posts')
+```
+
+Usage:
+- Add a tag to a post: `await post.tags.add(tag)`
+- Remove: `await post.tags.remove(tag)`
+- Replace all tags: `await post.tags.set([tag1, tag2])`
+- Load tags for a post: `tags = await post.tags.all()`
+
+### Backward and reverse relations
+
+Backward relations (reverse lookups) are accessible via the `ReverseRelation` objects (often via `related_name`), and can be loaded with standard query methods.
+
+Example:
+```python
+group = await Group.create(name="admin")
+user = await User.create(username="alice", group=group)
+
+# All users in a group
+group_users = await group.users.all()
+```
+
+---
+
+## Querying Data
+
+### Basic queries
+
+Common entry points (async):
+- `Model.all()` – all records
+- `Model.filter(...)` – filtered queryset
+- `Model.get(...)` – fetch a single record, raises if not found
+- `Model.first()` – fetch the first record of a queryset
+
+Example:
+```python
+all_users = await User.all()
+admins = await User.filter(group__name="admin").all()
+alice = await User.get(username="alice")
+```
+
+### Ordering
+
+Use the `ordering` option in `Meta` or apply on the queryset:
+```python
+# Meta (default ordering)
+class User(Model):
+    # fields...
+    class Meta:
+        ordering = (("-created_at",),)
+
+# Or override per-query
+recent_users = await User.all().order_by("-created_at")
+```
+
+### Prefetching and selecting related
+
+To reduce queries when accessing related data, you can preload related objects:
+
+```python
+# Eager load the related group for each user
+users = await User.all().select_related('group')
+
+# Prefetch many-to-many relations
+users = await User.all().prefetch_related('tags')
+```
+
+Note: Field names in `select_related`/`prefetch_related` correspond to the attribute names on the model.
+
+---
+
+## Creating, Updating, and Deleting
+
+### Creating
+
+```python
+group = await Group.create(name="admin")
+user = await User.create(username="bob", group=group)
+```
+
+Or using instance save:
+
+```python
+user = User(username="charlie", group=group)
+await user.save()
+```
+
+### Updating
+
+```python
+user.username = "charlie2"
+await user.save()
+```
+
+### Deleting
+
+```python
+await user.delete()
+```
+
+---
+
+## Transactions
+
+Use `in_transaction` to run multiple operations atomically.
+
+```python
+from tortoise.transactions import in_transaction
+
+async with in_transaction():
+    group = await Group.create(name="staff")
+    await User.create(username="dave", group=group)
+```
+
+You can also pass a connection into operations if you manage multiple databases or explicit connections.
+
+---
+
+## Signals
+
+The system includes a `Signals` mechanism to react to lifecycle events (e.g., pre/post save). Use it to enforce invariants, update derived data, or integrate with external systems.
+
+Example (conceptual):
+
+```python
+from tortoise.signals import signals
+
+async def on_pre_save(sender, instance, update_fields, **kwargs):
+    # e.g., normalize data before saving
+    if hasattr(instance, "username"):
+        instance.username = instance.username.lower()
+
+signals.pre_save.connect(on_pre_save)
+```
+
+Refer to the project’s signals module for exact hookup syntax and available events (pre_save, post_save, etc.).
+
+---
+
+## Error Handling
+
+Common exceptions you may encounter:
+- `ConfigurationError` – misconfiguration of models or database connections
+- `IncompleteInstanceError` – required fields are missing on an instance
+- `IntegrityError` – constraint violations (e.g., unique constraints)
+- `OperationalError` – database operational problems
+- `TransactionManagementError` – errors in transaction lifecycle
+
+Handle these as you would with any database ORM, using try/except blocks around async operations.
+
+---
+
+## Internal Helpers and Behaviors
+
+The codebase includes several internal helpers that power the ergonomic model API:
+
+- get_together(meta, name): Normalizes composite metaclass options like `unique_together` and `indexes`.
+- prepare_default_ordering(meta): Resolves default ordering from the `ordering` option into a machine-friendly structure.
+- Field accessors/setters/getters:
+  - `_fk_setter`, `_fk_getter`: Manage ForeignKey fields and their corresponding ID attributes.
+  - `_rfk_getter`: Create and return reverse foreign key relations.
+  - `_ro2o_getter`: Resolve one-to-one relations via a lazy-loading pattern.
+  - `_m2m_getter`: Access or instantiate a `ManyToManyRelation` object for a field.
+- `_get_comments(cls)`: Extracts field-level documentation comments from the class source for helpful in-code docs generation.
+
+These helpers enable clean model definitions, automatic handling of relations, and convenient documentation extraction.
+
+---
+
+## Examples
+
+Full end-to-end example combining definitions, querying, and relations:
+
+```python
+from tortoise import fields
+from tortoise.models import Model
+from tortoise import Order
+
+class Group(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=50, unique=True)
+
+class Tag(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=30)
+
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=20, unique=True)
+    age = fields.IntField(null=True)
+    group = fields.ForeignKeyField('models.Group', related_name='users')
+    tags = fields.ManyToManyField('models.Tag', related_name='users')
+
+    class Meta:
+        ordering = (("-id",),)
+
+async def demo():
+    # Assume database is already initialized
+    g = await Group.create(name="admin")
+    t_python = await Tag.create(name="python")
+
+    u = await User.create(username="alice", group=g)
+    await u.tags.add(t_python)
+
+    # Query with related data
+    users = await User.all().select_related('group').prefetch_related('tags')
+    for user in users:
+        print(user.username, user.group.name, [t.name for t in user.tags])
+```
+
+This example shows:
+- Basic model and relation declarations
+- Creating objects and associating them
+- Loading related data efficiently with `select_related` and `prefetch_related`
+
+---
+
+If you need more examples (e.g., advanced composite indexes, mixed relation loading patterns, or concrete signal usage), I can add targeted snippets to this document.

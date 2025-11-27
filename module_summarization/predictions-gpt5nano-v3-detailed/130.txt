@@ -1,0 +1,177 @@
+Less frequently used FITS data structures
+=========================================
+
+This section documents niche FITS data structures that are supported by some applications and readers but are not part of the common primary-image or binary-table workflow. These structures are powerful in specific contexts but come with compatibility caveats and are often avoided in modern workflows. The examples below illustrate typical usage patterns and note caveats for developers.
+
+Overview
+--------
+
+FITS provides a rich set of data representations beyond straightforward image extensions and standard binary tables. The less common structures described here include:
+
+- Variable-length arrays in binary table columns
+- Random groups (historical, deprecated in practice)
+- Hierarchical keyword names (HIERARCH) for long or mission-specific keys
+- Tile-compressed images and tables (on-disk compression)
+
+Each subsection includes a brief description, practical considerations, and representative Python examples using Astropy’s fits interface.
+
+Variable-length arrays in Binary Tables (VLA)
+-------------------------------------------
+
+What it is
+- A binary table column may hold arrays of varying lengths per row, rather than a fixed-length per row.
+- Implemented via a special format code (commonly indicated as PJ or similar) that marks a variable-length array. The actual data for each row is stored separately, with the length information encoded alongside.
+
+Why it’s used
+- Useful when each row contains a sequence of data whose length is not uniform across rows (e.g., per-object lists, measured time-series per item, etc.).
+
+Important considerations
+- Support in readers and writers varies by toolkit. Astropy’s fits module provides support for variable-length array columns, but you should verify compatibility with your target software stack.
+- When writing, you typically define one column with a variable-length format (e.g., PJ) and provide the per-row arrays (often as Python lists or numpy arrays of varying lengths).
+
+Usage example (binary table with a VLA column)
+```python
+from astropy.io import fits
+import numpy as np
+
+# Define a simple binary table with two columns:
+#  - id: scalar integer
+#  - vlarray: variable-length array per row
+col_id = fits.Column(name="id", format="K", array=[1, 2, 3])
+col_vla = fits.Column(
+    name="vlarray",
+    format="PJ()",          # variable-length array column
+    array=[np.array([1, 2]), np.array([3, 4, 5]), np.array([6])]
+)
+
+tbl = fits.BinTableHDU.from_columns([col_id, col_vla])
+tbl.writeto("vla_example.fits", overwrite=True)
+
+# Reading back
+with fits.open("vla_example.fits") as hdul:
+    data = hdul[1].data
+    ids = data["id"]
+    vla_lists = data["vlarray"]
+    print(ids)
+    print([list(x) for x in vla_lists])
+```
+
+Notes
+- The exact format code for VLA columns can vary by implementation. In Astropy, PJ-based formats are commonly used to indicate a variable-length array column.
+- When accessing the VLA data, you typically get a Python sequence of sequences (e.g., lists or numpy arrays) for each row.
+
+Random Groups (historical)
+--------------------------
+
+What it is
+- An older FITS extension format that grouped data into a number of “groups.” Each group could contain a data block and an accompanying header. The concept is largely superseded by standard IMAGE and BINARY TABLE extensions.
+
+Why it’s used
+- Predominantly historical. Some legacy datasets still use Random Groups. Modern tools and data centers typically convert to more current structures.
+
+Important considerations
+- Many contemporary readers and pipelines assume the standard IMAGE or BINARY TABLE layout; support for Random Groups is inconsistent and often limited.
+- If you encounter a random-groups extension, treat it as a compatibility artifact and consider converting to a modern representation when possible.
+
+Usage note (reading a random-groups extension)
+```python
+from astropy.io import fits
+
+with fits.open("random_groups_example.fits") as hdul:
+    # The data is typically found in the first extension with a GCOUNT header
+    ext = hdul[1]
+    data = ext.data
+    gcount = hdul[0].header.get("GCOUNT", 1)
+    print("GCOUNT:", gcount)
+    print("Data shape:", getattr(data, "shape", None))
+```
+
+Hierarchical keywords (HIERARCH)
+---------------------------------
+
+What it is
+- An extension mechanism that allows long keyword names beyond the standard 8-character limit of FITS headers.
+- Introduced to accommodate complex metadata without resorting to nonstandard encoding or header conventions.
+
+Why it’s used
+- Common in missions or pipelines that require descriptive metadata keys (e.g., experimental settings, instrument parameters, or derived metrics with descriptive names).
+
+Important considerations
+- HIERARCH keys are not part of the original FITS standard; support varies between readers. Astropy supports reading and writing HIERARCH keys, but ensure downstream tools support them.
+- When sharing files, confirm that receiving software can parse HIERARCH keywords to avoid metadata loss.
+
+Usage example (writing and reading HIERARCH keywords)
+```python
+from astropy.io import fits
+
+# Create a header with a long keyword using HIERARCH
+hdr = fits.Header()
+hdr["HIERARCH.EXPERIMENT.VERSION"] = "v2.1"
+hdr["HIERARCH.EXPERIMENT.PARAM_A"] = 42
+hdr["HIERARCH.EXPERIMENT.NOTE"] = "Calibration run"
+
+# Attach header to a simple primary HDU
+hdu = fits.PrimaryHDU(data=None, header=hdr)
+hdu.writeto("hierarch_example.fits", overwrite=True)
+
+# Reading back
+with fits.open("hierarch_example.fits") as hdul:
+    long_key_value = hdul[0].header["HIERARCH.EXPERIMENT.PARAM_A"]
+    print("PARAM_A =", long_key_value)
+```
+
+Tile-compressed images and tables
+---------------------------------
+
+What it is
+- A tile-based compression approach for images and sometimes tables, producing a compressed FITS extension. Data are compressed in small tiles (subarrays) to improve compression efficiency and I/O performance.
+
+Why it’s used
+- Substantially reduces file sizes for large 2D/3D datasets. Useful for telescopic imagery and large tabular datasets where compression yields meaningful space savings.
+
+Important considerations
+- Readable by many modern FITS tools, but some legacy software may have limited or no support for compressed extensions.
+- Requires a reader that understands the specific compression algorithm used (e.g., Rice, GZIP). When writing, you must specify the compression method and tile shape.
+
+Usage example (creating a compressed image HDU)
+```python
+import numpy as np
+from astropy.io import fits
+
+# Generate a sample image
+data = np.random.randn(1024, 1024)
+
+# Create a compressed image HDU
+# Note: compression_type and tile_shape names are representative;
+# actual API may vary by version of astropy/cfitsio.
+comp_hdu = fits.CompImageHDU(data, compression_type="RICE_1", tile_shape=(128, 128))
+
+# Write to a new FITS file
+comp_hdu.writeto("compressed_image.fits", overwrite=True)
+
+# Reading back
+with fits.open("compressed_image.fits") as hdul:
+    comp_data = hdul[0].data
+    print("Loaded compressed data shape:", getattr(comp_data, "shape", None))
+```
+
+Notes
+- The exact API for compression in Astropy can vary by version. Refer to the version-specific documentation for the correct parameter names (e.g., compression_type, tile_shape, etc.).
+- When distributing data, verify that the target environment supports the chosen compression scheme.
+
+Practical considerations and edge cases
+---------------------------------------
+
+- Compatibility: Some of these structures are not universally supported by all FITS tooling. Before adopting a niche structure, verify that the entire data-processing pipeline (readers, writers, validators, and downstream software) can handle it.
+- Documentation and provenance: Because these structures are less common, include clear metadata describing the chosen representation to ease future data reuse.
+- Performance: Variable-length arrays and tile-compressed data can affect random access performance. Benchmark access patterns for your use case.
+- Validation: When sharing data, consider running consistency checks (header validation, data shape verification, and cross-checks between index structures and data payloads) to catch misinterpretations by readers.
+- Future-proofing: If possible, prefer more widely supported representations or provide a clear migration path (e.g., convert to standard binary tables or images) for long-term archival data.
+
+Further reading and references
+------------------------------
+
+- FITS standard and its extensions (including long keywords and variable-length arrays)
+- Documentation for astropy.io.fits on advanced extensions (HIERARCH, VarLength columns, compression)
+
+End of document.

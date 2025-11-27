@@ -1,0 +1,125 @@
+Quick Start
+===========
+
+This quickstart shows the essential steps to generate gridpoints that cover a geometric path and, optionally, how to wrap an OpenRAVE trajectory for use with toppra.
+
+Prerequisites
+-------------
+- Python 3.x
+- numpy
+- scipy
+- toppra (the library containing AbstractGeometricPath and propose_gridpoints)
+
+What you will learn
+- How to provide a geometric path by implementing AbstractGeometricPath
+- How to generate gridpoints for that path with propose_gridpoints
+- How to optionally wrap an OpenRAVE trajectory with RaveTrajectoryWrapper
+
+Generate gridpoints for a geometric path
+--------------------------------------
+The core API for grid generation is propose_gridpoints(path, max_err_threshold, max_iteration, max_seg_length), which:
+
+- walks the path from start to end
+- adaptively inserts intermediate points to keep interpolation error below max_err_threshold
+- respects a maximum segment length (max_seg_length)
+
+The path object must implement the AbstractGeometricPath interface:
+- path_interval: starting and ending positions (2-element array)
+- __call__(path_positions, order): evaluate position (order=0), velocity (order=1), or acceleration (order=2)
+- dof: degrees of freedom of the path
+- waypoints: optional path waypoints
+
+Self-contained example
+----------------------
+The following is a minimal, self-contained example demonstrating how to define a simple 2D path and generate gridpoints. Adapt the imports to your setup as needed.
+
+.. code-block:: python
+
+    import numpy as np
+    from typing import Tuple
+    from tops import AbstractGeometricPath, propose_gridpoints  # adjust import as per your package layout
+
+    class SinePath(AbstractGeometricPath):
+        """A simple 2-DOF path: (sin(2*pi*t), cos(2*pi*t)) for t in [0,1]."""
+
+        @property
+        def dof(self) -> int:
+            return 2
+
+        @property
+        def path_interval(self) -> np.ndarray:
+            return np.array([0.0, 1.0])
+
+        @property
+        def waypoints(self):
+            return None
+
+        def __call__(self, path_positions, order: int = 0) -> np.ndarray:
+            t = np.asarray(path_positions)
+            if order == 0:
+                # position
+                x = np.sin(2 * np.pi * t)
+                y = np.cos(2 * np.pi * t)
+                return np.stack([x, y], axis=-1)
+            elif order == 1:
+                # first derivative
+                dx = 2 * np.pi * np.cos(2 * np.pi * t)
+                dy = -2 * np.pi * np.sin(2 * np.pi * t)
+                return np.stack([dx, dy], axis=-1)
+            elif order == 2:
+                # second derivative
+                ddx = -4 * np.pi**2 * np.sin(2 * np.pi * t)
+                ddy = -4 * np.pi**2 * np.cos(2 * np.pi * t)
+                return np.stack([ddx, ddy], axis=-1)
+            else:
+                raise ValueError("Unsupported order")
+
+    # Instantiate the path
+    path = SinePath()
+
+    # Generate gridpoints to cover the path
+    gridpoints = propose_gridpoints(
+        path,
+        max_err_threshold=1e-3,
+        max_iteration=50,
+        max_seg_length=0.2,
+    )
+
+    print("Proposed gridpoints:", gridpoints)
+
+Notes
+-----
+- The gridpoints output is a NumPy array of path positions that sufficiently cover the path for downstream planning.
+- The method uses path(path_mid, 2) to estimate curvature-related error, so your path must implement second-order evaluation correctly.
+
+OpenRAVE integration (optional)
+-------------------------------
+If OpenRAVE is available in your environment, toppra provides a wrapper for its trajectories:
+
+- RaveTrajectoryWrapper wraps an OpenRAVE trajectory and exposes a path-like interface.
+- It supports trajectories interpolated with quadratic or cubic methods.
+- You instantiate it with a trajectory and a robot from OpenRAVE.
+
+Example (requires OpenRAVE and the FOUND_OPENRAVE flag to be true):
+.. code-block:: python
+
+    if FOUND_OPENRAVE:
+        import openravepy as orpy
+        traj = orpy.RaveTrajectory()      # populate with your trajectory data
+        robot = orpy.Robot(...)            # obtain the robot model
+        path = RaveTrajectoryWrapper(traj, robot)
+
+        # path now implements AbstractGeometricPath and can be used with toppra
+        gridpoints = propose_gridpoints(path)
+
+What to do next
+---------------
+- Use the generated gridpoints to initialize or constrain motion planning with toppra.
+- If you work with real OpenRAVE trajectories, wrap them with RaveTrajectoryWrapper as shown above.
+- Explore additional path implementations or interpolate with different orders as needed for your application.
+
+For reference
+------------
+- AbstractGeometricPath defines the contract for geometric paths used by toppra.
+- propose_gridpoints computes a good set of gridpoints to approximate the path within a specified error.
+- RaveTrajectoryWrapper provides interoperability with OpenRAVE trajectories when available.

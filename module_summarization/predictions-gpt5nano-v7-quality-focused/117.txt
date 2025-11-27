@@ -1,0 +1,190 @@
+Resources API (resources.rst)
+==============================
+
+Overview
+--------
+This module provides a small, pluggable framework for exposing resource data
+(such as JSON Schemas) to plugins. It defines several resource-mapping
+implementations and helpers that unify access to resources from different
+sources (directories, in-memory mappings, or package-provided data).
+
+Public API
+==========
+
+DirectoryResourceMapping
+------------------------
+A resource mapping that reads resource content from a directory or directory
+tree.
+
+- Inherits from: asdf_standard.DirectoryResourceMapping
+- Purpose: expose resources stored on disk as a mapping from URI to content.
+- Key behavior: no new behavior is added; it relies on the base class for the
+  actual loading, now wrapped as part of this module.
+
+Usage example
+-------------
+# Create a mapping from a directory tree
+dir_mapping = DirectoryResourceMapping("/path/to/resources")
+
+Note: The underlying implementation is provided by asdf_standard; this subclass
+serves as a plugin-friendly alias within this module.
+
+ResourceMappingProxy
+--------------------
+Wrapper around a resource mapping that carries additional information about the
+providing package.
+
+Class methods
+- maybe_wrap(delegate)
+  - If delegate is already a ResourceMappingProxy, returns it unchanged.
+  - Otherwise returns a new ResourceMappingProxy wrapping the delegate.
+
+Constructor
+- __init__(delegate, package_name=None, package_version=None)
+  - delegate must implement the Mapping interface; otherwise, raises TypeError.
+  - Stores the underlying mapping as _delegate.
+  - Stores optional package metadata: _package_name and _package_version.
+  - Determines the fully qualified class name of the delegate via get_class_name(delegate)
+    and stores it as _class_name.
+
+Core behavior (delegates to the wrapped mapping)
+- __getitem__(uri)
+- __len__()
+- __iter__()
+
+Properties
+- delegate
+  - Returns the wrapped mapping instance.
+- package_name
+  - Returns the name of the providing Python package, or None if added at runtime.
+- package_version
+  - Returns the version of the providing Python package, or None if added at runtime.
+- class_name
+  - Returns the fully qualified class name of the underlying mapping.
+
+Special methods
+- __eq__(other)
+  - Two proxies are equal if they wrap the same underlying delegate instance.
+- __hash__()
+  - Hash based on the identity of the wrapped delegate.
+- __repr__()
+  - Produces a readable summary including the class name, package information
+    (or "(none)" if unspecified), and the number of items in the mapping.
+
+Usage example
+-------------
+# Wrap an existing mapping and attach package metadata
+proxy = ResourceMappingProxy(existing_mapping, package_name="example-pkg", package_version="1.0.0")
+print(proxy.package_name)   # "example-pkg"
+print(proxy.package_version)  # "1.0.0"
+print(proxy.class_name)      # e.g., "module.ExistingMapping"
+
+ResourceManager
+---------------
+Wraps multiple resource mappings into a single interface with friendlier error
+handling.
+
+Constructor
+- __init__(resource_mappings)
+  - resource_mappings is an iterable of mappings.
+  - Builds an internal index (_mappings_by_uri) mapping each URI to the first
+    mapping that provides it. If multiple mappings provide the same URI, the
+    one appearing earlier in the iterable wins.
+
+Usage example
+-------------
+# Combine two mappings with precedence for the first mapping on duplicates
+manager = ResourceManager([mapping_a, mapping_b])
+
+Common behavior
+- __getitem__(uri)
+  - Looks up the underlying mapping that provides the URI.
+  - Retrieves the content via mapping[uri].
+  - If the retrieved content is a string, encodes it to UTF-8 bytes.
+  - Raises KeyError if the URI is unavailable.
+- __len__()
+  - Returns the number of unique URIs across all mappings.
+- __iter__()
+  - Iterates over the set of available URIs.
+- __contains__(uri)
+  - Efficient containment check for a URI.
+- __repr__()
+  - Returns a compact representation with the number of available resources.
+
+JsonschemaResourceMapping
+-------------------------
+Resource mapping that fetches metaschemas from the jsonschema package.
+
+Internal mapping
+- _JSONSCHEMA_URI_TO_FILENAME
+  - Maps known URIs to corresponding filenames in the package resources.
+  - Example: "http://json-schema.org/draft-04/schema" -> "draft4.json"
+
+Public API
+- __getitem__(uri)
+  - Looks up the filename for the given URI in _JSONSCHEMA_URI_TO_FILENAME.
+  - Returns the data for the file via pkgutil.get_data("jsonschema", f"schemas/{filename}").
+- __len__()
+  - Returns the number of URIs defined in _JSONSCHEMA_URI_TO_FILENAME.
+- __iter__()
+  - Iterates over the defined URIs.
+- __repr__()
+  - Returns "JsonschemaResourceMapping()".
+
+Usage example
+-------------
+# Access the draft-04 JSON Schema from the jsonschema package
+json_schema_mapping = JsonschemaResourceMapping()
+schema_bytes = json_schema_mapping["http://json-schema.org/draft-04/schema"]
+# schema_bytes is a bytes object containing the schema data
+
+get_json_schema_resource_mappings
+-------------------------------
+Returns a list of resource mappings for JSON Schema metaschemas.
+
+Implementation
+- Returns [JsonschemaResourceMapping(),]
+
+Usage example
+-------------
+# Obtain a list of JSON Schema resource mappings
+mappings = get_json_schema_resource_mappings()
+# Use with ResourceManager if desired
+manager = ResourceManager(mappings)
+
+Internal details and constants
+------------------------------
+- __all__ exports:
+  ["ResourceMappingProxy", "DirectoryResourceMapping", "ResourceManager",
+   "JsonschemaResourceMapping", "get_json_schema_resource_mappings"]
+
+- The module-level mapping _JSONSCHEMA_URI_TO_FILENAME defines the URI-to-file
+  mapping used by JsonschemaResourceMapping.
+
+Notes
+-----
+- The ResourceManager enforces precedence: if multiple mappings provide the same URI,
+  the first mapping in the provided iterable takes precedence.
+- Content returned by ResourceManager is bytes. If an underlying mapping returns a
+  string, it is encoded as UTF-8 by the manager.
+
+Cross-references
+---------------
+- asdf_standard.DirectoryResourceMapping: underlying directory-based resource mapping.
+- jsonschema.schemas: packaged JSON Schema files used by JsonschemaResourceMapping.
+- get_class_name(delegate): used to populate the class_name field in ResourceMappingProxy.
+
+Code references
+---------------
+- DirectoryResourceMapping subclass:
+  class DirectoryResourceMapping(_DirectoryResourceMapping):
+      """
+      A resource mapping that reads resource content from a directory or directory tree.
+
+      See :class:`~asdf_standard.resource.DirectoryResourceMapping` for details.
+      """
+
+- ResourceMappingProxy implementation details follow the docstrings and method
+  signatures described above.
+- ResourceManager implementation follows the behavior described above.
+- JsonschemaResourceMapping uses _JSONSCHEMA_URI_TO_FILENAME and pkgutil.get_data.

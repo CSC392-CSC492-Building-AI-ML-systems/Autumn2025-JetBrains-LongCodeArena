@@ -1,0 +1,162 @@
+w_crawl
+=========
+
+Overview
+--------
+
+w_crawl is a WestPA command-line tool that crawls a weighted ensemble dataset, executing a user-supplied callable once per iteration. The callable runs in parallel across iterations, enabling efficient postprocessing, cleanup, or any per-iteration operation that can be expressed as "do X for iteration N, then do something with the result." Results from each iteration are fed to an optional crawler object which can initialize/finalize the run and process per-iteration results.
+
+Key concepts
+------------
+
+- Per-iteration tasks are dispatched in parallel, one task per iteration.
+- The callable receives the iteration index and an iteration-group object representing the data for that iteration.
+- Optionally, a custom WESTPACrawler instance can coordinate initialization, finalization, and per-iteration result processing.
+- The data access context is provided by a data manager loaded from the WestPA backing store.
+
+Usage
+-----
+
+Synopsis:
+
+```
+w_crawl [OPTIONS] TASK_CALLABLE
+```
+
+TASK_CALLABLE is a Python path to a function with the signature:
+
+```
+def TASK_CALLABLE(n_iter, iter_group):
+    ...
+    return result
+```
+
+- n_iter: the iteration index (an integer).
+- iter_group: an object representing the iteration’s data; passed to the callable for per-iteration processing.
+- The function’s return value is handed to the crawler (if one is supplied) or otherwise discarded.
+
+Optional: use a crawler instance to customize lifecycle hooks and result handling:
+
+```
+w_crawl -c MODULE.PATH.TO_CRAWLER_INSTANCE TASK_CALLABLE
+```
+
+- CRAWLER_INSTANCE must resolve to an object that is an instance of WESTPACrawler (see the Crawler Interface section below).
+- If omitted, a default WESTPACrawler is used.
+
+Command-line options
+--------------------
+
+- -c, --crawler-instance: Use a pre-instantiated CRAWLER_INSTANCE (specified as a module.path.to.CrawlerInstance) as an instance of WESTPACrawler to coordinate initialization, finalization, and per-iteration result processing. Required only if you need to customize lifecycle behavior.
+- TASK_CALLABLE: The callable to run for each iteration (module.function). Required.
+- Progress-related options are provided by the ProgressIndicatorComponent (e.g., to customize progress display); these are wired in through the WCrawl object’s setup.
+
+Task callable interface
+-----------------------
+
+- The callable must be importable as a Python object and accept two arguments: n_iter and iter_group.
+- It may perform computations, read per-iteration data from iter_group, and return an arbitrary result object.
+- The return value is passed to the crawler’s process_iter_result method (if a crawler is provided).
+
+Example: a simple task callable
+--------------------------------
+
+In your_module.py:
+
+```python
+def analyze_iteration(n_iter, iter_group):
+    # Example: summarize per-iteration data (implementation-specific)
+    summary = {
+        'iteration': n_iter,
+        # add any per-iteration statistics you can derive from iter_group
+    }
+    return summary
+```
+
+Optional crawler example
+------------------------
+
+If you need lifecycle hooks or per-iteration result handling, implement a subclass of WESTPACrawler:
+
+```python
+from westpa.tools import WESTParallelTool, WESTDataReader, IterRangeSelection, ProgressIndicatorComponent
+from westpa.core.extloader import get_object
+
+log = logging.getLogger('w_crawl')
+
+class MyCrawler(WESTPACrawler):
+    def initialize(self, iter_start, iter_stop):
+        # Initialize state before dispatching tasks
+        self.total = 0
+        log.info("Starting crawl for iterations %d..%d", iter_start, iter_stop)
+
+    def finalize(self):
+        # Called after all tasks complete
+        log.info("Crawl finished. Total results processed: %d", self.total)
+
+    def process_iter_result(self, n_iter, result):
+        # Process and accumulate per-iteration results
+        self.total += 1
+        log.debug("Iter %d result: %r", n_iter, result)
+```
+
+Running with a crawler instance
+
+```
+w_crawl -c mypackage.mycrawler.MyCrawler analyze_iteration
+```
+
+Notes on behavior
+-----------------
+
+- Tasks are dispatched per iteration and may complete in any order. The tool does not guarantee a strict evaluation order.
+- Each per-iteration task is executed via a remote task function that sets up a data manager in read mode and provides the iter_group to the user function.
+- The ProgressIndicatorComponent provides a live indication of progress during initialization, dispatch, and finalization.
+- If a crawler instance is not supplied, a default WESTPACrawler is used with no-op lifecycle hooks (initialize/finalize/process_iter_result do nothing unless overridden).
+
+How it works (execution flow)
+------------------------------
+
+1. The dataset and iteration range are prepared via WESTDataReader and IterRangeSelection.
+2. A crawler instance is created (custom or default).
+3. The crawler is initialized (initialize is called with the overall iteration range).
+4. For each iteration, a remote task is dispatched to execute TASK_CALLABLE(n_iter, iter_group) with the corresponding iter_group.
+5. As each task completes, its result is passed to crawler.process_iter_result(n_iter, result) (if a crawler is provided); progress is updated.
+6. After all tasks complete, crawler.finalize() is called.
+
+Implementation details
+----------------------
+
+- The _remote_task helper loads the data manager in read mode and invokes the user-provided task callable with the iteration index and its iter_group.
+- The WCrawl class orchestrates task distribution, progress reporting, and optional crawler coordination.
+- Data access is read-only within the per-iteration task to ensure thread/process safety in parallel execution.
+- The system relies on the WESTPA parallel execution framework to manage worker processes and futures.
+
+Examples
+--------
+
+Basic usage (no custom crawler):
+
+```
+w_crawl mypackage.my_module.analyze_iteration
+```
+
+With a custom crawler:
+
+```
+w_crawl -c mypackage.my_crawler.MyCrawlerInstance mypackage.my_module.analyze_iteration
+```
+
+Documentation references
+------------------------
+
+- WESTParallelTool: for parallel task execution primitives used by w_crawl.
+- WESTDataReader: for dataset loading and iteration-range selection.
+- IterRangeSelection: for controlling which iterations are included in the crawl.
+- ProgressIndicatorComponent: for progress reporting and configuration.
+
+See also
+--------
+
+- The source for w_crawl (WCrawl class) in WestPA's tooling.
+- Examples in the WestPA documentation illustrating per-iteration processing and custom crawlers.

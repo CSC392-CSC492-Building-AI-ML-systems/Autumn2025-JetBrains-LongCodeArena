@@ -1,0 +1,120 @@
+w_fluxanl
+==========
+
+Overview
+--------
+w_fluxanl is a WestPA command-line tool that extracts flux measurements for defined target states from WEST HDF5 data, averages the fluxes, and constructs confidence intervals using Monte Carlo bootstrapping. The tool accounts for possible correlations and non-Gaussian statistics in the flux data. All non-graphical outputs assume a propagation/resampling time tau = 1; to obtain conventional units, scale fluxes and correlation lengths by the true tau.
+
+Key concepts
+- fluxentry_dtype: a structured array with fields
+  - n_iter: iteration number (n_iter_dtype)
+  - flux: flux value (weight_dtype)
+  - count: event count contributing to the flux (uint)
+- target_index_dtype: per-target summary schema with
+  - target_label: target name (string)
+  - mean_flux: mean flux over analyzed iterations
+  - mean_flux_ci_lb / mean_flux_ci_ub: bootstrap confidence interval bounds
+  - mean_flux_correl_len: estimated correlation length (units depend on tau)
+
+Core functionality
+- Extract fluxes for a user-specified iteration range from the WEST HDF5 file.
+- Support for two file-version paths:
+  - File version < 7: fluxes are read from the old recycling tables.
+  - File version >= 7: fluxes are inferred from the new_weights data in the iteration following recycling events, grouped by target state labels.
+- Return type: a dictionary mapping target names (or indices if names are unavailable) to 1-D arrays of fluxentry_dtype records.
+
+Data extraction details
+- Version < 7 workflow
+  - Determine number of targets from the recycling table shape.
+  - For each iteration in [iter_start, iter_stop):
+    - Read recycling data and populate flux entries with:
+      - n_iter = current iteration
+      - flux = recycling weight (field name depends on file version)
+      - count = recycling count
+  - Output: flux data per target as a dictionary {target_index: flux_array, ...}.
+
+- Version >= 7 workflow
+  - For each iteration:
+    - Retrieve target_states via data_manager.get_target_states(n_iter).
+    - Attempt to read new_weight_index from iteration+1['new_weights']['index']; skip if unavailable (no recycling data).
+    - For each observed target_state:
+      - Create or reuse an entry in by_target keyed by target label.
+      - Store a non-existent/empty run indicator by setting count to -1 initially.
+      - Determine recycle_count by counting new weight entries that are recycled toward this target state.
+      - If there are recycled weights, sum their weights to form flux for that iteration.
+  - After processing iterations, trim each target’s flux array to the last contiguous run where the target was available (remove leading sentinel entries where count == -1).
+  - Output: a dictionary by_target_label -> flux_array.
+
+Output structures
+- Per-target flux data (returned by extract_fluxes):
+  - Keys: target labels (string) when available; otherwise target indices (int) may be used.
+  - Values: numpy arrays of dtype fluxentry_dtype with fields n_iter, flux, count.
+
+- Summary index (target_index_dtype)
+  - Intended for downstream consumption where a per-target mean flux and confidence interval are desired:
+    - target_label
+    - mean_flux
+    - mean_flux_ci_lb
+    - mean_flux_ci_ub
+    - mean_flux_correl_len
+
+Tool integration
+- WFluxanlTool (subclass of WESTTool)
+  - program: w_fluxanl
+  - description: extracts flux values for pre-defined target states, computes mean fluxes, and constructs confidence intervals with bootstrap, accounting for correlations.
+  - output_format_version: 2
+  - Core state
+    - data_reader: WESTDataReader (parses common West data arguments)
+    - iter_range: IterRangeSelection (handles start/stop iteration range)
+    - output_h5file / output_group / target_groups: structures for writing results to HDF5
+    - fluxdata: in-memory storage for extracted fluxes
+    - alpha / autocorrel_alpha: bootstrap-related configuration
+    - n_sets: number of bootstrap resamples
+    - do_evol / evol_step: controls for evolution/trajectory-related analyses (optional)
+
+Usage and options
+- The command uses:
+  - Data reader arguments to locate the WEST HDF5 file and dataset layout.
+  - Iteration range arguments (start/stop) to select the analyzed interval.
+  - Output options to specify an HDF5 file/group for results and per-target groupings.
+  - Bootstrap configuration options (alpha, autocorrel_alpha, n_sets) to control the confidence-interval and autocorrelation handling.
+  - Evolution-related flags to enable/adjust evolution analyses (if supported by your WEST build).
+
+Notes on file version handling
+- The tool automatically selects the appropriate flux extraction path based on the HDF5 file version (data_manager.we_h5file_version).
+- Version < 7 path relies on the legacy recycling tables.
+- Version >= 7 path relies on the new_weights entries in the iteration following recycling and groups results by target state labels.
+
+Example workflows
+- Basic usage (conceptual)
+  - Extract fluxes for iterations 1 through 100, grouped by target names, and prepare for bootstrapped CI:
+    - w_fluxanl -s 1 -e 100 --out flux_results.h5 --out-group fluxanl
+  - The produced flux arrays can be post-processed to compute mean fluxes and CIs (mean_flux, mean_flux_ci_lb, mean_flux_ci_ub) per target, with correlation lengths (mean_flux_correl_len) reported as appropriate.
+
+- Advanced/bootstrap configuration (conceptual)
+  - Increase bootstrap resamples (n_sets) and adjust alpha for looser/tighter CIs:
+    - w_fluxanl --n-sets 1000 --alpha 0.05
+  - Enable autocorrelation-aware CI estimation via autocorrel_alpha:
+    - w_fluxanl --autocorrel-alpha 0.1
+
+Developer notes
+- The flux extraction logic is split into two branches to preserve compatibility with older WEST HDF5 formats and modern formats (>= v7).
+- The implementation uses in-memory dictionaries keyed by target to accumulate per-target flux arrays efficiently, followed by post-processing to finalize contiguous valid runs.
+- The mean flux, CI bounds, and correlation length are defined in target_index_dtype and are intended to be produced by downstream processing after extract_fluxes returns per-target flux data.
+
+Implementation references (code-level)
+- fluxentry_dtype: structured dtype for per-iteration flux records.
+- target_index_dtype: structured dtype for per-target summary statistics.
+- _extract_fluxes_fileversion_lt_7: extraction for legacy file formats.
+- _extract_fluxes_fileversion_7: extraction for modern file formats (using new_weights and recycling indices).
+- extract_fluxes(iter_start, iter_stop, data_manager): façade that selects the appropriate extraction routine.
+- WFluxanlTool: command implementation wiring data reader, iteration range, and output configuration.
+
+Compatibility and limitations
+- Requires West HDF5 data and a compatible WEST version.
+- Output fields and CI computation depend on bootstrap configuration; exact CI semantics are determined by the bootstrap routine invoked by the broader WEST framework (not fully shown in the excerpt).
+
+See also
+- WESTTool, WESTDataReader, IterRangeSelection: components used to wire command arguments and data access.
+- NewWeightEntry: type used to identify recycled weights in the file-version-7 path.
+- h5io, dtypes, and mclib modules: underpin the data types and IO behavior referenced by w_fluxanl.

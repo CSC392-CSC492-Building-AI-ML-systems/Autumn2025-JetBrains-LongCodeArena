@@ -1,0 +1,133 @@
+Operations
+==========
+
+Overview
+--------
+
+This module defines the core operation objects used to represent migration steps that modify database schema, specifically constraints. It provides a base class for migration operations and concrete implementations for adding and dropping constraints. Operations are designed to be serialized to a diff-like representation and to integrate with a registry-based invocation system.
+
+Key Concepts
+------------
+
+- MigrateOperation: Base class for all migration operations.
+  - info: A memoized dictionary available for storing arbitrary information on the operation.
+  - reverse(): Returns the inverse operation (not implemented in the base class).
+  - to_diff_tuple(): Serializes the operation to a diff-like tuple (not implemented in the base class).
+
+- AddConstraintOp: Represents an operation that adds a constraint.
+  - add_constraint_ops: A dispatcher used to map a constraint type to a concrete AddConstraintOp subclass.
+  - constraint_type: Abstract property that concrete subclasses implement to indicate the constraint kind (e.g., "foreignkey", "check", etc.).
+  - register_add_constraint(type_): Decorator used to register a subclass as the handler for a given constraint type.
+  - from_constraint(constraint): Creates an AddConstraintOp by dispatching to the appropriate subclass based on constraint.__visit_name__.
+  - to_constraint(migration_context=None): Abstract method; concrete subclasses implement conversion back to a SQLAlchemy Constraint.
+  - reverse(): Returns the corresponding DropConstraintOp for the constraint produced by to_constraint().
+  - to_diff_tuple(): Produces a diff tuple, e.g. ("add_constraint", constraint).
+
+- DropConstraintOp: Represents an operation that drops a constraint.
+  - Registered with the operation registry (via @Operations.register_operation("drop_constraint") and batch form via @BatchOperations.register_operation("drop_constraint", "batch_drop_constraint")).
+  - constraint_name: Optional name of the constraint to drop.
+  - table_name: Name of the table containing the constraint.
+  - constraint_type: Optional string describing the constraint type (e.g., "foreignkey", "primary", "unique", "check").
+  - schema: Optional schema in which the table resides.
+  - _reverse: Optional AddConstraintOp used to re-create the original constraint if needed.
+  - reverse(): Returns the AddConstraintOp corresponding to the constraint to be dropped.
+  - to_diff_tuple(): Returns a diff tuple, using "remove_fk" for foreign keys or "remove_constraint" for other constraint types.
+  - from_constraint(constraint): Converts a SQLAlchemy Constraint into a DropConstraintOp, mapping visit names to internal types and capturing table/schema information.
+  - to_constraint(): Reconstructs the original Constraint from the stored information or from _reverse if available.
+  - drop_constraint(operations, constraint_name, table_name, type_=None, schema=None): Convenience classmethod to drop a constraint using the provided Operations instance.
+  - batch_drop_constraint(operations, constraint_name, type_=None): Batch form that omits table_name and schema, using the current batch migration context.
+
+Concrete details
+----------------
+
+MigrateOperation
+- info is a memoized property that returns a mutable dictionary for per-operation metadata.
+- reverse and to_diff_tuple are abstract and must be implemented by subclasses.
+
+AddConstraintOp
+- add_constraint_ops is a Dispatcher that maps a constraint type to a concrete implementation’s from_constraint.
+- register_add_constraint(type_) decorates a subclass so that AddConstraintOp.from_constraint dispatches to subclass.from_constraint for that type.
+- from_constraint(constraint) uses the constraint’s __visit_name__ to select the appropriate handler.
+- reverse() returns DropConstraintOp.from_constraint(self.to_constraint()).
+- to_diff_tuple() yields ("add_constraint", self.to_constraint()).
+
+DropConstraintOp
+- Decorated with:
+  - @Operations.register_operation("drop_constraint")
+  - @BatchOperations.register_operation("drop_constraint", "batch_drop_constraint")
+  to integrate with the standard operation registry and its batch variant.
+- __init__(constraint_name, table_name, type_=None, schema=None, _reverse=None)
+  - constraint_name: Optional constraint identifier (e.g., for labeled constraints in some dialects).
+  - table_name: Name of the target table.
+  - constraint_type: Public alias for type_ (e.g., "foreignkey", "primary", "unique", "check").
+  - schema: Optional schema qualifier for the table.
+  - _reverse: Optional AddConstraintOp used to reconstruct the constraint if needed.
+- to_diff_tuple():
+  - If constraint_type == "foreignkey": ("remove_fk", constraint)
+  - Else: ("remove_constraint", constraint)
+- from_constraint(constraint):
+  - Maps constraint.visit_name (unique_constraint, foreign_key_constraint, primary_key_constraint, check_constraint, etc.) to internal type strings ("unique", "foreignkey", "primary", "check").
+  - Retrieves the table information via sqla_compat._table_for_constraint(constraint) and stores name and schema.
+  - Sets _reverse to AddConstraintOp.from_constraint(constraint) for round-trip reconstruction.
+- to_constraint():
+  - If _reverse exists, reconstructs the original constraint from _reverse.to_constraint(), then assigns constraint_name, table_name, and schema as stored.
+  - If _reverse is missing, raises ValueError because the original constraint cannot be produced.
+- drop_constraint(...):
+  - Creates a DropConstraintOp and invokes it via the provided Operations instance.
+- batch_drop_constraint(...):
+  - Creates a DropConstraintOp without requiring table_name or schema (used in batch migration contexts) and invokes through a BatchOperations instance.
+
+Usage patterns
+--------------
+
+- Drop a constraint using a concrete operation:
+  .. code-block:: python
+
+      # ops is an instance of Operations
+      DropConstraintOp.drop_constraint(
+          ops,
+          constraint_name="fk_order_user",
+          table_name="order",
+          type_="foreignkey",
+          schema="public",
+      )
+
+- Drop a constraint in batch mode:
+  .. code-block:: python
+
+      # batch_ops is an instance of BatchOperations
+      DropConstraintOp.batch_drop_constraint(
+          batch_ops,
+          constraint_name="fk_order_user",
+          type_="foreignkey",
+      )
+
+- Create an AddConstraintOp from a SQLAlchemy constraint:
+  .. code-block:: python
+
+      from sqlalchemy import ForeignKeyConstraint
+      fk = ForeignKeyConstraint(['user_id'], ['user.id'], name='fk_order_user')
+      op = AddConstraintOp.from_constraint(fk)
+      # op is a concrete AddConstraintOp subclass appropriate for a foreign key
+
+- Reconstruct a constraint from a drop operation:
+  .. code-block:: python
+
+      drop_op = DropConstraintOp("fk_order_user", "order", type_="foreignkey", schema="public")
+      # If drop_op has _reverse populated
+      constraint = drop_op.to_constraint()
+
+Notes
+-----
+
+- The implementation relies on sqla_compat helpers to map constraint objects to their corresponding table and to handle constraint names in a dialect-sensitive manner.
+- The to_diff_tuple outputs are designed to integrate with the surrounding migration tooling, enabling a diff-based representation of migrations.
+
+See Also
+--------
+
+- sqla_compat for constraint-name and table-resolution utilities
+- Rewriter and MigrationContext types used for runtime rewriting and migration context (in TYPE_CHECKING)
+- The operation registry interfaces: Operations and BatchOperations
+
+Examples are intentionally concise and rely on the surrounding migration framework for full context and wiring.

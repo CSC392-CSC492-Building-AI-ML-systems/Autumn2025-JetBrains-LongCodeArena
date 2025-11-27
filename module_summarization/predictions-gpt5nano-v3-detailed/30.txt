@@ -1,0 +1,135 @@
+# w_pdist — Time-resolved, multi-dimensional probability distributions
+
+Introduction
+------------
+w_pdist calculates time-resolved, multi-dimensional probability distributions for weighted ensemble (WE) data. It operates on WE datasets to produce normalized histograms that evolve over iteration time, enabling analysis of how the distribution of a chosen dataset (the source data) changes across WE iterations.
+
+Overview
+--------
+- Purpose: Generate normalized, multi-dimensional histograms (probability distributions) as a function of iteration for WE data.
+- Data sources:
+  - Custom data extraction via a Python function (--construct-dataset).
+  - A list of data set specifications (--dsspecs) selecting datasets from HDF5 files.
+  - If neither is provided, the tool uses the built-in progress coordinate dataset (pcoord).
+- Binning: Histograms are defined by bins per dimension. By default, 100 uniform bins per dimension. Binning can be specified in several ways:
+  - A single integer N: N uniform bins per dimension.
+  - A comma-separated list N1,N2,...: per-dimension bin counts.
+  - A list of lists [[B11,B12,...], [B21,B22,...], ...]: explicit, possibly non-uniform bin boundaries per dimension.
+- Output: An HDF5 file (default pdist.h5) containing:
+  - histograms: iteration x dim1 x dim2 x ... (normalized)
+  - /binbounds_i: bin boundaries for dimension i
+  - /midpoints_i: bin midpoints for dimension i
+  - /n_iter: array of iteration numbers corresponding to histograms
+- Parallelization: Parallel work is supported and enabled by default. Use --serial to force serial processing in simple scenarios.
+- Relationship to other tools: Output can be fed into plothist for visualization.
+
+Key concepts and components
+---------------------------
+- WPDist class
+  - Inherits WESTParallelTool and orchestrates the distribution calculation.
+  - Uses the default parallel work manager by default for performance.
+  - Contains a progress indicator (ProgressIndicatorComponent) and a data reader (WESTDataReader).
+  - Responsibilities:
+    - Determine source data (construct-dataset vs. dsspecs vs. default pcoord).
+    - Manage binning configuration and histogram construction across iterations.
+    - Persist results to the output HDF5 file, including histograms, bin bounds, and midpoints.
+- Helper: isiterable
+  - Utility to check if an object is iterable.
+  - Used to parse user-provided options that may be scalars or sequences.
+- Helper: _remote_min_max
+  - Computes per-dimension min/max ranges across iterations for a given dataset dtype.
+  - Used when explicit bin boundaries are not provided (to determine appropriate binning range).
+  - Returns a list of (min, max) tuples, one per dimension.
+- Helper: _remote_bin_iter
+  - Performs the per-iteration binning for a given iteration.
+  - Steps:
+    - Loads data for the iteration, selects the relevant time window (excluding initpoint), and accumulates a multi-dimensional histogram.
+    - Normalizes the histogram across time with normhistnd.
+  - Returns a tuple: (iiter, n_iter, iter_hist).
+
+Important parameters and return values
+--------------------------------------
+- Data source options:
+  - --construct-dataset MODULE.FUNCTION
+    - Python function that returns data shaped as [segment][timepoint][dimension].
+    - Called as function(n_iter, iter_group) for each iteration.
+  - --dsspecs NAME[,file=FILENAME,slice=SLICE]
+    - Specifies one or more datasets to be used; supports slicing to select columns or ranges.
+  - If neither is provided, the default pcoord dataset is used.
+- Binning configuration:
+  - --bins [definition]
+    - Single int N: N uniform bins per dimension.
+    - Comma-separated N1,N2,...: per-dimension bin counts.
+    - List of lists [[...], [...], ...]: explicit per-dimension bin boundaries.
+- Output:
+  - --output PATH or -o PATH
+    - Output HDF5 file (default: pdist.h5).
+  - Datasets created in the output:
+    - histograms: time-resolved, multi-dimensional histograms (normalized).
+    - /binbounds_0, /binbounds_1, ...: bin boundaries per dimension.
+    - /midpoints_0, /midpoints_1, ...: bin midpoints per dimension.
+    - /n_iter: 1D array of iteration numbers corresponding to histograms.
+- Parallelization:
+  - By default, uses the parallel work manager.
+  - --serial can be used to force serial processing.
+- Return values:
+  - The tool writes results to the specified output file. The per-iteration binning results are produced by _remote_bin_iter as part of the parallel workflow.
+
+Usage notes and considerations
+------------------------------
+- Data extraction sources:
+  - Using --construct-dataset gives maximum flexibility to compute or extract data; the returned array must be indexable as [segment][timepoint][dimension].
+  - Using --dsspecs is convenient for selecting existing dataset columns, possibly via slicing.
+  - If the input dataset is large, parallel processing can significantly reduce runtime; however, for very large datasets with many segments, memory usage and I/O patterns may influence performance.
+- Binning choices:
+  - The default 100 bins per dimension yields relatively fine resolution but can be expensive for high-dimensional data or large iteration counts.
+  - If you have prior knowledge of ranges, providing explicit bin boundaries via the list-of-lists form avoids an expensive pre-scan of data to determine min/max.
+  - When using the scan-based forms (single int or list of integers), min/max are determined by inspecting the data, which can be costly for large datasets.
+- Edge cases:
+  - Non-uniform bin boundaries are supported only via the explicit list-of-lists form.
+  - Ensure that the provided dsspecs or construct-dataset function consistently returns a dataset with a uniform per-iteration shape across iterations; otherwise, histogram binning may fail.
+  - If dataset values fall outside the provided bin boundaries, behavior is controlled by ignore_out_of_range in histnd; this setting may drop or clamp out-of-range values depending on implementation details.
+- Output interpretation:
+  - Each histogram in histograms corresponds to a single iteration; subsequent plots should align with /n_iter to map histograms to iteration numbers.
+  - The histograms are normalized, so they represent probability distributions over the specified dimensions.
+  - The bin boundaries and midpoints are essential for plotting or interpreting the histograms accurately.
+
+Example usage
+-------------
+- Basic usage with default binning and pcoord:
+  - w_pdist --output pdist.h5
+
+- Specify 100 uniform bins per dimension (default, shown for clarity):
+  - w_pdist --bins 100 --output pdist.h5
+
+- Use per-dimension bin counts:
+  - w_pdist --bins 50,100,25 --output pdist.h5
+
+- Use explicit, non-uniform bin boundaries (two dimensions example):
+  - w_pdist --bins [[0,1,2,3,5],[0,0.5,1.5,3]] --output pdist.h5
+
+- Use a custom data extractor function:
+  - w_pdist --construct-dataset mymodule.myfunction --output dist_from_function.h5
+
+- Use data from an existing dataset via dsspecs:
+  - w_pdist --dsspecs pcoord --output dist_from_dsspecs.h5
+
+- Enable serial processing (instead of parallel):
+  - w_pdist --serial --output dist_serial.h5
+
+- Combine with multiple datasets and custom bins:
+  - w_pdist --dsspecs pcoord,file=west.h5,slice=[0:2] --bins 80,120 --output dist_multi.h5
+
+See also
+--------
+- plothist: utility to plot the histograms produced by w_pdist.
+- WestPA documentation on dataset specifications and custom data extraction for WE analyses.
+
+Code references
+---------------
+- WPDist: main driver implementing the parallel histogram computation and I/O.
+- _remote_min_max: computes per-dimension data ranges for auto-binning.
+- _remote_bin_iter: computes and normalizes the histogram for a given iteration.
+- isiterable: helper to handle user input types robustly.
+
+Note: This documentation reflects the behaviour described in the current implementation of w_pdist, including default parallel operation, input data sources, and output structure.

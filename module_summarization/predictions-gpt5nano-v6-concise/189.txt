@@ -1,0 +1,186 @@
+Kernel Ridge Regression
+=======================
+
+This section documents the KernelRidge class from sklearn.kernel_ridge and explains kernel ridge regression (KRR) in detail. It is intended for developers who use this implementation in Python projects.
+
+Overview
+--------
+
+Kernel ridge regression (KRR) combines ridge regression with the kernel trick. It learns a linear function in the feature space induced by a kernel, which corresponds to a non-linear function in the original input space for non-linear kernels.
+
+Key points
+
+- Uses squared error loss with L2 regularization.
+- Training has a closed-form solution, typically faster for medium-sized datasets than iterative solvers.
+- Predictions are non-sparse (unlike many SVR models that yield sparse solutions).
+- Supports multi-target regression (y can be a 1D array of shape [n_samples] or a 2D array of shape [n_samples, n_targets]).
+- Can operate on a precomputed kernel matrix (kernel == "precomputed").
+
+Mathematical formulation
+------------------------
+
+Given training data X (n_samples, n_features) and target y (n_samples,) or (n_samples, n_targets), define the kernel matrix K as K = K(X, X) with entries K_ij = k(x_i, x_j), where k is the chosen kernel function.
+
+KRR solves for the dual coefficients A (same shape as y if multi-target):
+
+- If alpha is a scalar (positive regularization strength):
+  (K + alpha * I) A = Y
+
+- If alpha is an array-like (one value per target, shape (n_targets,)):
+  (K + diag(alpha)) A = Y
+
+Prediction for new data X_new (shape [m_samples, n_features]) is:
+
+- If kernel != "precomputed":
+  Y_pred = K(X_new, X) @ A
+  where K(X_new, X) is the kernel matrix between X_new and the training data X.
+
+- If kernel == "precomputed":
+  Y_pred = K(X_new, X_train) @ A
+  with the precomputed kernel matrices used directly.
+
+Relation to other models
+------------------------
+
+- KernelRidge vs. Ridge: KRR is the kernelized analogue of ridge regression. Ridge learns linear relationships in the original feature space; KRR learns linear relationships in the feature space induced by the kernel, enabling non-linear mappings in the original space.
+- KernelRidge vs. SVR: Both can use similar kernels, but KRR minimizes squared loss with L2 regularization and yields a closed-form solution, while SVR uses an epsilon-insensitive loss with L2 regularization (and typically yields sparse solutions). KRR is usually faster to train on medium-sized datasets but produces dense models.
+
+Kernel options
+--------------
+
+The kernel parameter selects how similarity between samples is measured. It can be:
+
+- A string identifying a kernel, e.g., "linear", "poly", "rbf" (Gaussian), "sigmoid", etc.
+- A callable taking two 1D arrays (two samples) and returning a scalar kernel value.
+- "precomputed" to indicate that the input X is already a kernel matrix.
+
+If a string kernel is used, parameters gamma, degree, and coef0 are applied (as relevant for the chosen kernel). For kernel="precomputed", X is interpreted as the Gram matrix K and must have shape (n_samples, n_samples).
+
+Hyperparameters
+---------------
+
+- alpha: float or array-like of shape (n_targets,), default=1.0
+  Regularization strength. Must be positive. Larger values increase the diagonal regularization (K + alpha I). If an array is provided, penalties are applied per target.
+
+- kernel: str or callable, default="linear"
+  Kernel function used to map inputs into a higher-dimensional space. If a string, it must be one of the available pairwise kernels or "precomputed". If callable, it must take two input vectors (rows) and return a scalar kernel value.
+
+- gamma: float, default=None
+  Gamma parameter for certain kernels (e.g., RBF, polynomial, sigmoid). Its interpretation depends on the kernel. Ignored by kernels that do not use gamma.
+
+- degree: int, default=3
+  Degree for the polynomial kernel. Ignored by other kernels.
+
+- coef0: float, default=1
+  Independent term in poly and sigmoid kernels. Ignored by other kernels.
+
+- kernel_params: dict, default=None
+  Extra kernel parameters to pass when the kernel is a callable or to augment the built-in parameters for a string kernel.
+
+- X_fit_: training data or precomputed kernel
+  After fit, X_fit_ stores the training data (or the training kernel matrix if kernel="precomputed").
+
+- dual_coef_: ndarray of shape (n_samples,) or (n_samples, n_targets)
+  Learned dual coefficients in kernel space. This is the model parameters used for prediction.
+
+- n_features_in_: int
+  Number of features seen during fit.
+
+- feature_names_in_: ndarray of shape (n_features_in_,)
+  Feature names seen during fit (only if X has string feature names).
+
+Examples
+--------
+
+Basic usage with an RBF kernel
+
+.. code-block:: python
+
+    from sklearn.kernel_ridge import KernelRidge
+    import numpy as np
+
+    rng = np.random.RandomState(0)
+    X = rng.randn(50, 5)
+    y = np.sin(X[:, 0]) + 0.1 * rng.randn(50)
+
+    krr = KernelRidge(alpha=1.0, kernel="rbf", gamma=0.1)
+    krr.fit(X, y)
+    y_pred = krr.predict(X)
+
+    print("Training RMSE:", np.sqrt(np.mean((y - y_pred) ** 2)))
+
+Multi-target regression
+
+.. code-block:: python
+
+    X = rng.randn(60, 4)
+    Y1 = np.sin(X[:, 0]) + 0.1 * rng.randn(60)
+    Y2 = np.cos(X[:, 1]) + 0.1 * rng.randn(60)
+    Y = np.c_[Y1, Y2]
+
+    krr = KernelRidge(alpha=0.5, kernel="rbf", gamma=0.05)
+    krr.fit(X, Y)
+    Y_pred = krr.predict(X)
+
+    print("Predicted shape:", Y_pred.shape)  # (60, 2)
+
+Precomputed kernel matrix
+
+.. code-block:: python
+
+    from sklearn.metrics.pairwise import rbf_kernel
+    K = rbf_kernel(X, X, gamma=0.1)
+
+    krr = KernelRidge(alpha=1.0, kernel="precomputed")
+    krr.fit(K, y)
+    y_pred = krr.predict(K)  # or: y_pred = krr.predict(K_test)
+
+Predefined polynomial kernel
+
+.. code-block:: python
+
+    krr = KernelRidge(alpha=0.1, kernel="poly", degree=3, coef0=1)
+    krr.fit(X, y)
+    y_pred = krr.predict(X)
+
+Notes on implementation and behavior
+------------------------------------
+
+- Training computes A by solving (K + diag(alpha)) A = Y, where alpha is scalar or per-target. This is a dense, cubic-time operation in the number of samples (O(n_samples^3) in general).
+- The dual coefficients A are stored in dual_coef_. Predictions are obtained via Y_pred = K(X_new, X) @ A (or K if using precomputed kernels).
+- If kernel == "precomputed", X must be the Gram matrix K_train = K(X_train, X_train) during fit, and K_test = K(X_new, X_train) during predict.
+- Gamma, degree, and coef0 are kernel hyperparameters that affect non-linear kernels (RBF, polynomial, etc.). They are ignored for kernels that do not use them (e.g., linear).
+- The model supports multi-output regression via a 2D Y with shape (n_samples, n_targets). The dual coefficients then have shape (n_samples, n_targets).
+
+API notes
+---------
+
+- Class: sklearn.kernel_ridge.KernelRidge
+- fit(X, y): Train the model. Supports 1D or 2D y.
+- predict(X): Predict targets for X.
+- Attributes after fit:
+  - dual_coef_: ndarray of shape (n_samples,) or (n_samples, n_targets)
+  - X_fit_: Training data or precomputed kernel matrix
+  - n_features_in_: Number of features observed at fit
+  - feature_names_in_: Feature names (if provided)
+
+See Also
+--------
+
+- sklearn.linear_model.Ridge: Linear ridge regression (non-kernelized baseline).
+- sklearn.svm.SVR: Support Vector Regression with a broader set of kernels and epsilon-insensitive loss.
+- sklearn.gaussian_process.GaussianProcessRegressor: Kernel-based regression with uncertainty estimates.
+
+References
+----------
+
+- Kevin P. Murphy, "Machine Learning: A Probabilistic Perspective", MIT Press (kernel methods and ridge with kernels).
+- Scikit-learn documentation for kernel methods and kernel ridge regression.
+
+Notes for developers
+--------------------
+
+- The implementation delegates kernel computation to pairwise_kernels and can accept a callable kernel. When using a callable kernel, the callable must operate on individual samples (rows) rather than on matrices.
+- For non-precomputed kernels, gamma, degree, and coef0 are used to parameterize the kernel function; for precomputed kernels, these parameters are ignored.
+- The internal routine _solve_cholesky_kernel (imported from linear_model._ridge) is used to solve the linear system (K + diag(alpha)) A = Y efficiently via Cholesky decomposition when possible.
+- The KernelRidge class is designed to support multi-output regression directly by solving for all targets in a single pass.

@@ -1,0 +1,186 @@
+Executing notebooks
+===================
+
+Overview
+--------
+
+This API provides preprocessor components to execute all code cells in a notebook and to detect and tag cells that use non-Python languages via magic extensions. The primary entry point is the ExecutePreprocessor, which runs code cells using nbclient's NotebookClient under the hood and updates cell outputs in place. A secondary preprocessor, HighlightMagicsPreprocessor, inspects code cells for magic language extensions (e.g., %%R, %%bash) and annotates the cell metadata with the appropriate language for correct highlighting downstream.
+
+Key components
+--------------
+
+- ExecutePreprocessor: Executes all code cells in a notebook. It inherits from both Preprocessor and NotebookClient to preserve traitlets behavior and execution state across initialization boundaries.
+- HighlightMagicsPreprocessor: Detects magic-based language extensions and tags cells with magics_language metadata for proper syntax highlighting.
+- executenb: Deprecated compatibility wrapper that forwards to nbclient.execute. Emits a FutureWarning and should be replaced by direct usage of nbclient.execute.
+
+API reference
+-------------
+
+ExecutePreprocessor
+~~~~~~~~~~~~~~~~~~~
+
+Purpose
+- Run all code cells in a notebook, updating outputs in-place and returning the processed notebook along with resources.
+
+Initialization and mixin notes
+- Inherits from Preprocessor and NotebookClient to preserve traitlets behavior prior to nbconvert 6.0.
+- Initialization includes a compatibility path that must reconcile nb (NotebookNode) initialization with NotebookClient setup.
+
+Key methods
+
+- __init__(self, **kw)
+  - Accepts nb (NotebookNode) or creates an empty NotebookNode if not provided.
+  - Initializes both Preprocessor and NotebookClient state.
+
+- _check_assign_resources(self, resources)
+  - Assigns resources to self.resources if provided or if not already set.
+
+- preprocess(self, nb, resources=None, km=None) -> (NotebookNode, dict)
+  - Executes the notebook in-place and returns (nb, resources).
+  - If resources are supplied, they are assigned to the preprocessor for downstream use.
+  - Steps:
+    - Reinitialize kernel client with the provided notebook.
+    - Set up a kernel (setup_kernel context manager).
+    - Retrieve and store language info.
+    - Iterate cells and call preprocess_cell on each.
+    - Finalize widget metadata with set_widgets_metadata.
+  - Returns:
+    - nb: The executed NotebookNode.
+    - resources: The resources dictionary used during processing.
+
+- preprocess_cell(self, cell, resources, index) -> (NotebookNode, dict)
+  - Override to apply per-cell preprocessing.
+  - Default behavior: execute_cell on the cell, then return the (possibly updated) cell and current resources.
+
+- execute_cell(cell, index, store_history=True)
+  - Provided by the underlying NotebookClient to run individual cells.
+
+Notes
+- The notebook object is modified in place during preprocess.
+- The preprocess method is designed to resemble an initialization pass on execution state, so some traitlets assignments may be reset or re-applied to minimize side effects.
+- This structure aims to minimize side effects relative to alternatives that would copy internal NotebookClient state.
+
+HighlightMagicsPreprocessor
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Purpose
+- Tags code cells that use a non-Python language via magic extensions (e.g., %%R, %%bash) with magics_language metadata.
+- Enables correct syntax highlighting downstream by associating the cell with the appropriate lexer.
+
+Key attributes
+
+- default_languages (Dict)
+  - Maps magic language extensions to pygments lexers, e.g., "%%R" -> "r", "%%bash" -> "bash".
+
+- languages (Dict, config=True)
+  - User-configurable overrides for default_languages.
+
+Key methods
+
+- __init__(self, config=None, **kw)
+  - Initializes the preprocessor and merges user-configured languages into default_languages.
+  - Builds a regular expression to detect language magic extensions at the start of a cell.
+
+- which_magic_language(self, source) -> str or None
+  - Returns the lexer name corresponding to the detected magic language, or None if no magic is detected.
+
+- preprocess_cell(self, cell, resources, cell_index) -> (NotebookNode, dict)
+  - If the cell is a code cell, detects magic language and, if found, tags the cell metadata with magics_language.
+  - Returns the (potentially modified) cell and resources.
+
+Usage examples
+--------------
+
+Basic execution of a notebook
+
+- Purpose: Run all code cells and update outputs.
+
+  from nbformat import NotebookNode
+  from your_package.execute_api import ExecutePreprocessor
+
+  # Build a notebook object (nb) from disk or in code
+  nb: NotebookNode = ...  # your NotebookNode instance
+
+  ep = ExecutePreprocessor(timeout=600, kernel_name="python3")
+  resources = {"metadata": {"path": "/path/to/notebook"}}  # optional
+  nb_out, resources_out = ep.preprocess(nb, resources)
+
+  # nb_out contains updated outputs; resources_out contains any resource data
+
+Execution with a custom KernelManager
+
+  from nbclient.manager import KernelManager
+
+  nb_out, resources_out = ep.preprocess(nb, resources, km=KernelManager())
+
+Configuring magics highlighting
+
+  from your_package.execute_api import HighlightMagicsPreprocessor
+
+  magics = HighlightMagicsPreprocessor()
+  nb_out, resources_out = magics.preprocess(nb, resources)
+
+Combining preprocessors in a pipeline (order matters)
+
+  - Typically, run HighlightMagicsPreprocessor before ExecutePreprocessor so the notebook cells are tagged for highlighting before execution.
+
+  from your_package.execute_api import HighlightMagicsPreprocessor, ExecutePreprocessor
+
+  magics = HighlightMagicsPreprocessor()
+  executor = ExecutePreprocessor(timeout=600, kernel_name="python3")
+
+  # Apply magics tagging
+  nb, resources = magics.preprocess(nb, resources)
+  nb_out, resources_out = executor.preprocess(nb, resources)
+
+Deprecation note: executenb
+
+  from your_package.execute_api import executenb
+
+  # Deprecated: use nbclient.execute or ExecutePreprocessor directly
+  executor_out = executenb(nb, **kwargs)
+
+Configuration and customization
+-------------------------------
+
+- ExecutePreprocessor
+  - Traitlets-based configuration (configurable via c.ExecutePreprocessor.* in a config file).
+  - Common options include:
+    - timeout: maximum time (seconds) to allow a cell to run.
+    - kernel_name: name of the kernel to use for execution.
+    - nb: input notebook (NotebookNode). If not provided, an empty NotebookNode is created.
+
+  - Example config snippet (RST view):
+    - c.ExecutePreprocessor.timeout = 600
+    - c.ExecutePreprocessor.kernel_name = 'python3'
+
+  - Resources dictionary may include:
+    - 'metadata': {'path': run_path}
+    - Used to control execution context and resource propagation.
+
+- HighlightMagicsPreprocessor
+  - The languages dictionary is config-enabled (languages trait).
+  - Override default_languages via the languages trait to add or customize magic-language mappings.
+
+Error handling
+--------------
+
+- If a code cell raises an execution error, nbclient typically raises CellExecutionError (imported here for compatibility).
+- You can catch CellExecutionError around the preprocess call to handle failures gracefully.
+
+Notes for developers
+--------------------
+
+- The dual inheritance design (Preprocessor, NotebookClient) supports traitlets-based configuration resolution across nbconvert versions.
+- The internal init path approximates a NotebookClient initialization, which is essential for maintaining proper kernel and execution state during preprocessing.
+- The magics language detection relies on a regex built from the configured default_languages mappings.
+
+References
+----------
+
+- nbclient NotebookClient: execution engine used by the preprocessor.
+- nbformat NotebookNode: notebook data structure manipulated by the preprocessor.
+- CellExecutionError: error raised when a cell execution fails.
+- HighlightMagicsPreprocessor: utility for language highlighting metadata tagging.
+
+End of documentation.

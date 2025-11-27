@@ -1,0 +1,159 @@
+Array Best Practices
+======================
+
+
+Overview
+--------
+
+This module underpins Dask Array’s cross-backend dispatch and NumPy masked-array interoperability.
+
+- Backend dispatch registries (concatenate_lookup, tensordot_lookup, einsum_lookup, empty_lookup, divide_lookup, percentile_lookup, numel_lookup, nannumel_lookup, to_numpy_dispatch, to_cupy_dispatch) enable per-backend implementations of core array operations. Implementations can be registered for specific array types (e.g., NumPy, CuPy, or custom backends) to ensure correct behavior and performance across backends.
+- NumPy masked-array (np.ma) integration provides Dask-aware wrappers and utilities to operate on masked arrays, enabling consistent behavior of masked semantics across chunked computations.
+
+Key Components and Relationships
+-------------------------------
+
+Dispatch registries
+- concatenate_lookup, tensordot_lookup, einsum_lookup, empty_lookup, divide_lookup, percentile_lookup, numel_lookup, nannumel_lookup, to_numpy_dispatch, to_cupy_dispatch
+  - Each is a Dispatch object used to register and select backend-specific implementations for the corresponding operation.
+  - Typical usage pattern:
+    - Implement a backend-specific function.
+    - Register it with the registry for the target array type.
+    - Dask Array operations delegate to the registered implementation automatically.
+
+Masked-array interoperability
+- normalize_token (and normalize_token.register(np.ma.masked_array))
+  - Standardizes inputs of type np.ma.masked_array by returning a backend-agnostic token representation (data, mask, fill_value).
+- normalize_masked_array
+  - Internal helper that converts a masked array into normalized tokens for downstream processing.
+- filled(a, fill_value=None)
+  - Returns a masked-array-processed version of a, filling masked entries with fill_value.
+- _wrap_masked(f)
+  - Internal helper that wraps a binary (two-operand) NumPy masked operation so it can be applied blockwise across a Dask array.
+- masked_greater, masked_greater_equal, masked_less, masked_less_equal, masked_not_equal
+  - Blockwise wrappers implementing comparison operations with masking semantics.
+- masked_equal
+  - Implements elementwise equality with masking, validating that the value is a scalar (no shape).
+- masked_invalid
+  - Applies np.ma.masked_invalid across blocks.
+- masked_inside, masked_outside
+  - Apply masked comparisons within a specified range.
+- masked_where
+  - Conditional masking: masks elements of an array where a condition holds.
+- masked_values
+  - Masks elements equal to a given value (with tolerance parameters for floating types) and optionally shrinks the mask.
+- fix_invalid
+  - Replaces invalid (masked) values using a provided fill_value.
+- getdata, getmaskarray
+  - Retrieve the underlying data or the mask array from masked inputs.
+
+Important Parameters and Return Values
+--------------------------------------
+
+- filled(a, fill_value=None) -> Array
+  - Returns a with masked entries replaced by fill_value; preserves dtype and shape.
+- _wrap_masked(f) -> function
+  - Internal: returns a wrapper function that applies a binary masked operation across blocks with proper broadcasting of a and value.
+- masked_* functions
+  - Return type: typically a Dask array with the same shape and dtype as the input, but with appropriate masking semantics applied across blocks.
+- masked_equal(a, value)
+  - Raises ValueError if value has a shape (only scalar values allowed).
+- mask-related helpers (getdata, getmaskarray)
+  - Return values suitable for reconstructing masked arrays on the client side.
+
+Important Considerations and Edge Cases
+---------------------------------------
+
+- Shape and dtype compatibility:
+  - masked_equal enforces scalar value inputs; array-valued values are not supported.
+  - masked_where enforces shape compatibility between condition and input.
+- Block-level semantics:
+  - Masking and fill values are applied blockwise; ensure chunking aligns with the intended operation for correct results.
+- Backend registration:
+  - Extendability via Dispatch allows new backends to provide optimized implementations. Ensure registrations cover all relevant input types to avoid fallbacks.
+- Compatibility with standard NumPy:
+  - Some masked-array operations rely on numpy.ma’s semantics; behavior is preserved when wrapping via Dask’s blockwise/map_blocks mechanisms.
+
+Usage Examples
+--------------
+
+Example 1: Extending a backend for a new array type
+- Purpose: register a backend-specific concatenation for a custom array type.
+.. code-block:: python
+
+    from dask.utils import Dispatch
+
+    concatenate_lookup = Dispatch("concatenate")
+
+    class MyBackendArray:
+        pass  # backend array type
+
+    def _mybackend_concatenate(a, b, axis=0):
+        # Implement backend-specific concatenation logic
+        # For illustration, convert to numpy and reuse numpy.concatenate
+        import numpy as np
+        return np.concatenate([np.asarray(a), np.asarray(b)], axis=axis)
+
+    @concatenate_lookup.register(MyBackendArray)
+    def _concat_mybackend(a, b, axis=0):
+        return _mybackend_concatenate(a, b, axis=axis)
+
+Example 2: Basic masked-array operation across blocks
+- Purpose: fill masked entries in a Dask array backed by a masked array.
+.. code-block:: python
+
+    import numpy as np
+    import numpy.ma as ma
+    import dask.array as da
+
+    # Create a NumPy masked array
+    mom = ma.masked_array([[1, 2], [3, -1]], mask=[[False, True], [False, False]], fill_value=0)
+
+    # Create a Dask array from the masked array
+    d = da.from_array(mom, chunks=(1, 2))
+
+    # Fill masked entries with the fill_value
+    filled = da.map_blocks(ma.filled, d, fill_value=0, dtype=d.dtype)
+
+Example 3: Masked_where usage
+- Purpose: mask elements of an array where a condition is true, using Dask blocks.
+.. code-block:: python
+
+    import numpy as np
+    import numpy.ma as ma
+    import dask.array as da
+
+    a = da.from_array(np.array([[1, 2], [3, 4]]), chunks=(2, 2))
+    condition = da.from_array(np.array([[False, True], [False, False]]), chunks=(2, 2))
+
+    masked = da.map_blocks(ma.masked_where, condition, a, dtype=a.dtype)
+
+Example 4: Backend-agnostic behavior with dispatch
+- Purpose: demonstrate how dispatch registries enable backend-agnostic code paths.
+.. code-block:: python
+
+    from dask.utils import Dispatch
+    import numpy as np
+
+    concatenate_lookup = Dispatch("concatenate")
+
+    @concatenate_lookup.register(np.ndarray)
+    def _concat_numpy(a, b, axis=0):
+        return np.concatenate([a, b], axis=axis)
+
+    # If a CuPy array is passed, a CuPy backend implementation could be registered similarly:
+    # @concatenate_lookup.register(cp.ndarray)
+    # def _concat_cupy(a, b, axis=0):
+    #     ...
+
+See also
+--------
+
+- backends.py for implementations and integration points with various array backends.
+- numpy.ma documentation for semantics of masked arrays.
+
+Notes
+-----
+
+- The dispatch registries and masked-array wrappers are internal APIs intended to enable flexible backend support and robust masked-array handling in Dask Array.
+- For practical end-user code, prefer using Dask Array's higher-level APIs and rely on registered backends; refer to backends.py for available backend implementations.

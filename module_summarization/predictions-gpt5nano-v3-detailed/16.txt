@@ -1,0 +1,161 @@
+Plothist command
+=================
+
+Overview
+--------
+The plothist module implements the plotting functionality for histogram data
+produced by WESTPA. It provides a flexible command-line interface to render
+1-D and 2-D histograms stored in HDF5 files, with support for different plot
+scales, axis ranges, contour overlays for 2-D plots, and optional post-processing
+of the plot before saving.
+
+Key components
+--------------
+- sum_except_along(array, axes)
+  - Reduces an array by summing over all axes except those specified by axes.
+  - Description: moves the kept axes to the front in the given order, then
+    cumulatively sums over the trailing axes.
+  - Purpose: utility used to collapse histogram data along unwanted dimensions.
+
+- PlotHistBase(WESTSubcommand)
+  - Base class for plothist subcommands.
+  - Responsibilities:
+    - Argument parsing (add_args): defines input/output options, plot settings,
+      and post-processing hooks.
+    - Processing (process_args): loads the HDF5 histogram data, configures
+      plotting parameters (dimension spec, energy zero, range, etc.), and
+      prepares iteration ranges for plotting or summarization.
+  - State captured by the class:
+    - input_h5: opened HDF5 file containing histogram data
+    - plot_output_filename, hdf5_output_filename: paths for plot image and
+      plot-data storage
+    - plot_contour, plotscale, enerzero, plotrange, plottitle: plotting options
+    - dimensions: list of dimension specifications to plot
+    - avail_iter_start/stop, iter_start/stop/step: iteration ranges for
+      averaging/evolution and single-point plots
+    - postprocess_function: optional function to be applied just before saving
+      the plot
+  - Notes:
+    - This base class is intended to be extended by concrete plothist subcommands.
+    - The actual plotting logic and data extraction are driven by the derived
+      command(s) in the complete codebase.
+
+Important parameters and return values
+--------------------------------------
+- input (positional)
+  - Path to the HDF5 file containing histogram data.
+
+- firstdim (optional)
+  - DIMENSION specification in the form:
+    INT:[LB,UB]:LABEL
+  - INT: zero-based dimension index in the histogram.
+  - LB/UB: lower/upper bounds for plotting (optional within the spec).
+  - LABEL: axis label for the plot.
+  - If omitted, a default entry is created: dimension 0 with full range.
+
+- --output / --plot-output
+  - Destination for the generated plot.
+  - If empty string, plotting is suppressed (no image file produced).
+
+- --hdf5-output
+  - Optional destination to store the plot data in the HDF5 file.
+
+- --plot-contour
+  - For 2-D plots, optionally overlay a contour on top of the heatmap.
+
+- --title
+  - Title to place at the top of the plot.
+
+- Plot scale options (mutually exclusive):
+  - --linear: linear scale
+  - --energy: inverted natural-log scale (default; related to free energy)
+  - --log10: base-10 log scale
+  - --zero-energy: set zero of energy (scalar value or "min"/"max")
+
+- --range
+  - Plot range given as "LB,UB".
+  - For 1-D plots, this controls the Y axis; for 2-D plots, the color axis.
+
+- --postprocess-function
+  - A function path (module.function) called as postprocess(hist, midpoints, binbounds)
+    just before saving the plot. The function should modify hist in place using
+    matplotlib's stateful interface if needed.
+
+- Returns
+  - The command saves the plot to the specified file (if --output is non-empty).
+  - Optionally, plot data can be written to an HDF5 file if --hdf5-output is set.
+  - If a postprocess function is provided, it is invoked before saving.
+
+Usage examples
+--------------
+Basic 1-D plot (energy scale, default):
+```bash
+plothist input.h5 0
+```
+
+Plot with a specified output file and range:
+```bash
+plothist input.h5 0 --range "0.0,10.0" --output hist_1d.pdf
+```
+
+Plot 2-D histogram with a contour overlay:
+```bash
+plothist input2d.h5 1 --plot-contour --output hist2d_with_contour.pdf
+```
+
+Suppress plot output (only generate plot data, if any):
+```bash
+plothist input.h5 0 --output ''
+```
+
+Store plot data in HDF5 (along with the plot image):
+```bash
+plothist input.h5 0 --hdf5-output plot_data.h5 --output hist.pdf
+```
+
+Set a custom zero of energy and a post-processing function:
+```bash
+plothist input.h5 0 --zero-energy 0.0 --postprocess-function mymodule.my_postprocess
+```
+
+Post-processing function example
+-------------------------------
+Example of a post-processing function that modifies the histogram before saving:
+```python
+# mymodule.py
+def my_postprocess(hist, midpoints, binbounds):
+    # Example: normalize the histogram in-place
+    total = hist.sum()
+    if total != 0:
+        hist /= total
+    # No explicit return; hist is modified in place
+```
+
+Notes and edge cases
+--------------------
+- Dimension specification:
+  - If firstdim is omitted, the command defaults to dimension 0 with full range.
+- Energy zero handling:
+  - enerzero accepts a numeric value, or the strings "min" or "max". Invalid
+    values raise a ValueError.
+- Plot output behavior:
+  - An empty string for --output suppresses plotting; HDF5 output remains optional.
+  - The actual file format is inferred from the extension (e.g., .pdf -> PDF).
+- 2-D plots:
+  - Contour overlays are only applicable to 2-D histograms; for 1-D plots the option is ignored.
+- Numerical stability:
+  - The module suppresses divide-by-zero and invalid operations in log space to avoid runtime errors when taking logs of zero values.
+- Extensibility:
+  - PlotHistBase is designed to be extended by additional subcommands; concrete subclasses
+    implement the full plotting workflow and data extraction for specific use cases.
+
+Implementation notes
+--------------------
+- The module relies on the following libraries:
+  - h5py for HDF5 I/O
+  - numpy for numerical operations
+  - matplotlib for plotting
+  - westpa.core.h5io and westpa.core.textio for WESTPA-specific I/O and text utilities
+  - westpa.fasthist.normhistnd for histogram normalization (where applicable)
+  - westpa.core.extloader.get_object for dynamic post-processing function loading
+- Logging is configured under the name 'plothist'.

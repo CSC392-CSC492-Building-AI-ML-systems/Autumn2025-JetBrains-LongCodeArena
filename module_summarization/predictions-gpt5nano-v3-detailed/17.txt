@@ -1,0 +1,186 @@
+w_assign
+========
+
+Introduction
+------------
+
+The w_assign tool assigns walkers to bins for each timepoint of every trajectory and writes an output HDF5 file (by default assign.h5). This ensures that the origin bin of each trajectory is known for all analysis steps that follow, even if only a subset of data will be used later. The output supports downstream kinetic analysis by providing per-iteration, per-segment, and per-timepoint bin assignments and labeled populations.
+
+Overview
+--------
+
+- Reads progress-coordinate data from one of:
+  - A user-supplied data extraction function (--construct-dataset)
+  - A list of data set specifications (--dsspecs)
+  - The default pcoord dataset in the WEST HDF5 file (west.h5)
+- Maps progress-coordinates to bins via a bin mapper
+- Optionally labels macrostates (kinetic states) for each trajectory at each timepoint
+- Produces an assign.h5 file containing:
+  - nbins (attribute): number of valid bins
+  - nstates (attribute): number of defined macrostates
+  - /assignments [iteration][segment][timepoint]: per-point bin assignment
+  - /npts [iteration]: number of timepoints in each iteration
+  - /nsegs [iteration]: number of segments in each iteration
+  - /labeled_populations [iterations][state][bin]: per-iteration and per-timepoint populations, labeled by the most recently visited macrostate
+  - /bin_labels [bin]: optional human-readable labels for bins
+
+Key components and relationships
+-------------------------------
+
+- WAssign (class)
+  - Subclass of WESTParallelTool
+  - prog = 'w_assign'
+  - Orchestrates the data flow: read source data, compute per-cell assignments with a mapper, optionally compute labeled populations, and write the output file.
+- _assign_label_pop (function)
+  - Performs per-iteration labeling and population accumulation
+  - Arguments include: iteration index, label bounds, a mapper, number of states, state mapping, and dataset specs for parent IDs, weights, and pcoords
+  - Returns: assignments, trajlabels, pops, lb, ub, statelabels
+  - Core operation: uses mapper.assign and the helper accumulate_labeled_populations to fill the /labeled_populations dataset
+- parse_pcoord_value (function)
+  - Helper to parse a string representation of progress coordinates into a 2D NumPy array suitable for processing
+  - Supports scalar, 1D, and raises on higher-dimensional input
+  - Useful for constructing synthetic datasets or debugging
+
+Important parameters and return values
+--------------------------------------
+
+- Input sources
+  - --construct-dataset: Python MODULE.FUNCTION that returns per-segment, per-timepoint, per-dimension progress coordinates
+  - --dsspecs: one or more data-set specifications of the form NAME[,file=FILENAME,slice=SLICE]
+    - NAME: dataset in the HDF5 file
+    - file: optional alternative HDF5 file (default: west.h5)
+    - slice: Python slice expression to select data (e.g., [0:2] to select the first two elements along the first axis)
+  - Default: the pcoord dataset in the main WEST HDF5 file
+- Macrostates
+  - --states: inline definitions for single-bin or multi-bin states
+    - Each state is specified as a coordinate tuple, optionally prefixed with a label
+    - Examples: bound:1.0 or unbound:(2.5,2.5)
+  - --states-from-file: YAML/structured file describing states and their coordinate tuples
+  - --states-from-function: MODULE.FUNCTION that returns a list of state dictionaries (each with "coords" and optional "label")
+- Output
+  - assign.h5 (default) or user-specified via -o/--output
+  - Datasets and attributes
+    - /assignments [iteration][segment][timepoint] -> int (bin index)
+    - /npts [iteration] -> int
+    - /nsegs [iteration] -> int
+    - /labeled_populations [iteration][state][bin] -> float
+    - /bin_labels [bin] -> label or descriptor (optional)
+    - nbins attribute: total number of valid bins
+    - nstates attribute: total number of defined macrostates
+- Return values
+  - The tool writes assign.h5 and exits with appropriate status in the parallel environment; the per-iteration results are accumulated via _assign_label_pop
+
+Usage and examples
+------------------
+
+Basic usage (default behavior, outputs assign.h5)
+```bash
+w_assign
+```
+
+Specify an explicit output file name
+```bash
+w_assign -o assign.h5
+```
+
+Provide source data via a dataset specification
+```bash
+w_assign --dsspecs pcoord
+```
+
+Use a custom dataset extraction function
+```bash
+w_assign --construct-dataset mymodule.get_pcoord
+```
+
+Define macrostates inline (single-bin or multi-bin definitions)
+```bash
+w_assign --states bound:1.0 unbound:(2.5,2.5)
+```
+
+Define macrostates from a YAML file
+```bash
+w_assign --states-from-file my_states.yml
+```
+
+Define macrostates via a function (custom logic)
+```bash
+w_assign --states-from-function mystates.compute_states
+```
+
+Notes and edge cases
+--------------------
+
+- Consistency requirement: the entire dataset must be assigned, even if analyses will use only a subset later. This ensures proper lineage of trajectory origins for all downstream analyses.
+- Multidimensional progress coordinates:
+  - The system supports multi-dimensional pcoords; the --dsspecs slice option can select specific coordinates or columns as needed.
+- Empty or zero macrostates:
+  - If no macrostates are defined, nstates will be zero; /labeled_populations will reflect this accordingly.
+- State labeling and last-state semantics:
+  - The last entry in /labeled_populations corresponds to trajectories initiated outside the defined macrostates.
+- Subsampling:
+  - The mapper may support subsampling of data; the _assign_label_pop function takes a subsample parameter to control this behavior. Ensure the mapper and its configuration align with your sampling strategy.
+- Output file structure:
+  - nbins and nstates are stored as attributes on the root or appropriate group to facilitate downstream scripts reading the file.
+
+Detailed data model notes
+-------------------------
+
+- /assignments: 3D integer array with dimensions [iteration][segment][timepoint]
+- /npts: 1D integer array indexed by iteration
+- /nsegs: 1D integer array indexed by iteration
+- /labeled_populations: 3D floating-point array [iteration][state][bin]
+  - The state dimension has length nstates + 1, where the final entry corresponds to trajectories not in any defined macrostate
+- /bin_labels: 1D dataset with human-readable labels for each bin (if provided by the mapper)
+
+Code snippets (illustrative)
+----------------------------
+
+- Core per-iteration labeling workflow (conceptual)
+```python
+# Pseudo-flow showing main step in per-iteration processing
+for n_iter in iterations:
+    parent_ids = parent_id_dsspec.get_iter_data(n_iter, index_exp[lb:ub])
+    weights = weight_dsspec.get_iter_data(n_iter, index_exp[lb:ub])
+    pcoords = pcoord_dsspec.get_iter_data(n_iter, index_exp[lb:ub])
+
+    assignments, trajlabels, statelabels = mapper.assign(lb, ub, parent_ids, weights, pcoords, subsample)
+    pops = zeros((nstates + 1, nbins + 1), weight_dtype)
+    accumulate_labeled_populations(weights, assignments, trajlabels, pops)
+```
+
+- Example macrostate specification (inline)
+```text
+--states bound:1.0 unbound:(2.5,2.5)
+```
+
+- Example using a YAML file for states (--states-from-file)
+```text
+# my_states.yml
+---
+states:
+  - label: unbound
+    coords:
+      - [9.0, 1.0]
+      - [9.0, 2.0]
+  - label: bound
+    coords:
+      - [0.1, 0.0]
+```
+
+Endnotes
+--------
+
+- The w_assign tool is designed to integrate tightly with WESTPA’s data management and bin-mapping facilities; it relies on configured bin mappers and data readers readily available in WESTPA's runtime environment.
+- Ensure all required dependencies are accessible in your environment when invoking w_assign, especially if using custom dataset extractors or macrostate definitions.
+
+References
+----------
+
+- Data model and dataset naming (as implemented):
+  - nbins, nstates attributes
+  - /assignments, /npts, /nsegs, /labeled_populations, /bin_labels
+- Related components (in code):
+  - WESTParallelTool, WESTDataReader, WESTDSSynthesizer, BinMappingComponent, ProgressIndicatorComponent
+  - parse_pcoord_value, _assign_label_pop, and WAssign integration with mapper.assign and accumulate_labeled_populations
+

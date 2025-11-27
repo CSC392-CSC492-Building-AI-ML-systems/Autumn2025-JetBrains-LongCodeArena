@@ -1,0 +1,166 @@
+# Fleur input/output parsers (fleur_parser.md)
+
+## Overview
+This module provides utilities to extract distinct parts of Fleur XML files to support versioning and reuse. It focuses on parsing Fleur input/output information from Fleur XML, including calculation modes and the number of k-points used in a calculation.
+
+Key functions:
+- get_fleur_modes(xmltree, schema_dict, logger=None): Detects various calculation modes that affect outputs or file generation.
+- get_nkpts(xmltree, schema_dict, logger=None): Retrieves the number of k-points used in a Fleur calculation, with compatibility handling for different XML schema versions.
+
+The implementation relies on FleurXMLContext for robust XML traversal and on schema_dict to adapt behavior to the XML version.
+
+---
+
+## Key Components
+
+- get_fleur_modes(xmltree, schema_dict, logger=None)
+  - Purpose: Determine the calculation modes present in a Fleur XML file.
+  - Returns: A dictionary with keys describing the calculation modes.
+  - Important mode keys (examples):
+    - jspin: number of spins in the calculation
+    - noco: non-collinear calculation
+    - soc: spin-orbit coupling
+    - relax: structural relaxation
+    - spex: GW/Spex-related mode
+    - force_theorem: Force theorem calculation
+    - film: film system
+    - ldau: LDA+U
+    - dos: density of states calculation
+    - band: band structure calculation
+    - bz_integration: Brillouin-zone integration method
+    - cf_coeff: coefficients (cFCoeffs) presence
+    - plot: plotting/output flag
+    - greensf/ldahia: Greens function and related calculations
+  - Notes:
+    - Uses FleurXMLContext to access XML attributes in a version-aware manner.
+    - Some fields depend on XML structure, tag existence, and schema version (e.g., spex handling via expertModes, plot handling across versions, cf_coeff detection).
+
+- get_nkpts(xmltree, schema_dict, logger=None)
+  - Purpose: Determine the number of k-points used in the calculation described by the Fleur XML.
+  - Returns: Integer nkpts.
+  - Behavior:
+    - Determines the selected k-point list name (listName) and validates it against available lists (kPointList elements within kPointLists).
+    - Retrieves the count attribute from the chosen kPointList.
+    - Performs basic validation to ensure nkpts is an integer.
+  - Version considerations:
+    - Behavior is compatible with older Fleur versions that use kPointList/ kPointList count mechanisms via the specified listName.
+  - Exceptions:
+    - Raises ValueError if the selected listName does not exist or if nkpts cannot be evaluated as an integer.
+
+- Supporting context:
+  - FleurXMLContext: a context manager used to safely navigate the Fleur XML structure and access attributes via convenient helpers (e.g., attribute, tag_exists, find).
+  - schema_dict: provides the XML version to guide conditional parsing.
+
+- Decorator:
+  - @schema_dict_version_dispatch(output_schema=False): ensures proper dispatch based on the input/output schema version, enabling version-aware behavior for get_nkpts.
+
+---
+
+## Usage
+
+- Typical workflow:
+  - Parse the Fleur XML into an XML tree (e.g., using lxml or a similar library).
+  - Build or obtain a schema dictionary describing the Fleur version (InputSchemaDict or OutputSchemaDict).
+  - Call get_fleur_modes to extract calculation mode flags.
+  - Call get_nkpts to determine the number of k-points.
+
+Code examples (from the module):
+
+- Function signatures
+  - get_fleur_modes
+  - get_nkpts (version-dispatched)
+
+```python
+from masci_tools.io.parsers.fleur_parser import get_fleur_modes
+from masci_tools.io.parsers import fleur_schema
+from masci_tools.io.fleur_xml import FleurXMLContext
+
+# xmltree: an XML element tree of Fleur's XML
+# schema_dict: an instance of fleur_schema.InputSchemaDict or fleur_schema.OutputSchemaDict
+# logger: optional logging.Logger
+
+fleur_modes = get_fleur_modes(xmltree, schema_dict, logger=logger)
+```
+
+```python
+from masci_tools.io.parsers.fleur_parser import get_nkpts
+from masci_tools.io.parsers import fleur_schema
+from masci_tools.io.fleur_xml import FleurXMLContext
+
+nkpts = get_nkpts(xmltree, schema_dict, logger=logger)
+```
+
+- Expected dictionary structure (example)
+```python
+{
+  'jspin': 2,
+  'noco': False,
+  'soc': False,
+  'relax': True,
+  'spex': 0,
+  'force_theorem': False,
+  'cf_coeff': False,
+  'plot': False,
+  'film': False,
+  'ldau': False,
+  'dos': None,
+  'band': None,
+  'bz_integration': None,
+  'greensf': False,
+  'ldahia': False
+}
+```
+
+---
+
+## Details
+
+- get_fleur_modes implementation notes:
+  - jspin is read directly from the root attribute 'jspins'.
+  - noco, soc, relax are boolean flags read from respective attributes with defaults False.
+  - spex handling:
+    - Defaults to 0.
+    - If an expertModes section exists, gw is read; a special case is added for newer schema versions where gw may come from 'spex' attribute.
+  - force_theorem is detected for schema versions > 0.27 via the existence of the 'forceTheorem' tag; otherwise False.
+  - cf_coeff detection checks for cFCoeffs and whether cFCoeffs contains potential or chargeDensity tags, enabling cf_coeff if present.
+  - plot handling accounts for version differences:
+    - If 'plotting' tag exists, iplot is read.
+    - For versions >= 0.29, iplot is treated as a boolean (non-zero).
+  - greensf detection:
+    - For versions >= 0.32, the presence of greensfCalculation implies greensf mode.
+    - For versions >= 0.35, torque-related tags extend greensf consideration; else, torgueCalculation is considered.
+  - ldahia (ldaHIA) detection is version-gated on the presence of the tag.
+
+- get_nkpts implementation notes:
+  - Reads listName to identify the active k-point list.
+  - Collects all available kPointList names from the kPointLists container and validates the active listName.
+  - Uses a context-managed search to locate the kPointList with the requested name and reads its count attribute.
+  - Validates that the retrieved count is an int; otherwise raises a ValueError (with a message indicating failure to evaluate n).
+
+- Version and compatibility:
+  - The functions are decorated and implemented to adapt to multiple Fleur XML schema versions.
+  - The approach ensures backward compatibility for older files while supporting newer features introduced in later schema versions.
+
+- Error handling:
+  - get_nkpts raises a ValueError if the selected k-point list cannot be found or if nkpts cannot be evaluated as an integer.
+  - Other issues during XML parsing are surfaced via standard exceptions raised within FleurXMLContext and related helpers.
+
+---
+
+## References
+
+- Fleur XML context and schema handling are provided by:
+  - FleurXMLContext
+  - schema_dict: InputSchemaDict / OutputSchemaDict
+  - The module relies on helpers from:
+    - masci_tools.io.parsers.fleur_schema
+    - masci_tools.io.common_functions
+    - masci_tools.util.typing
+
+- Core behavior is implemented in:
+  - get_fleur_modes(xmltree, schema_dict, logger=None)
+  - get_nkpts(xmltree, schema_dict, logger=None)
+
+---
+
+If you need examples tailored to a specific Fleur version or a minimal runnable snippet with sample XML, I can provide that as well.

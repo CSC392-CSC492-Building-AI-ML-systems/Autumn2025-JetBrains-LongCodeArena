@@ -1,0 +1,187 @@
+Image Extraction
+================
+
+Image Extraction converts camera waveforms into a single charge per pixel (and optionally a timing) by applying a per-pixel integration window over the waveform. The extraction algorithms are designed to be fast, modular, and to work efficiently on large arrays of waveforms. They are implemented as a small family of extractors that share a common interface and a set of core building blocks (the extract_around_peak, extract_sliding_window, and related utilities).
+
+Key concepts
+------------
+
+- Waveforms: for each pixel, a 1D array of samples (n_samples). The typical data shape is (n_pix, n_samples).
+- Charge: the integrated signal within a selected window for each pixel.
+- Peak timing: a per-pixel estimate of when the pulse arrives, computed within the chosen window.
+- Windows: windows can be defined by width (number of samples) and shift (offset from a peak position); some algorithms use a fixed window, others adapt to peak finding results.
+- Units: sampling_rate_ghz is the camera sampling rate in GHz. Resulting times (peak_time) are converted to nanoseconds by dividing by the sampling rate.
+- Handling invalid pixels: the pipeline can apply an InvalidPixelHandler to mask or skip problematic channels.
+
+Core building blocks
+--------------------
+
+- extract_around_peak
+  - Purpose: compute the charge by summing samples within a per-pixel window defined by a peak index, window width, and window shift; also estimate a pulse time within that window via a weighted average.
+  - Signature (per-pixel operation; vectorized over pixels):
+    - waveforms: 1D array of samples for a single pixel (size s)
+    - peak_index: peak position for the pixel
+    - width: window width (in samples) for the pixel
+    - shift: window start offset (in samples) for the pixel
+    - sampling_rate_ghz: camera sampling rate (GHz)
+    - sum_: output sum (charge) for the pixel
+    - peak_time: output pulse time for the pixel (ns)
+  - Notes:
+    - Window is clamped to the valid waveform range.
+    - peak_time is computed as a weighted average of positive samples inside the window; if all samples are non-positive, peak_time falls back to the start of the window.
+    - Used by several extractors to implement peak-centered windowing.
+- extract_sliding_window
+  - Purpose: find the window of a fixed width with the largest sum along the waveform for each pixel; also compute a weighted timing within that best window.
+  - Signature:
+    - waveforms: 2D array (n_pix, n_samples) broadcasted over pixels
+    - width: window width (in samples); can be per-pixel
+    - sampling_rate_ghz: camera sampling rate (GHz)
+    - sum_: output array of charges per pixel
+    - peak_time: output array of pulse times per pixel (ns)
+  - Notes:
+    - Uses a cumulative sum to efficiently evaluate all width-sized sums.
+- neighbor_average_maximum, subtract_baseline, integration_correction
+  - Utility functions used by higher-level extractors to apply neighborhood information, baseline handling, or small corrections post-integration.
+  - Used to implement more robust or hardware-specific extraction schemes.
+
+Extractor families (high-level descriptions)
+-------------------------------------------
+
+- ImageExtractor (base class)
+  - Abstract interface for all extractors. Provides common integration semantics and wiring into ctapipe’s event processing.
+- FlashCamExtractor
+  - Optimized for FlashCam-like readouts. Encodes best practices for window placement and timing extraction on that hardware.
+- FullWaveformSum
+  - Simple extractor: sums the entire waveform for each pixel (no windowing). Fast and robust; timing is generally not provided.
+- FixedWindowSum
+  - Integrates a fixed-width window per pixel. Window position is either fixed or supplied per pixel.
+- GlobalPeakWindowSum
+  - Uses a window anchored around a global peak (across the camera or a subset) to compute per-pixel charges.
+- LocalPeakWindowSum
+  - Uses a local peak estimate per pixel as the window anchor; more adaptive to per-pixel pulse positions.
+- SlidingWindowMaxSum
+  - Equivalent to the per-pixel application of extract_sliding_window: select the window with the maximum sum as the charge estimate.
+- NeighborPeakWindowSum
+  - Incorporates neighboring pixel information to stabilize the window placement (useful in complex showers or noisy cameras).
+- BaselineSubtractedNeighborPeakWindowSum
+  - Subtracts a baseline (pedestal) estimate before applying the neighbor-based windowing to improve charge estimates in the presence of offsets.
+- TwoPassWindowSum
+  - A two-pass approach: first estimate a rough timing/charge, then refine using a second window choice informed by the first pass.
+
+Typical workflow
+---------------
+
+1. Prepare the waveforms: shape (n_pix, n_samples). Optionally apply an InvalidPixelHandler to mask bad channels.
+2. Choose an extraction strategy (one of the extractors above) and configure its windowing parameters (width, shift, etc.).
+3. Run the extractor to obtain per-pixel charges (and optionally timing per pixel).
+4. Use the resulting charges in downstream DL1 processing, calibration, or feature extraction.
+
+Example usage: core routines (without relying on a specific class constructor)
+--------------------------------------------------------------------------
+
+The core building blocks are exposed as guvectorized functions and can be used directly. This example demonstrates how to compute per-pixel charges and peak times using both a peak-centered window and a sliding window.
+
+.. code-block:: python
+
+   import numpy as np
+   from ctapipe.image.extractor import extract_around_peak, extract_sliding_window
+
+   # Example waveform data: n_pix x n_samples
+   n_pix, n_samples = 128, 64
+   waveforms = np.random.rand(n_pix, n_samples).astype(np.float64)
+
+   # Example per-pixel window settings (could be produced by a peak finder)
+   peak_index = np.full(n_pix, 12, dtype=np.int64)
+   width = np.full(n_pix, 8, dtype=np.int64)
+   shift = np.zeros(n_pix, dtype=np.int64)
+
+   # Output arrays
+   sums = np.empty(n_pix, dtype=np.float64)
+   peak_times = np.empty(n_pix, dtype=np.float64)
+
+   # Global sampling rate (GHz)
+   sampling_rate_ghz = 0.25  # example value
+
+   # Per-pixel peak-centered extraction
+   extract_around_peak(waveforms, peak_index, width, shift, sampling_rate_ghz, sums, peak_times)
+
+   # Sliding window extraction (fixed width per pixel)
+   sums_sw = np.empty(n_pix, dtype=np.float64)
+   peak_times_sw = np.empty(n_pix, dtype=np.float64)
+   extract_sliding_window(waveforms, width, sampling_rate_ghz, sums_sw, peak_times_sw)
+
+Notes:
+- waveforms must be either float64 or float32, matching the ufunc signature.
+- peak_index, width, and shift can be per-pixel arrays or broadcast scalars.
+- peak_time is returned in nanoseconds (ns); sums are the integrated charges.
+
+Example usage: a minimal extraction workflow
+--------------------------------------------
+
+This is a minimal, hardware-agnostic example showing how you might compute per-pixel charges using a peak-centered window, and then optionally switch to a sliding-window approach for comparison.
+
+.. code-block:: python
+
+   import numpy as np
+   from ctapipe.image.extractor import extract_around_peak, extract_sliding_window
+
+   # Mock data
+   n_pix, n_samples = 64, 100
+   waveforms = np.random.normal(size=(n_pix, n_samples)).astype(np.float64)
+
+   # Peak-based window parameters (these would come from a peak finder in practice)
+   peak_index = np.full(n_pix, 50, dtype=np.int64)
+   width = np.full(n_pix, 8, dtype=np.int64)
+   shift = np.zeros(n_pix, dtype=np.int64)
+   sampling_rate_ghz = 0.25
+
+   # Outputs
+   sums_peak = np.empty(n_pix, dtype=np.float64)
+   times_peak = np.empty(n_pix, dtype=np.float64)
+
+   extract_around_peak(waveforms, peak_index, width, shift, sampling_rate_ghz, sums_peak, times_peak)
+
+   # Sliding window alternative
+   sums_sw = np.empty(n_pix, dtype=np.float64)
+   times_sw = np.empty(n_pix, dtype=np.float64)
+
+   extract_sliding_window(waveforms, width, sampling_rate_ghz, sums_sw, times_sw)
+
+Developer notes
+---------------
+
+- Performance: extract_around_peak is implemented as a guvectorize with nopython=True and caching enabled for speed and vectorization across pixels. The internal loop uses prange for parallel execution across samples, where available.
+- Types and units: the code supports both float32 and float64 waveforms. The sampling_rate_ghz input is a scalar float; peak_time is returned in nanoseconds after division by the sampling rate.
+- Edge handling: windows are clamped to the waveform boundaries to avoid out-of-bounds access.
+- Invalid pixels: integrate with InvalidPixelHandler to skip or mask problematic channels during extraction.
+- Extensions: The framework is designed to allow new extraction strategies by deriving from ImageExtractor and implementing the per-pixel window logic.
+
+API reference (high level)
+--------------------------
+
+- ImageExtractor
+  - Abstract base for all image extraction strategies.
+  - Common configuration points: whether to subtract baselines, how to treat invalid pixels, and how to handle timing information.
+- FlashCamExtractor
+  - Optimized for FlashCam readouts; includes hardware-aware defaults for windowing.
+- FullWaveformSum
+  - Simple, fast baseline-insensitive charge from the entire waveform.
+- FixedWindowSum
+  - Windowed integration with a fixed window width and position.
+- GlobalPeakWindowSum, LocalPeakWindowSum
+  - Window placement strategies based on peak information (global or local per pixel).
+- SlidingWindowMaxSum
+  - Equivalent to sliding-window optimization that selects the maximum window sum per pixel.
+- NeighborPeakWindowSum, BaselineSubtractedNeighborPeakWindowSum
+  - Leverage neighboring-pixel information to stabilize the estimate; optional baseline subtraction to improve robustness.
+- TwoPassWindowSum
+  - A two-pass approach for improved window placement.
+
+References
+----------
+
+- Core routines: extract_around_peak, extract_sliding_window
+- Utilities: neighbor_average_maximum, subtract_baseline, integration_correction
+- Data structures: DL1CameraContainer (for downstream integration with ctapipe’s DL1 processing)
+
+If you need a tailored example (e.g., integrating with a DL1 pipeline, or configuring a specific extractor with your project’s config system), tell me which extractor you intend to use and I’ll provide a concrete snippet.

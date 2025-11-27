@@ -1,0 +1,184 @@
+How Mitogen Works
+==================
+
+Mitogen is a high-performance framework that enables Python code to run in isolated contexts (such as separate processes or sandboxed environments) while providing fast, attribute-safe communication between those contexts. The core of Mitogen is a small bootstrap that manages a brokered message-passing system, routing requests and responses between local and remote endpoints. This document provides an overview of the internal architecture, message protocol, and practical considerations for developers extending or debugging Mitogen.
+
+Overview
+--------
+
+- Purpose: Execute Python code in remote or isolated contexts with minimal cross-context overhead.
+- Core idea: A brokered, message-based protocol transports requests (e.g., module loading, function calls) and responses between endpoints via Channels and a Router.
+- Bootstrap: The module shown in the source is designed to be the bootstrap code sent to every new slave context, and to provide the majority of the package’s functionality while keeping non-essential parts optional to reduce footprint.
+
+Architecture and Core Concepts
+------------------------------
+
+- Broker
+  - Central event loop that multiplexes IO between all connected endpoints.
+  - Responsible for encoding/decoding messages, delivering them to the correct handlers, and maintaining routing state.
+- Router
+  - Maintains a mapping of routes between endpoints.
+  - Handles dynamic changes to topology via ADD_ROUTE, DEL_ROUTE, and ALLOCATE_ID.
+  - Dispatches messages to the appropriate Channel/endpoint based on routing information.
+- Channel
+  - The transport endpoint that carries messages between local and remote contexts.
+  - Represents one half of a bidirectional transport; typically paired with a corresponding remote Channel.
+- Message Protocol (opcodes)
+  - Messages are sent with an opcode that indicates the type of operation, followed by a payload.
+  - Known opcodes from the bootstrap module:
+    - GET_MODULE (100): Request a module from the remote context.
+    - CALL_FUNCTION (101): Invoke a function in the remote context.
+    - FORWARD_LOG (102): Forward a log message to the remote context.
+    - ADD_ROUTE (103): Add a routing rule between endpoints.
+    - DEL_ROUTE (104): Remove a routing rule.
+    - ALLOCATE_ID (105): Allocate a new route or entity identifier.
+    - SHUTDOWN (106): Request shutdown of a peer.
+    - LOAD_MODULE (107): Load a module in the remote context.
+    - FORWARD_MODULE (108): Forward a module to the remote context.
+    - DETACHING (109): Notify that a peer is detaching or cleaning up.
+    - CALL_SERVICE (110): Invoke a service in the remote context.
+    - STUB_CALL_SERVICE (111): Stubbed service call for testing or fallback.
+  - Special value IS_DEAD (999)
+    - Signals disconnection or the inability to route a message.
+    - Used in reply_to to trigger cleanup and error handling (e.g., raise ChannelError).
+
+Data formats and serialization
+------------------------------
+
+- Serialization
+  - The bootstrap uses Python’s pickle-based protocol for serializing payloads across processes (imported as py_pickle).
+  - This enables complex Python objects to be transmitted, at the cost of requiring trusted boundaries and careful security considerations.
+- Encoding
+  - Latin-1 codec support is included (LATIN1_CODEC) to manage binary-safe string/bytes transport where appropriate.
+  - Python 3: BytesType = bytes, UnicodeType = str, and memoryview-based buffers are used for efficient slicing.
+- Data types
+  - Payloads typically contain module names, function identifiers, arguments, and keyword arguments, as well as metadata required to locate remote modules or services.
+
+Transport and performance considerations
+----------------------------------------
+
+- Default buffer sizes
+  - The system uses a relatively large default for IO buffers to balance latency and throughput.
+  - The default size for Side.read/Side.write and the buffers configured by create_socketpair is 128KiB.
+- Practical implications
+  - Small messages may incur higher per-message overhead but keep memory usage low.
+  - Large messages benefit from fewer system calls but require larger kernel socket buffers and more userspace copying.
+  - If the transport path includes intermediaries (e.g., SSH), the relative size of OS buffers and interposing layers can affect throughput.
+- Compatibility and portability
+  - The code includes compatibility shims for Python 2/3 (as indicated by the PY24, PY3 guards). In modern deployments, Python 3 is expected and recommended.
+
+Bootstrap and slave contexts
+-----------------------------
+
+- The module is designed to be the bootstrap payload for new slave contexts.
+- Purpose: Provide the essential messaging backbone (Broker, Router, and core handlers) without pulling in non-critical components, enabling minimal bootstrap overhead.
+
+Important considerations and edge cases
+---------------------------------------
+
+- Disconnections and routing failures
+  - IS_DEAD is used to signal disconnection or inability to route a message.
+  - When IS_DEAD is observed in a reply, the Router typically cleans up the related route and may raise a ChannelError for the caller.
+- Lifecycle management
+  - DETACHING messages indicate a peer is detaching and allows the Router to release resources and update its routing table.
+- Security and trust
+  - Cross-context calls (module loading, function invocation, service calls) execute arbitrary Python code in remote contexts.
+  - Use strict trust boundaries and avoid untrusted input if Mitogen is used to bridge across untrusted peers.
+- Version and compatibility
+  - The bootstrap includes Python-version conditional blocks, so ensure consistent Python versions across participating contexts or adapt the bootstrap accordingly.
+- Edge behavior with intermediaries
+  - When routing through intermediaries, buffering strategies and message chunking become more important; consider tuning the default buffer size for your environment.
+
+Opcode quick reference (summary)
+--------------------------------
+
+- 100 GET_MODULE
+- 101 CALL_FUNCTION
+- 102 FORWARD_LOG
+- 103 ADD_ROUTE
+- 104 DEL_ROUTE
+- 105 ALLOCATE_ID
+- 106 SHUTDOWN
+- 107 LOAD_MODULE
+- 108 FORWARD_MODULE
+- 109 DETACHING
+- 110 CALL_SERVICE
+- 111 STUB_CALL_SERVICE
+- 999 IS_DEAD (special sentinel in reply_to)
+
+Usage examples (conceptual)
+----------------------------
+
+Note: These examples are illustrative and describe the intent of the operations rather than literal API calls.
+
+Example 1: Request a module from a remote context
+
+```python
+# Conceptual: build and send a GET_MODULE request to a remote endpoint
+opcode = 100  # GET_MODULE
+payload = { 'module_name': 'os' }
+
+message = {
+    'opcode': opcode,
+    'payload': payload,
+    'reply_to': None,  # set by the broker when a reply is expected
+}
+# Send via the broker/router to the appropriate endpoint
+broker.send_message(target_endpoint_id, message)
+```
+
+Example 2: Call a function in a remote context
+
+```python
+# Conceptual: CALL_FUNCTION with module, function, and args/kwargs
+opcode = 101  # CALL_FUNCTION
+payload = {
+    'module': 'math',
+    'function': 'sqrt',
+    'args': [16.0],
+    'kwargs': {}
+}
+
+message = {
+    'opcode': opcode,
+    'payload': payload,
+}
+broker.send_message(target_endpoint_id, message)
+```
+
+Example 3: Add a route between two endpoints
+
+```python
+# Conceptual: ADD_ROUTE to forward messages from A to B
+opcode = 103  # ADD_ROUTE
+payload = {
+    'source_id': 'endpoint-A',
+    'destination_id': 'endpoint-B'
+}
+
+message = {
+    'opcode': opcode,
+    'payload': payload,
+}
+broker.send_message('controller', message)
+```
+
+Example 4: Load a module into a remote context
+
+```python
+# Conceptual: LOAD_MODULE to ensure a module is available remotely
+opcode = 107  # LOAD_MODULE
+payload = {
+    'module': 'requests'
+}
+message = {
+    'opcode': opcode,
+    'payload': payload
+}
+broker.send_message(target_endpoint_id, message)
+```
+
+Conclusion
+----------
+
+Mitogen’s internal design centers on a lightweight brokered messaging system, a Router that manages dynamic topology, and Channels as transport endpoints. The predefined opcodes describe the core operations (module loading, function invocation, and routing control) that enable efficient cross-context execution. When implementing or debugging Mitogen, focus on the lifecycle of routes, the handling of IS_DEAD signals, and the tradeoffs involved in buffering and serialization.

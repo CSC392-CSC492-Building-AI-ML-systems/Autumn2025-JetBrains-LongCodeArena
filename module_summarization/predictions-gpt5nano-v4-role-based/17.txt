@@ -1,0 +1,119 @@
+w_assign.rst
+
+w_assign: WALKER ASSIGNMENT AND MACROSTATE LABELING
+
+Overview
+- w_assign assigns walkers to spatial bins for each iteration, segment, and timepoint in a WEST simulation.
+- Produces an output file (default assign.h5) containing per-timepoint bin assignments, iteration metadata, and labeled populations for downstream analysis.
+- Supports optional macrostate labeling (kinetic macrostates) to enable kinetic analyses (w_kintrace, w_kinmat) by recording the most recently visited macrostate for each trajectory.
+
+Key concepts
+- Assignment: mapping from a walker (segment/timepoint) to a bin.
+- Macrostate labeling: optional labeling of trajectories by the macrostate they most recently occupied.
+- Labeled populations: per-iteration, per-macrostate, per-bin population tallies derived from labeled trajectories.
+- Data sources: progress-coordinate data (pcoord) or user-supplied datasets via --construct-dataset or --dsspecs.
+- Parallel execution: designed to run in parallel (WESTParallelTool), with progress reporting support.
+
+Usage and input data sources
+- Source data
+  - If --construct-dataset is provided, w_assign will call the user function in MODULE.FUNCTION as function(n_iter, iter_group) and use its return value as the dataset to index as [segment][timepoint][dimension].
+  - If --dsspecs is provided, supply one or more “dataset specifications” of the form NAME[,file=FILENAME,slice=SLICE]. The specified dataset NAME (from FILENAME or the main west.h5) is sliced according to SLICE to extract the relevant progress-coordinate values (potentially multi-dimensional).
+  - If neither --construct-dataset nor --dsspecs is given, the default is to use the pcoord dataset in west.h5.
+
+- Subset selection helper
+  - parse_pcoord_value allows users to supply a textual expression that is evaluated to construct a pcoord array (useful for constructing multi-dimensional coordinates on the fly). This is primarily for internal/dsspec handling and advanced customization.
+
+- Subdatasets used internally
+  - For each iteration, w_assign fetches per-iteration, per-span data from:
+    - parent_id_dsspec: segment identifiers for the parent (predecessor) state
+    - weight_dsspec: per-timepoint weights (walker weights)
+    - pcoord_dsspec: progress-coordinate data for bin mapping and macrostate labeling
+  - The core computation uses assign_and_label to compute new assignments and labeling, followed by accumulate_labeled_populations to build the labeled-populations tallies.
+
+Macrostate specification
+- Macrostate definitions are optional but required for kinetic analyses (w_kintrace, w_kinmat).
+- Three methods to define macrostates:
+  1) States corresponding to single bins
+     - Use --states with multiple arguments, each a coordinate tuple (optionally prefixed by a label).
+     - Examples:
+       - bound:1.0
+       - unbound:(2.5,2.5)
+     - Unlabeled states receive generated names such as stateN (N is the zero-based index in the provided list).
+  2) States from a YAML file
+     - Use --states-from-file to provide a YAML that defines a list of states, each with a label and a set of coords.
+     - Bins containing those coordinates are assigned to the corresponding state.
+     - Example YAML:
+       ---
+       states:
+         - label: unbound
+           coords:
+             - [9.0, 1.0]
+             - [9.0, 2.0]
+         - label: bound
+           coords:
+             - [0.1, 0.0]
+  3) States from a function
+     - Use --states-from-function=MODULE.FUNCTION. The function is called as function(mapper) and must return a list of dictionaries. Each dictionary must include a "coords" key with a vector of coordinate tuples and may include an optional "label".
+
+Output format and datasets
+- Output file
+  - By default, the output file is named assign.h5 (configurable via -o/--output).
+  - The file contains several datasets and attributes described below.
+
+- Top-level attributes
+  - nbins: Integer. Number of valid bins. Bin indices range from 0 to nbins-1.
+  - nstates: Integer. Number of valid macrostates. Trajectory ensemble assignments range from 0 to nstates-1 if states are defined.
+
+- Datasets
+  - /assignments [iteration][segment][timepoint]
+    - Integer. Per-segment and per-timepoint bin assignments.
+  - /npts [iteration]
+    - Integer. Number of timepoints in each iteration.
+  - /nsegs [iteration]
+    - Integer. Number of segments in each iteration.
+  - /labeled_populations [iterations][state][bin]
+    - Floating-point. Per-iteration, per-timepoint population counts, labeled by the most recently visited macrostate.
+    - The last macrostate entry (nstates-1) corresponds to trajectories that initiated outside of a defined macrostate.
+  - /bin_labels [bin]
+    - Labels for bins (human-readable or descriptive names). Used to map numerical bin indices to meaningful bin identifiers.
+  - Additional metadata and dimensions are stored as attributes to support downstream processing.
+
+Algorithmic notes
+- Core processing
+  - For each iteration/time window, w_assign computes:
+    - parent_ids: the identifiers of the parent/walker segments
+    - weights: per-timepoint weights
+    - pcoords: progress-coordinate values
+  - assign_and_label(lb, ub, parent_ids, mapper.assign, nstates, state_map, last_labels, pcoords, subsample) returns:
+    - assignments: bin indices for each item in the [lb:ub) slice
+    - trajlabels: per-walker macrostate labels (trajectory-level labels)
+    - statelabels: per-timepoint macrostate labels computed from the trajectory history
+  - accumulate_labeled_populations(weights, assignments, trajlabels, pops) converts per-walker information into per-timepoint, per-macrostate population tallies stored in pops.
+  - The function _assign_label_pop wraps the above steps and returns:
+    - assignments, trajlabels, pops, lb, ub, statelabels
+- Parallel and progress
+  - The tool is designed as a WESTParallelTool and integrates with the WEST progress indicator components, enabling scalable processing across compute resources while reporting progress.
+
+Output semantics and consistency
+- Consistency requirement: The entire dataset must be assigned, even if downstream analyses only use a subset of the data. This guarantees that trajectory-origin information (the bin each trajectory originated from) is available for all timepoints, which is essential for certain kinetic analyses.
+
+Practical examples
+- Basic usage (default behavior, uses pcoord from west.h5)
+  - w_assign -o assign.h5
+- Specify a particular output file and explicit dataset
+  - w_assign -o assign.h5 --dsspecs pcoord
+- Use a custom dataset function
+  - w_assign -o assign.h5 --construct-dataset=my_module.get_pcoord
+- Define macrostates via a YAML file
+  - w_assign -o assign.h5 --states-from-file my_states.yaml
+- Define macrostates directly on the command line (single-bin states)
+  - w_assign -o assign.h5 --states bound:1.0 unbound:(2.5,2.5)
+
+Notes and best practices
+- Ensure that the number of bins (nbins) and the number of defined macrostates (nstates) are consistent with the provided state mappings and the binning map used by the mapper.
+- The last entry in the labeled_populations corresponds to trajectories that were initiated outside of defined macrostates; interpret accordingly in kinetic analyses.
+- If no macrostates are defined, w_assign can still provide per-bin assignments, but macrostate-related outputs will reflect the absence of defined states.
+
+See Also
+- w_kintrace, w_kinmat: kinetic analysis tools that rely on macrostate labeling produced by w_assign.
+- WEST data model and binning utilities: assign_and_label, accumulate_labeled_populations, and related bin/mapping components for deeper architectural context.

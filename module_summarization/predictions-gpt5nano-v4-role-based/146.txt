@@ -1,0 +1,145 @@
+Quick Start
+===========
+
+This quickstart explains how to begin using toppra’s geometric path abstractions and the OpenRAVE trajectory wrapper, with concise examples. It highlights the key building blocks you’ll interact with when planning trajectories along geometric paths.
+
+Overview of the core components
+--------------------------------
+
+- AbstractGeometricPath
+  - An abstract base class for all geometric paths. Concrete paths must implement:
+    - __call__(path_positions, order=0) -> np.ndarray
+      - Evaluate the path (order 0), its first derivative (order 1), or second derivative (order 2) at given path positions.
+    - dof (property)
+      - Degrees of freedom of the path.
+    - path_interval (property)
+      - Start and end positions along the path.
+    - waypoints (property)
+      - Optional waypoints information (default: None).
+- propose_gridpoints(path, max_err_threshold, max_iteration, max_seg_length)
+  - Generate gridpoints along the path that adaptively refine where curvature is high to satisfy an error bound.
+  - Uses the path’s second derivative to estimate interpolation error and subdivides segments accordingly.
+  - Returns a 1D numpy array of path positions (gridpoints).
+- RaveTrajectoryWrapper
+  - An adapter that wraps OpenRAVE’s GenericTrajectory into an AbstractGeometricPath-like interface.
+  - Supports trajectories using quadratic or cubic interpolation.
+  - Converts the trajectory into a piecewise polynomial representation (PPoly) over the trajectory’s time schedule.
+  - Only available if OpenRAVE is installed and FOUND_OPENRAVE is True.
+
+Prerequisites
+-------------
+- Python environment with numpy and scipy installed.
+- Optional: OpenRAVE installed if you plan to use RaveTrajectoryWrapper.
+- If OpenRAVE is not installed, the RaveTrajectoryWrapper is not importable and is gated by FOUND_OPENRAVE.
+
+Getting started
+--------------
+
+1) Implement a geometric path (example)
+
+Create a concrete class that inherits AbstractGeometricPath and implements the required methods. The following is a minimal illustrative example (replace with your actual path logic):
+
+.. code-block:: python
+
+    import numpy as np
+    from typing import Union
+    from toppra.quickstart import AbstractGeometricPath  # adjust import as needed
+
+    class MyPath(AbstractGeometricPath):
+        def __init__(self, dof: int, t0: float = 0.0, t1: float = 1.0):
+            self._dof = dof
+            self._interval = np.array([t0, t1], dtype=float)
+
+        @property
+        def dof(self) -> int:
+            return self._dof
+
+        @property
+        def path_interval(self):
+            return self._interval
+
+        @property
+        def waypoints(self):
+            return None
+
+        def __call__(self, path_positions: Union[float, np.ndarray], order: int = 0) -> np.ndarray:
+            t = np.asarray(path_positions, dtype=float)
+            # Example: a simple linear path in 'dof' dimensions
+            if order == 0:
+                # position
+                return np.stack([t for _ in range(self.dof)], axis=-1)
+            elif order == 1:
+                # velocity (constant for a linear path)
+                return np.tile(np.ones_like(t)[..., None], (self.dof,))  # shape may vary with input
+            elif order == 2:
+                # acceleration (zero for a linear path)
+                return np.zeros((np.atleast_1d(t).shape[0], self.dof))
+            else:
+                raise ValueError("Unsupported derivative order")
+
+2) Generate gridpoints along the path
+
+Use propose_gridpoints to adaptively refine the grid where the path has high curvature, ensuring the interpolation error stays below a threshold.
+
+.. code-block:: python
+
+    import numpy as np
+    from toppra.quickstart import propose_gridpoints, AbstractGeometricPath
+
+    # Suppose 'path' is an instance of a concrete AbstractGeometricPath
+    gridpoints = propose_gridpoints(path, max_err_threshold=1e-4, max_iteration=100, max_seg_length=0.05)
+    gridpoints = np.asarray(gridpoints)
+
+3) Wrap an OpenRAVE trajectory (optional)
+
+If you have OpenRAVE installed, you can wrap an existing OpenRAVE trajectory using RaveTrajectoryWrapper to obtain a geometric path representation compatible with toppra algorithms.
+
+.. code-block:: python
+
+    if FOUND_OPENRAVE:
+        import openravepy as orpy
+        # traj: an instance of orpy.RaveTrajectory
+        # robot: an orpy.Robot instance
+        rave_path = RaveTrajectoryWrapper(traj, robot)
+        # rave_path now behaves like an AbstractGeometricPath (supports __call__, dof, path_interval)
+
+Notes:
+- RaveTrajectoryWrapper only supports trajectories with quadratic or cubic interpolation in OpenRAVE.
+- The OpenRAVE integration is gated by FOUND_OPENRAVE. If OpenRAVE is unavailable, you will not be able to construct RaveTrajectoryWrapper.
+
+What to do next
+---------------
+- With a concrete path (or a wrapped OpenRAVE trajectory), you can:
+  - Use propose_gridpoints to obtain a discretization of the path.
+  - Feed the path and grid to toppra’s trajectory planning routines (not shown in this quickstart snippet) to compute feasible timing and acceleration profiles consistent with your robot model.
+- If you’re not using OpenRAVE, implement your own path by subclassing AbstractGeometricPath and providing the required interface. The gridpoint refinement and path evaluation logic work identically regardless of how the path is defined.
+
+API highlights
+--------------
+
+- AbstractGeometricPath
+  - __call__(path_positions: Union[float, np.ndarray], order: int = 0) -> np.ndarray
+  - dof: int
+  - path_interval: np.ndarray
+  - waypoints: Optional[Tuple[np.ndarray, ...]] or None (default)
+- propose_gridpoints(path, max_err_threshold=1e-4, max_iteration=100, max_seg_length=0.05) -> np.ndarray
+  - Refines gridpoints along the path based on estimated interpolation error.
+- RaveTrajectoryWrapper(traj, robot)
+  - Wraps OpenRAVE trajectories (quadratic/cubic interpolation) into an AbstractGeometricPath-compatible interface.
+  - Access via FOUND_OPENRAVE gating.
+
+Limitations and tips
+--------------------
+
+- The RaveTrajectoryWrapper is only available when OpenRAVE is installed; otherwise, use a custom path implementation.
+- The gridpoint proposal relies on the path’s second derivative; highly curved regions will receive denser sampling.
+- The provided quickstart examples are minimal scaffolds. Replace with real path definitions and integrate with your full toppra workflow.
+
+References
+----------
+
+- AbstractGeometricPath: Abstract base class for all geometric paths.
+- propose_gridpoints: Adaptive discretization of a geometric path.
+- RaveTrajectoryWrapper: OpenRAVE trajectory wrapper for geometric-path-based planning.
+
+This quickstart gives you a concise, practical starting point to work with toppra’s geometric paths and, when available, the OpenRAVE integration.

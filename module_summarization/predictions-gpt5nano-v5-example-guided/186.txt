@@ -1,0 +1,118 @@
+# Imputation of missing values
+
+## Overview
+This module provides imputers that fill in missing values in data. The primary concrete class is SimpleImputer, which imputes missing values for each feature (column) using a univariate strategy (mean, median, most_frequent) or a constant value. Imputers can also optionally append a binary indicator that marks locations of missing values, via the add_indicator option.
+
+Key functionality includes support for various missing-value placeholders (including NumPy NaN and pandas NA), validation of input dtypes, and internal utilities for determining the most frequent value with nuanced tie-breaking.
+
+Main components:
+- _BaseImputer: common logic for imputers, including optional MissingIndicator integration.
+- SimpleImputer: univariate imputation with strategies mean, median, most_frequent, or constant.
+
+## Key Components
+
+### _BaseImputer
+- Purpose: base class for imputers, providing optional missing-value indicator support.
+- Parameters (inherited/available):
+  - missing_values: placeholder for missing values (default np.nan)
+  - add_indicator: whether to append a missing-value indicator feature
+  - keep_empty_features: whether to keep features that become empty after imputation
+- Core behavior:
+  - _fit_indicator(X): fit a MissingIndicator if add_indicator is True
+  - _transform_indicator(X): compute the missing-value mask for X
+  - _concatenate_indicator(X_imputed, X_indicator): horizontally stack imputed data with the indicator mask
+  - _concatenate_indicator_feature_names_out(names, input_features): append indicator feature names when applicable
+  - _more_tags(): indicates whether NaNs are allowed for imputation (depends on missing_values)
+
+### SimpleImputer
+- Purpose: univariate imputer for completing missing values with simple strategies
+- Documentation excerpt:
+  - Replaces missing values using a descriptive statistic along each column, or using a constant value.
+  - This class supersedes the older Imputer estimator.
+- Parameters:
+  - missing_values: placeholder for missing values (default np.nan). For pandas nullable integer dtypes, can be np.nan or pd.NA.
+  - strategy: one of "mean", "median", "most_frequent", "constant"
+    - "mean": replace missing values with the mean along each column (numeric data only)
+    - "median": replace missing values with the median along each column (numeric data only)
+    - "most_frequent": replace missing values with the most frequent value along each column (strings or numeric)
+      - If there is a tie for most frequent, the smallest value is returned
+    - "constant": replace missing values with fill_value (see below)
+  - fill_value: used when strategy == "constant". For strings or objects, must be a string. If None, fill_value defaults to 0 for numeric data and "missing_value" for strings/objects.
+  - copy: bool, default True. If True, a copy of X is produced; if False, imputation may be done in-place where possible.
+  - add_indicator: flag from _BaseImputer to also output missing-value indicators
+  - keep_empty_features: flag to keep features that are effectively empty after imputation
+- Internal helpers:
+  - _check_inputs_dtype(X, missing_values): validates that X.dtype and missing_values are compatible. If missing_values is pandas NA, numeric arrays are allowed to use it.
+  - _most_frequent(array, extra_value, n_repeat): internal helper to determine the most frequent value, extended by extra_value repeated n_repeat times. Implements tie-breaking behavior similar to scipy.stats.mode.
+    - Returns the imputed value based on counts and provided extra_value, with special handling when there are no observed values.
+- Notes:
+  - For numeric data, "mean" and "median" can be used.
+  - For "most_frequent", the method supports both numeric and string/object data.
+  - The implementation includes nuanced tie-breaking to mirror scipy.stats.mode behavior.
+
+## Usage
+
+Basic numeric imputation (mean):
+- Example:
+  - from sklearn.impute import SimpleImputer
+  - import numpy as np
+  - X = np.array([[1.0, 2.0], [np.nan, 3.0], [7.0, np.nan]])
+  - imputer = SimpleImputer(strategy="mean")
+  - X_imputed = imputer.fit_transform(X)
+
+Categorical or mixed data (most_frequent):
+- Example:
+  - X = np.array([["cat", np.nan], ["dog", "bird"]], dtype=object)
+  - imputer = SimpleImputer(strategy="most_frequent")
+  - X_imputed = imputer.fit_transform(X)
+
+Constant value imputation:
+- Example:
+  - imputer = SimpleImputer(strategy="constant", fill_value=-1)
+  - X_imputed = imputer.fit_transform(X)
+
+Using an indicator for missing values:
+- Example:
+  - imputer = SimpleImputer(strategy="mean", add_indicator=True)
+  - X_imputed = imputer.fit_transform(X)
+  - After fit, the imputer.indicator_ attribute holds the MissingIndicator
+    that can transform the original data into a missing-value mask (and can be used with get_feature_names_out to obtain feature names).
+
+Notes on feature names (when using add_indicator):
+- If add_indicator is True, the resulting feature set includes the original features plus indicator features. The helper _concatenate_indicator_feature_names_out appends the indicator feature names to the original names.
+
+## Details
+
+- Input validation
+  - _check_inputs_dtype ensures that X’s dtype and the specified missing_values are compatible. If missing_values is pandas.NA, numeric arrays are allowed to use it.
+  - For pandas' nullable integer dtypes, missing_values can be np.nan or pd.NA.
+
+- Missing indicator integration
+  - When add_indicator is True, a MissingIndicator is fitted to the data and its transformed mask is concatenated to the imputed data, producing additional features indicating missing entries.
+  - The add_indicator feature_names are appended to the original feature names via _concatenate_indicator_feature_names_out.
+
+- Internal imputation logic
+  - For "mean" and "median", numeric data requirements apply.
+  - For "most_frequent", the value is derived per feature. If a feature is entirely missing or has no observed values, the value may be determined via the internal logic in _most_frequent, including how ties are resolved against extra values.
+  - For "constant", a user-provided fill_value replaces missing values.
+
+- Behavior with NaNs
+  - The imputer supports NaN-based missing values and, when appropriate, pandas.NA. The _more_tags method communicates that NaN support is allowed for X when missing_values is NaN.
+
+- Inheritance and extensibility
+  - SimpleImputer inherits from _BaseImputer, gaining the indicator-handling capabilities and consistent interface for integration with pipelines and feature-name management.
+
+---
+
+For reference and deeper dive, see the implementation in the source file impute.rst’s corresponding classes and helper functions:
+- _check_inputs_dtype(X, missing_values)
+- _most_frequent(array, extra_value, n_repeat)
+- class _BaseImputer
+  - _fit_indicator
+  - _transform_indicator
+  - _concatenate_indicator
+  - _concatenate_indicator_feature_names_out
+  - _more_tags
+- class SimpleImputer(_BaseImputer)
+  - Parameters: missing_values, strategy, fill_value, copy, add_indicator, keep_empty_features
+  - Behavior: mean/median/most_frequent/constant imputation with optional indicator features

@@ -1,0 +1,172 @@
+# w_multi_west: Documentation for the w_multi_west command
+
+This document explains the w_multi_west tool, a WESTPA-based utility designed to combine multiple WESTPA simulations while accounting for reweighting. The implementation shown is a work-in-progress and focuses on the public interface, data flow, and integration points you may extend or rely on in development.
+
+---
+
+## Purpose
+
+- Merge results from several WESTPA runs into a single output HDF5 file.
+- Optionally reweight contributions from each simulation to produce a consistent ensemble.
+- Support combining auxiliary datasets and, optionally, ibstates data.
+- Produce a consolidated dataset suitable for downstream analysis (rates, observables, etc.).
+
+---
+
+## Architecture and data model
+
+- Core class: `WMultiWest`, subclassing `WESTMultiTool` (from `westpa.tools.core`).
+- Entry points:
+  - CLI: `WMultiWest.add_args(...)` wires up command-line options.
+  - Processing: `WMultiWest.open_files()` opens the output file and prepares per-simulation handles.
+  - State: `WMultiWest.process_args(...)` stores parsed arguments for later use.
+  - Computation: `WMultiWest.go()` is the main execution method that would drive the merging workflow (the snippet shows minimal scaffolding; the full merging logic is intended to live here).
+- Internal helpers and data types:
+  - `ci_dtype`: a structured dtype used for confidence-interval/resampling statistics with fields such as `iter_start`, `iter_stop`, `expected`, `ci_lbound`, `ci_ubound`, `corr_len`, `variance`, `stderrormean`.
+  - `get_bin_mapper(we_h5file, hashval)`: utility to retrieve a bin-mapping object from a WESTPA HDF5 file’s `/bin_topologies` group by a hash value. Used to apply bin-based reweighting or binning logic when combining ensembles.
+  - `create_idtype_array(input_array)`: helper that converts an input array to the `istate_dtype`, preserving data and resetting `basis_auxref` to an empty bytestring.
+  - `Segment`: lightweight container used during processing (fields: `weight`, `iteration`, `simid`, `recycled_in`). Represents a segment of a walker as needed by coordination logic.
+
+- Output:
+  - A single output HDF5 file (default: `multi.h5`) that stores the combined data.
+  - The output file is created with `stamp_creator_data(...)` to log creator metadata.
+
+---
+
+## Command-line interface
+
+The tool exposes these options (as seen in `add_args`):
+
+- `-o`, `--output-file`
+  - Default: `multi.h5`
+  - Description: The name of the output file to store results in.
+
+- `-W`, `--west`, `--WEST_H5FILE`
+  - Default: `west.h5`
+  - Description: The name of the main WESTPA HDF5 file inside each simulation directory.
+
+- `-a`, `--aux`
+  - Action: `append`
+  - Description: Names of additional auxiliary datasets to be combined.
+
+- `-aa`, `--auxall`
+  - Action: `store_true`
+  - Description: Combine all auxiliary datasets. Default: False.
+
+- `-nr`, `--no-reweight`
+  - Action: `store_true`
+  - Description: Do not reweight. Default: False.
+
+- `-ib`, `--ibstates`
+  - Action: `store_true`
+  - Description: Attempt to combine `ibstates` dataset. Default: False.
+
+Notes:
+- The code references `self.sims` in `process_args`, implying a list of simulation inputs. The provided snippet does not declare a command-line argument to populate `sims`, but the intended usage is to pass a list of simulation directories (each containing the `west.h5` file) to be merged.
+- The exact positional/structural layout of input simulations is implementation-dependent (e.g., multiple directories listed after options). Adapt usage to your application’s CLI contract.
+
+---
+
+## How it works (high level)
+
+- Initialization
+  - `WMultiWest.__init__` sets up internal state (e.g., `ntrials`, `nstates`, dictionaries for simulation data, etc.) and a progress component for user feedback.
+- Argument handling
+  - `add_args(...)` wires CLI options.
+  - `process_args(args)` stores parsed values (output file path, west file name, aux options, reweight flag, ibstates flag) for later use in I/O and processing.
+- I/O setup
+  - `open_files()`:
+    - Opens the output HDF5 file via `h5io.WESTPAH5File(..., 'w', creating_program=True)`.
+    - Writes creator metadata with `h5io.stamp_creator_data(...)`.
+    - Generates a file list for the input simulations and opens per-simulation WEST HDF5 handles (stored in `self.westH5`).
+- Data tracking
+  - `total_number_of_walkers()` computes the total number of walkers by aggregating `n_particles` from each input simulation’s `summary` dataset.
+- Computation and integration
+  - The `go()` method, where the actual merging/reweighting logic would be executed, currently contains minimal scaffolding:
+    - Accesses the progress indicator.
+    - Establishes a flag (`self.istates`) indicating ISTATE compatibility across runs.
+    - Initializes a progress step (and would normally drive the merging workflow here).
+  - The complete integration logic (weight propagation, reweighting across simulations, bin-mapping, auxiliary datasets, and potential ibstates handling) would reside in this method or in helper methods invoked from it.
+
+> Note: The provided code excerpt is primarily scaffolding. The full merging algorithm (reweighting across ensembles, combining time bins, and writing consolidated datasets) is intended to be implemented within or invoked from `go()` and related helpers.
+
+---
+
+## Data flow overview
+
+1. User invokes w_multi_west with a list of simulation inputs and options.
+2. The tool opens an output file and prepares per-simulation WEST HDF5 handles.
+3. The total number of walkers is computed (for progress metrics and potential normalization).
+4. If reweighting is enabled, bin-mapper data may be retrieved via `get_bin_mapper` when needed.
+5. Auxiliary datasets are optionally included or combined according to `aux`/`auxall`.
+6. The merged results are written to the output HDF5.
+7. Metadata (creator stamp) is recorded in the output file.
+
+---
+
+## Examples
+
+Note: The exact CLI syntax may vary depending on how the input simulations are provided to the tool (the snippet implies a list of simulations but does not show a concrete argument for it). Adapt these examples to your environment.
+
+- Example 1: Basic merge with default west file name and single auxiliary dataset (no reweighting)
+  - Command:
+    - w_multi_west -o multi.h5 -W west.h5 -a some_aux_dataset
+  - Rationale: merges simulations while including one auxiliary dataset (if present) and without applying reweighting.
+
+- Example 2: Merge with all auxiliaries and reweight enabled
+  - Command:
+    - w_multi_west -o multi.h5 -W west.h5 -aa
+  - Rationale: includes all available auxiliary datasets and performs reweighting across simulations.
+
+- Example 3: Merge IB states (if present) and skip reweighting
+  - Command:
+    - w_multi_west -o multi.h5 -W west.h5 -ib -nr
+  - Rationale: attempts to include `ibstates` data while explicitly disabling reweighting.
+
+- Example 4: Full-feature test (aux all, ibstates, and reweight)
+  - Command:
+    - w_multi_west -o multi.h5 -W west.h5 -aa -ib -nr
+  - Rationale: exercises all major options; ensures output file can accommodate reweighted integration with auxiliary and ibstates data.
+
+Important: Ensure you provide all input simulation directories (as per your CLI contract) so that the tool can generate the `self.westH5` mapping and aggregate `n_particles` correctly.
+
+---
+
+## Development and extension notes
+
+- go() is the primary execution point. In the current snippet, it contains only setup and a minimal progress step. The intended implementation should:
+  - Iterate over input simulations, read relevant datasets (e.g., probabilities, weights, ISTATEs, ibstates if requested).
+  - If `--no-reweight` is not set, apply reweighting across simulations to create a consistent ensemble.
+  - Combine auxiliary datasets as requested (`--aux` or `--auxall`), ensuring alignment of datasets across simulations.
+  - If `ibstates` is requested, merge or remap ibstates as appropriate.
+  - Write merged results to `self.output_file` including any necessary derived data (rates, observables, etc.).
+  - Update progress indicator accordingly.
+
+- Binning and mapping
+  - The `get_bin_mapper` helper suggests a design where bin topology information is stored in `/bin_topologies` with an index and pickles. This is used to map hash values to bin mappers, which in turn influence reweighting or bin-based analysis during merging.
+
+- Data types
+  - The `ci_dtype` is prepared for confidence-interval-like output per iteration range. Expect to populate fields such as `iter_start`, `iter_stop`, `expected`, `ci_lbound`, `ci_ubound`, etc., during statistical analysis of the merged ensembles.
+
+- Robustness
+  - Ensure input simulations are compatible (e.g., ISTATE compatibility, number of iterations, and ISTATE schema). The current code assumes ISTATE compatibility and sets `self.istates = True` by default.
+
+- Testing
+  - Unit tests should cover:
+    - Correct aggregation of particle counts across simulations.
+    - Correct handling of auxiliary dataset inclusion and absence.
+    - Behavior with and without reweighting.
+    - Proper invocation of bin-mapper retrieval and error handling when hash values are missing.
+  - Integration tests should validate end-to-end merging producing a valid `multi.h5` with consistent datasets.
+
+---
+
+## Limitations and caveats
+
+- The provided code excerpt is a scaffolding for w_multi_west. The complete merge and reweighting pipeline must be implemented in the `go()` method and any additional helpers.
+- The exact CLI contract for supplying multiple simulations is not fully defined in the snippet. Align the CLI usage with your project’s conventions (e.g., a positional list of simulation directories vs. a dedicated `--sims` option).
+- The behavior of auxiliary datasets and `ibstates` merging depends on the presence and structure of those datasets in the input simulations. Ensure schema compatibility when enabling these features.
+
+---
+
+If you would like, I can help tailor this documentation to match your precise CLI contract (how simulations are passed to the tool), or flesh out a concrete implementation plan for the `go()` method with step-by-step data handling and pseudocode.

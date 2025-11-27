@@ -1,0 +1,190 @@
+# AzureStorageLibraryProvider
+
+## Overview
+AzureStorageLibraryProvider is a library provider that reads from an Microsoft Azure Storage container. Configure the connection using a URL in the form:
+
+azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER
+
+If the container is not publicly accessible, you must provide an Access Policy with Read and List permissions and append a SAS query string to the URL, e.g.:
+
+azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER?sv=2020-10-02&si=XXXX&sr=c&sig=XXXXXXXXXXXXXX
+
+The provider builds an in-memory model of the container contents and exposes the contents through the standard library provider interface.
+
+## Key Components
+- AzureStorageLibraryProvider(LibraryProviderABC)
+  - Reads from a Microsoft Azure Storage container.
+  - Builds an in-memory hierarchical model of directories and items using internal AzureDirectory and AzureItem structures.
+  - Caching support controlled by configuration.
+- Core concepts used by the provider:
+  - URL parsing of the azure+ URL to obtain the Azure blob container base URL.
+  - XML parsing of container listing (Blob/Name) to build the directory tree.
+  - Asynchronous loading and readiness signaling via _start and _load_model.
+  - Integration with the hosting library’s item model (LibraryItem) and layer/provider system.
+
+Key internal attributes (from the code):
+- URL: Parsed base URL of the Azure container (after removing the azure+ prefix).
+- Model: Internal directory/item model built from the container listing.
+- Path: Original path string (azure+ URL).
+- CacheDir: Optional path for caching downloaded blobs (compatibility with Config.get("library", "azure_cache")).
+
+Key methods:
+- __init__(self, library, path, layer)
+  - Validates the azure+ URL, initializes the model, configures cache, and schedules startup.
+- _start(self)
+  - Coroutine that loads the model and marks the provider ready when successful.
+- _load_model(self)
+  - Fetches and parses the container listing, builds the directory/item tree.
+- list(self, path: str) -> list
+  - Lists items under a given path by traversing the model and returning LibraryItem instances.
+- read(self, path: str) -> typing.IO
+  - Reads a blob at the given path with optional local cache and ETag handling.
+
+Code snippets (illustrative):
+- Initialization and URL handling
+```python
+def __init__(self, library, path, layer):
+    super().__init__(library, layer)
+    assert path[:6] == "azure+"
+    self.URL = urllib.parse.urlparse(path[6:])
+    self.Model = None
+    self.Path = path
+
+    self.CacheDir = Config.get("library", "azure_cache")
+    if self.CacheDir == 'false':
+        self.CacheDir = None
+    elif self.CacheDir == 'true':
+        self.CacheDir = os.path.join(tempfile.gettempdir(), "asab.library.azure.{}".format(hashlib.sha256(path.encode('utf-8')).hexdigest()))
+```
+
+- Loading the model (container listing)
+```python
+async def _load_model(self):
+    url = urllib.parse.urlunparse(urllib.parse.ParseResult(
+        scheme=self.URL.scheme,
+        netloc=self.URL.netloc,
+        path=self.URL.path,
+        params='',
+        query=self.URL.query + "&restype=container&comp=list",
+        fragment=''
+    ))
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                content = await resp.text()
+            else:
+                err = await resp.text()
+                L.warning("Failed to list blobs from `{}`:\n{}".format(url, err))
+                return
+
+    model = AzureDirectory("/", sub=dict())
+
+    dom = xml.dom.minidom.parseString(content)
+    for blob in dom.getElementsByTagName("Blob"):
+        path = get_xml_text(blob.getElementsByTagName("Name"))
+
+        path = path.split('/')
+        curmodel = model
+        for i in range(len(path) - 1):
+            newmodel = curmodel.sub.get(path[i])
+            if newmodel is None:
+                curmodel.sub[path[i]] = newmodel = AzureDirectory(
+                    name='/' + '/'.join(path[:i + 1]),
+                    sub=dict()
+                )
+
+            curmodel = newmodel
+
+        curmodel.sub[path[-1]] = AzureItem(
+            name='/' + '/'.join(path)
+        )
+
+    self.Model = model
+```
+
+- Listing directory contents
+```python
+async def list(self, path: str) -> list:
+    if self.Model is None:
+        L.warning("Azure Storage library provider is not ready. Cannot list {}".format(path))
+        raise RuntimeError("Not ready")
+
+    assert path[:1] == '/'
+    assert '//' not in path
+    assert len(path) == 1 or path[-1:]!= '/'
+
+    if path == '/':
+        pathparts = []
+    else:
+        pathparts = path.split("/")[1:]
+
+    curmodel = self.Model
+    for p in pathparts:
+        curmodel = curmodel.sub.get(p)
+        if curmodel is None:
+            raise KeyError("Not '{}' found".format(path))
+        if curmodel.type!= 'dir':
+            raise KeyError("Not '{}' found".format(path))
+
+    items = []
+    for i in curmodel.sub.values():
+        items.append(LibraryItem(
+            name=i.name,
+            type=i.type,
+            layer=self.Layer,
+            providers=[self],
+        ))
+
+    return items
+```
+
+- Reading a blob with caching
+```python
+async def read(self, path: str) -> typing.IO:
+    assert path[:1] == '/'
+    assert '//' not in path
+    assert len(path) == 1 or path[-1:]!= '/'
+
+    headers = {}
+
+    pathhash = hashlib.sha256(path.encode('utf-8')).hexdigest()
+    cachefname = os.path.join(self.CacheDir, pathhash)
+    if self.CacheDir is not None:
+        try:
+            with open(cachefname + '.etag', "r") as etagf:
+                etag = etagf.read()
+            headers['If-None-Match'] = etag
+        except FileNotFoundError:
+            pass
+    # HTTP GET with optional If-None-Match, potential local cache usage
+    # (writing to cache and etag file occurs when applicable)
+```
+
+## Usage
+- Instantiate the provider within your library by passing the library object, the azure+ URL, and the layer:
+```python
+provider = AzureStorageLibraryProvider(
+    library=my_library,
+    path="azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER",
+    layer=my_layer
+)
+```
+- Access contents via the standard library interface:
+  - List directory: provider.list("/"), provider.list("/path")
+  - Read blob: provider.read("/path/to/blob")
+
+## Configuration and Notes
+- Cache support:
+  - Controlled by the configuration option library.azure_cache.
+  - If set to "true", a per-instance cache directory is used under the system temp directory.
+  - If set to "false", no cache is used.
+- SAS and Access Policies:
+  - If container is not public, provide an Access Policy with Read/List and append a SAS query string to the URL as shown in the overview.
+- Implementation details:
+  - Uses aiohttp for asynchronous HTTP requests.
+  - Parses container listings using XML (xml.dom.minidom).
+  - Builds an in-memory hierarchical model of AzureDirectory and AzureItem for fast access.
+  - Uses etags for cache validation and optional local caching of blob contents.
+
+---

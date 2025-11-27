@@ -1,0 +1,156 @@
+Scheduling policies
+===================
+
+Introduction
+------------
+This document describes the policies that Dask's distributed scheduler uses to decide two complementary things:
+- which task should be scheduled next (task preference)
+- which worker should execute a given task (worker preference)
+
+Policies are implemented as pluggable extensions and can be customized or replaced to influence locality, balance, determinism, and other scheduling goals. They communicate through a lightweight exchange of recommendations and messages among clients and workers.
+
+Overview of the policy model
+----------------------------
+- Task preference: Given the current graph, worker loads, memory pressure, and policy-specific signals, a policy may influence which ready task the scheduler attempts to run next.
+- Worker preference: A policy may influence which worker is targeted for a task, taking into account locality, data placement, worker health, and other considerations.
+- Policy extensions: The scheduler loads policy modules as extensions. Built-in policies cover common goals (e.g., load balancing, locality, and deterministic replay).
+- Coordination primitives: Policies express their intent through a small set of data structures that the scheduler understands (for example, a map of task keys to preferred states or worker destinations, and per-address proposals). These are designed to be robust to asynchronous scheduling and partial failures.
+
+Core concepts and terminology
+----------------------------
+- Task preference: The policy’s suggestion about which ready task to execute next.
+- Worker preference: The policy’s suggestion about which worker should run a given task.
+- Policy extension: A plug-in that participates in scheduling decisions. In Dask’s distributed scheduler, policy extensions implement the SchedulerPlugin interface.
+- Recs, RecsMsgs, and related types: Internal data structures used by scheduling policies to communicate recommendations and messages between the client(s) and workers. They are part of the policy communication protocol and are designed for high-level interpretation rather than direct user manipulation.
+- Built-in policies: The default set of extensions that influence scheduling, such as WorkStealing (load balancing via task stealing), Shuffle (locality-aware distribution), and ReplayTaskScheduler (deterministic replay of tasks for debugging).
+
+Built-in scheduling policies
+----------------------------
+The following built-in policies are commonly active via the default extensions registry. They are designed to be composable and can be enabled or disabled via configuration.
+
+- WorkStealing
+  - Goal: Balance the workload across workers by allowing idle workers to steal tasks from busier workers.
+  - How it works: When a worker’s local queue is empty, the policy suggests stealing a task from another worker that has a locally runnable task queued or that would reduce overall idle time.
+  - Benefits: Improves parallelism and reduces stragglers; helps avoid hot spots.
+  - Considerations: May increase data movement if stolen tasks require data transfer; tuning may be needed for data-local workflows.
+
+- ShuffleSchedulerPlugin (shuffling for locality and fairness)
+  - Goal: Improve locality and fairness while avoiding pathological hotspots.
+  - How it works: Applies a policy-driven transformation to the mapping of tasks to workers, attempting to cluster related tasks or balance recent activity.
+  - Benefits: Potentially better data locality and more even resource use.
+  - Considerations: The shuffling strategy should be chosen with workload characteristics in mind; excessive shuffling can degrade locality.
+
+- SpansSchedulerExtension
+  - Goal: Multi-dimensional or hierarchical scheduling considerations (e.g., memory spans, data residency, or other resource spans).
+  - How it works: Adds policy logic that considers additional resource spans when making task-to-worker decisions.
+  - Benefits: Enables finer-grained scheduling decisions in memory- and resource-constrained environments.
+  - Considerations: Increased policy complexity; requires careful tuning for your workload.
+
+- ReplayTaskScheduler
+  - Goal: Deterministic replay of scheduling decisions for debugging, testing, or reproducibility.
+  - How it works: Records decisions in a replayable stream and replays them deterministically under the same conditions.
+  - Benefits: Reproducibility and easier debugging of scheduling behavior.
+  - Considerations: May impose overhead; suitable primarily for testing and diagnostics.
+
+Extending and implementing scheduling policies
+----------------------------------------------
+Developers may implement custom scheduling policies by creating policy extensions. The typical workflow is:
+
+- Create a policy class that implements the SchedulerPlugin interface.
+- Implement one or more hooks that the scheduler can invoke to influence decisions (for example, a task-selection hook and a worker-selection hook).
+- Register the policy with the scheduler so it can participate in decision-making.
+- Optionally expose configuration knobs to enable, disable, or tune the policy.
+
+Skeleton example (conceptual, not tied to a specific API)
+----------------------------------------------------------
+Note: This example shows the intended pattern and is intended for illustration; the exact method names depend on the scheduler’s plugin API.
+
+- Define a policy as a SchedulerPlugin subclass.
+- Implement hooks that receive the current scheduling state and can influence task and worker choices.
+- Register the policy with the scheduler.
+
+Code (conceptual)
+-------------------
+```python
+# Conceptual example: not guaranteed to run as-is
+from distributed.diagnostics.plugin import SchedulerPlugin
+
+class MyPolicy(SchedulerPlugin):
+    name = "my-policy"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    # Hook: invoked during scheduling decisions to influence task choice
+    def select_task(self, ready_tasks, scheduler_state):
+        # Inspect ready_tasks and scheduler_state
+        # Return a preferred task key or None to defer to the default
+        preferred = ...  # determine based on policy
+        return preferred
+
+    # Hook: invoked to influence which worker should run a given task
+    def select_worker(self, task_key, candidate_workers, scheduler_state):
+        # Return a preferred worker address or None to defer
+        preferred_worker = ...
+        return preferred_worker
+
+# Register the policy with the scheduler (pseudo-API)
+scheduler.add_policy(MyPolicy())
+```
+
+- Configuration note: policies are typically enabled by configuring the scheduler to load the policy extension. See your deployment’s configuration system for the exact mechanism (for example, the distributed config or programmatic registration in your cluster startup code).
+
+Interaction and conflicts
+-------------------------
+- Policies are designed to be composable, but they may have conflicting signals. The scheduler’s default behavior is to apply policies in a deterministic order or with a defined precedence to ensure predictable results.
+- When multiple policies influence the same decision, consider the following:
+  - Priority and ordering of plugins
+  - The stability of recommendations across scheduling cycles
+  - The potential for increased data movement vs. locality improvements
+  - The overhead introduced by policy computation
+
+Parameters, return values, and behavior
+---------------------------------------
+- Policy hooks typically receive:
+  - The current scheduling state (task graph, data locality, worker loads, memory pressure, etc.)
+  - The set of candidate tasks or workers for a given decision
+- Policies return:
+  - A task key or None to indicate no explicit preference
+  - A worker address or None to defer to the scheduler’s default
+- Edge cases:
+  - Empty ready task sets: policies should gracefully handle no available tasks.
+  - Data locality changes: workers may become unavailable or data may move; policies should be robust to dynamic changes.
+  - Policy interaction: clear precedence rules help avoid oscillation or instability.
+
+Usage examples
+--------------
+- Enabling a policy in a running cluster
+  - The policy is loaded as a scheduler extension and participates in decisions from that point forward.
+  - Example (conceptual):
+    - Start the scheduler with a policy extension registered in the cluster startup code or configuration.
+    - Monitor policy behavior via scheduler logs or diagnostics to verify expected effects on load balance and locality.
+
+- Creating a custom policy for a specific workload
+  - Identify the key scheduling goals (e.g., minimize data movement, maximize parallelism, ensure fairness).
+  - Implement the policy as a SchedulerPlugin with task and/or worker selection hooks.
+  - Register the policy and tune its parameters in configuration.
+
+Edge cases and considerations
+-----------------------------
+- Determinism vs. performance: deterministic replay policies trade some run-time overhead for reproducibility.
+- Interaction with memory management: policies may need to account for active memory and retirements; ensure policies respond gracefully to memory pressure.
+- Security and isolation: policies should not reveal sensitive information or introduce side-channel risks.
+- Backward compatibility: policy changes can alter scheduling behavior; provide a clear upgrade path and documentation for operators.
+
+Usage and references
+--------------------
+- Built-in policy extensions and their intent are described in the policy overview and the default extensions registry.
+- For developers extending the scheduler, see the SchedulerPlugin interface documentation and the policy examples in the codebase.
+
+Glossary
+--------
+- Policy extension: A plug-in that participates in scheduling decisions.
+- SchedulerPlugin: The base class for scheduling policy extensions.
+- Recs / RecsMsgs: Internal policy communication structures for recommendations and messages.
+
+End of documentation.

@@ -1,0 +1,187 @@
+Stateless Learning Rate Schedulers
+==================================
+
+This module provides stateless learning rate schedulers that integrate directly with Composer’s time abstraction. Stateless schedulers compute a multiplier to apply to the optimizer’s base learning rate (η) without mutating any internal state. They can be configured using explicit time units and can be composed multiplicatively when multiple schedulers are used.
+
+Overview
+--------
+
+- Stateless schedulers implement a pure function interface that maps the current trainer state to a learning rate multiplier α, where the effective learning rate is η_eff = η_i × α.
+- Schedulers may be provided as simple functions or as callable classes. They are designed to work with Composer’s Time and TimeUnit abstractions, enabling flexible time specifications (e.g., epochs, batches, or durations).
+- A scheduler can be bound to the current State via compile_composer_scheduler, which returns a PyTorch-compatible scheduler object (with a bound .step() interface). This bound scheduler resembles PyTorch’s LambdaLR but is aware of Composer’s time model.
+
+Key Concepts
+------------
+
+- ComposerScheduler: The protocol that defines a stateless scheduler. It is callable with a State and an optional scale schedule ratio (SSR). It returns a multiplier α to apply to the optimizer’s learning rate.
+- SSR (Scale Schedule Ratio): A factor that scales the effective time used by a scheduler. α_σ(t) = α(t / σ).
+- Time units: Schedulers can express their time in various units (epochs, batches, durations). The internal conversion respects unit compatibility and converts to an appropriate unit for real scheduling.
+- _convert_time: Converts a given time specification to a concrete Time object, taking into account SSR and the current trainer state (notably max_duration and dataloader_len).
+- compile_composer_scheduler: Converts a stateless ComposerScheduler into a bound PyTorch scheduler with access to the current State.
+
+Public API
+----------
+
+- ComposerScheduler (Protocol)
+  - Interface for implementing a stateless scheduler.
+  - Call signature: __call__(state: State, ssr: float = 1.0) -> float
+  - Returns a multiplier α to apply to the optimizer’s learning rate.
+  - Examples show both function-based and callable-class implementations.
+
+  Example (function-based scheduler):
+
+  def ten_epoch_decay_scheduler(state: State) -> float:
+      if state.timestamp.epoch < 10:
+          return 1.0
+      return 0.5
+
+  trainer = Trainer(
+      schedulers=[ten_epoch_decay_scheduler],
+      ...
+  )
+
+  Example (callable class):
+
+  class VariableEpochDecayScheduler(ComposerScheduler):
+      def __init__(self, num_epochs: int):
+          self.num_epochs = num_epochs
+
+      def __call__(self, state: State) -> float:
+          if state.time.epoch < self.num_epochs:
+              return 1.0
+          return 0.5
+
+  ten_epoch_decay_scheduler = VariableEpochDecayScheduler(num_epochs=10)
+  trainer = Trainer(
+      schedulers=[ten_epoch_decay_scheduler],
+      ...
+  )
+
+- _convert_time(time: Union[str, Time[int], Time[float]], state: State, ssr: float = 1.0) -> Time[int]
+  - Converts a time specification (string or Time object) into a concrete Time instance, adjusting for SSR and the trainer state.
+  - If time.unit is DURATION:
+    - If max_duration.unit is EPOCH, converts duration to BATCH using state.dataloader_len and max_duration.value.
+    - Otherwise, scales by max_duration.value and preserves the original unit.
+  - If time.unit is EPOCH:
+    - Epoch-based scheduling lacks granularity for SSR scaling, so converts to BATCH using state.dataloader_len.
+  - If time.unit is BATCH or other units, applies the SSR scaling and returns a Time with the same unit.
+  - Requires state.max_duration to be set.
+
+- compile_composer_scheduler(scheduler: ComposerScheduler, state: State, ssr: float = 1.0) -> PyTorchScheduler
+  - Converts a stateless ComposerScheduler into a PyTorch-compatible scheduler.
+  - Returns a scheduler object with a bound reference to the current State.
+  - The resulting scheduler exposes a .step() method compatible with PyTorch’s training loop, while internally leveraging the stateless scheduler logic.
+
+Concrete Schedulers
+-------------------
+
+The module exports a collection of concrete schedulers (names listed in __all__). These are designed to cover common patterns and can be used directly or composed:
+
+- StepScheduler
+- MultiStepScheduler
+- ConstantScheduler
+- LinearScheduler
+- ExponentialScheduler
+- CosineAnnealingScheduler
+- CosineAnnealingWarmRestartsScheduler
+- PolynomialScheduler
+- MultiStepWithWarmupScheduler
+- ConstantWithWarmupScheduler
+- LinearWithWarmupScheduler
+- CosineAnnealingWithWarmupScheduler
+- PolynomialWithWarmupScheduler
+
+Implementing a Scheduler
+------------------------
+
+You can implement a scheduler either as a simple function or as a callable class.
+
+- Function-based scheduler: Define a function that accepts a State and returns a multiplier α.
+- Callable class: Define a class with a __call__(self, state: State) -> float method, optionally storing configuration (e.g., number of epochs or a target schedule).
+
+Both approaches can be handed to a Trainer via the schedulers argument. The compile_composer_scheduler helper can wrap any ComposerScheduler into a PyTorch-compatible scheduler if you need a .step() interface bound to the current State.
+
+Time Units and SSR
+------------------
+
+- Time specifications interact with the trainer state through _convert_time. The function honors explicit SSR and converts time into an appropriate unit (epochs, batches) for actual scheduling.
+- When expressing time in epochs, SSR scaling may be ambiguous due to granularity. In such cases, time converts to batches using the current dataloader length.
+- Conversions rely on state.max_duration and state.dataloader_len. Ensure these are properly set in your training loop when using schedulers.
+
+Example: Using SSR with a function-based scheduler
+--------------------------------------------------
+
+def ten_epoch_decay_scheduler(state: State, ssr: float = 1.0) -> float:
+    t = state.time.epoch if hasattr(state, 'time') else state.timestamp.epoch
+    if t < 10:
+        return 1.0
+    return 0.5
+
+# Bind to the trainer using compile_composer_scheduler if you need a PyTorch-like scheduler
+# sc = compile_composer_scheduler(ten_epoch_decay_scheduler, state, ssr=1.0)
+# trainer = Trainer(..., schedulers=[ten_epoch_decay_scheduler], ...)
+
+Practical Notes
+---------------
+
+- Schedulers output a multiplier, not a learning rate. The effective learning rate is η_eff = η_i × α.
+- Multiple schedulers stack multiplicatively when supplied to a single trainer.
+- The SSR parameter enables reading the same schedule at different notion of “time” (e.g., scaling the progress). Use it to align schedules when integrating with external time-based loops.
+
+Code Examples
+-------------
+
+Function-based scheduler (example from the module’s documentation):
+
+def ten_epoch_decay_scheduler(state: State) -> float:
+    if state.timestamp.epoch < 10:
+        return 1.0
+    return 0.5
+
+trainer = Trainer(
+    schedulers=[ten_epoch_decay_scheduler],
+    ...
+)
+
+Callable class scheduler (example from the module’s documentation):
+
+class VariableEpochDecayScheduler(ComposerScheduler):
+    def __init__(self, num_epochs: int):
+        self.num_epochs = num_epochs
+
+    def __call__(self, state: State) -> float:
+        if state.time.epoch < self.num_epochs:
+            return 1.0
+        return 0.5
+
+ten_epoch_decay_scheduler = VariableEpochDecayScheduler(num_epochs=10)
+
+trainer = Trainer(
+    schedulers=[ten_epoch_decay_scheduler],
+    ...
+)
+
+Notes on the API
+----------------
+
+- The ComposerScheduler protocol is intentionally minimal. It enables flexible definitions while ensuring a consistent interface for integration with Composer’s training loop.
+- The _convert_time and compile_composer_scheduler helpers centralize the translation between user-friendly time specifications and the actual scheduling actions performed during training.
+
+For reference, this module exposes the following public API elements (as listed in __all__):
+- ComposerScheduler
+- compile_composer_scheduler
+- StepScheduler
+- MultiStepScheduler
+- ConstantScheduler
+- LinearScheduler
+- ExponentialScheduler
+- CosineAnnealingScheduler
+- CosineAnnealingWarmRestartsScheduler
+- PolynomialScheduler
+- MultiStepWithWarmupScheduler
+- ConstantWithWarmupScheduler
+- LinearWithWarmupScheduler
+- CosineAnnealingWithWarmupScheduler
+- PolynomialWithWarmupScheduler
+
+This documentation reflects the design and usage patterns implemented in the schedulers module, enabling clear and practical integration into professional training workflows.

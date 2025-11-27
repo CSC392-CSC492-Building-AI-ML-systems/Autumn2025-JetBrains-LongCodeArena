@@ -1,0 +1,127 @@
+w_select.rst
+
+w_select — Select dynamics segments using a user-supplied predicate
+
+Overview
+--------
+w_select selects segments from WESTPA HDF5 data by applying a user-provided predicate
+function to each iteration. The predicate determines which segments (within an
+iteration) are considered a match. By default, only the matching segments are
+stored; use -a/--include-ancestors to also store the ancestors of matching
+segments. The results are written to an output HDF5 file (default select.h5),
+with one entry per processed iteration.
+
+Key concepts
+- Predicate function: A user-supplied Python function callable as predicate(n_iter, iter_group)
+  that returns a sequence of segment IDs (local to the iteration) that match the
+  predicate.
+- Inversion: Use -v/--invert to select segments that DO NOT match the predicate.
+- Ancestors: Use -a/--include-ancestors to include ancestor segments of the matches in
+  the output.
+- Output format: The output file contains datasets describing, for each processed
+  iteration, the matching segments and their weights.
+
+Predicate function
+----------------
+The predicate function must be importable as MODULE.FUNCTION and be callable as:
+
+    predicate(n_iter, iter_group)
+
+where:
+- n_iter: The iteration index being processed.
+- iter_group: The HDF5 group corresponding to that iteration (contains per-iteration data).
+
+The function should return a collection of integer segment IDs (local to the
+iteration) that match the predicate. If -v/--invert is specified, the tool uses
+the complement of these IDs within that iteration.
+
+Example predicate
+-----------------
+Below is a simple example predicate that selects the first 5 segments in each
+iteration (adjust as needed for your data).
+
+.. code-block:: python
+
+    # mypred.py
+    def match_predicate(n_iter, iter_group):
+        # iter_group['seg_index'] gives segment IDs (local to iteration)
+        seg_ids = iter_group['seg_index'][:]
+        return seg_ids[:5]
+
+Usage
+-----
+General usage:
+
+- Basic:
+  w_select -p MODULE.FUNCTION -o select.h5
+
+- Invert matches:
+  w_select -p MODULE.FUNCTION -v -o select.h5
+
+- Include ancestors of matches:
+  w_select -p MODULE.FUNCTION -a -o select.h5
+
+- Specify an iteration range (start and stop are defined by IterRangeSelection):
+  w_select -s 0 -e 100 -p MODULE.FUNCTION -o select.h5
+
+- Combine with ancestors and inversion:
+  w_select -p MODULE.FUNCTION -a -v -o select.h5
+
+Output format
+-------------
+The output file (default select.h5 unless overridden with -o/--output) contains the following datasets:
+
+- /n_iter [iteration]
+  Integer iteration numbers for each entry in the other datasets.
+
+- /n_segs [iteration]
+  Integer number of segment IDs matching the predicate (or inverted predicate if -v is used)
+  in the given iteration.
+
+- /seg_ids [iteration][segment]
+  Integer array of matching segment IDs for each iteration. For iteration n_iter,
+  only the first n_segs[n_iter] entries are valid:
+  seg_ids[n_iter, :n_segs[n_iter]].
+
+- /weights [iteration][segment]
+  Floating-point weights corresponding to each matching segment in /seg_ids.
+
+Notes
+-----
+- seg_ids are local-to-iteration identifiers. Weights correspond to the matching
+  segments in the same order.
+- If no segments match in an iteration, n_segs is 0 and the corresponding
+  seg_ids/weights slices are empty for that iteration.
+- Ancestor handling (via -a/--include-ancestors) extends the stored segments to
+  include ancestors of the matched segments (as implemented by the tool).
+
+Implementation details (high level)
+---------------------------------
+- Iteration range is handled by IterRangeSelection.
+- Predicate evaluation is performed in parallel across iterations using a worker manager.
+- Output datasets are created with ragged shapes (maxshape with chunks) to accommodate
+  varying numbers of matches per iteration.
+- Output is compressed and shuffled to optimize storage.
+
+Code references (context)
+-------------------------
+- Predicate-based selection is driven by _find_matching_segments, which reads
+  per-iteration data from the WESTPA HDF5 file and collects matching segment IDs
+  via the provided predicate function.
+- The WSelectTool ties together argument parsing, predicate loading, iteration
+  processing, and output dataset creation.
+
+Example command
+---------------
+- Basic usage with a custom predicate:
+  w_select -p mypackage.mypredicate -o select.h5
+
+- Inversion and ancestors:
+  w_select -p mypackage.mypredicate -v -a -o select.h5
+
+- With iteration range:
+  w_select -s 0 -e 999 -p mypackage.mypredicate -o select.h5
+
+For more details, see the implementation in the WESTPA tools module, where
+WSelectTool defines the command-line interface, argument parsing, and
+parallel execution strategy.

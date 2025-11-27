@@ -1,0 +1,145 @@
+Visitors (sql.visitors)
+=======================
+
+Overview
+--------
+This module provides the visitor/traversal interface used by SQLAlchemy to walk
+and process visibile object graphs, such as SQL expression trees and other
+compiler-related structures. It exposes a small, extensible API built around
+two core concepts:
+
+- Visitable: a base class for objects that participate in a visitor-driven
+  traversal. Subclasses specify how to dispatch to visitor methods.
+- InternalTraversal: an enumeration of symbols that describe how internal state
+  should be traversed by generic traversal helpers.
+
+Public API
+----------
+- iterate, traverse_using, traverse, cloned_traverse, replacement_traverse
+  Library functions that support traversing visitable objects. These utilities
+  help walk graphs of visitable objects in a controlled way and are used by
+  various parts of the SQLAlchemy core and extensions.
+
+- Visitable
+  Base class for visitable objects. It implements the compiler dispatch logic
+  used to route to a visitor-provided method. Subclasses define a __visit_name__
+  attribute, and the class automatically wires up a _compiler_dispatch method that
+  looks for a visitor method named visit_<visit_name>.
+
+- ExternalTraversal, InternalTraversal
+  Traversal helper types used by the library to describe and perform traversal
+  of internals within visitable objects. InternalTraversal, in particular, is used
+  to declare how internal attributes are visited via the _traverse_internals
+  mechanism.
+
+- anon_map, prefix_anon_map
+  Anonymous-name mapping utilities used for internal traversal and expression
+  normalization. Depending on the runtime, these may come from Python helpers or
+  a cython-accelerated extension.
+
+Key concepts
+------------
+- Visitable and dynamic dispatch
+  - Subclasses of Visitable declare a __visit_name__ at the class level.
+  - On subclass creation, SQLAlchemy generates a compiler-dispatch function
+    that looks for a visitor method named visit_<visit_name>.
+  - If the visitor lacks a matching method, the code falls back to
+    visit_unsupported_compilation(visitor, error, **kw).
+  - If a subclass provides its own _compiler_dispatch, that implementation is
+    preserved as _original_compiler_dispatch; otherwise, the generated function is
+    assigned to both names.
+
+- __visit_name__ validation
+  - __visit_name__ must be a string. If not, an InvalidRequestError is raised
+    during class initialization.
+
+- InternalTraversal usage
+  - InternalTraversal defines symbols like dp_has_cache_key, dp_clauseelement, etc.
+  - These symbols map to short codes (e.g., "HC", "CE") and are used in
+    _traverse_internals to describe how an object’s internal state should be
+    traversed.
+  - Typical usage looks like:
+    _traverse_internals = [
+        ("value", InternalTraversal.dp_clauseelement),
+        ("whens", InternalTraversal.dp_clauseelement_tuples),
+        ("else_", InternalTraversal.dp_clauseelement),
+    ]
+  - This mechanism enables automatic generation of:
+    - HasTraverseInternals.get_children
+    - HasTraverseInternals._copy_internals
+    - HasCacheKey._gen_cache_key
+
+Code examples
+-------------
+
+1) Simple Visitable subclass and dispatch
+- Define a node type that participates in visitation.
+- Provide a visitor with a matching method.
+
+Example:
+
+  from sql.visitors import Visitable
+
+  class MyNode(Visitable):
+      __visit_name__ = "my_node"
+
+      def __init__(self, value):
+          self.value = value
+
+  class MyVisitor:
+      def visit_my_node(self, node, **kw):
+          return f"visited {node.value}"
+
+  node = MyNode("foo")
+  visitor = MyVisitor()
+
+  # The dispatcher expects a visitor; in real usage this is invoked by the
+  # compiler/traversal machinery. Here's a direct invocation for illustration:
+  result = node._compiler_dispatch(visitor)  # or pass through **kw as needed
+  # result == "visited foo"
+
+2) Internal traversal declaration
+- Show how to describe internal state for automatic traversal helpers.
+
+Example:
+
+  from sql.visitors import Visitable, InternalTraversal
+
+  class Case(Visitable):
+      __visit_name__ = "case"
+
+      def __init__(self, value, whens, else_):
+          self.value = value
+          self.whens = whens
+          self.else_ = else_
+
+      _traverse_internals = [
+          ("value", InternalTraversal.dp_clauseelement),
+          ("whens", InternalTraversal.dp_clauseelement_tuples),
+          ("else_", InternalTraversal.dp_clauseelement),
+      ]
+
+Notes on implementation details
+-------------------------------
+- CY extension compatibility
+  - The module uses anon/map helpers that may come from a Python fallback or a
+    cython-accelerated extension, depending on the runtime. The symbols anon_map
+    and prefix_anon_map are exposed to support anonymous-name mapping needs
+    during traversal.
+
+- Typing and runtime checks
+  - TYPE_CHECKING guards and related imports ensure type checkers can import
+    internal types without pulling in runtime dependencies when not available.
+
+See also
+--------
+- The core traversal utilities (iterate, traverse_using, traverse, cloned_traverse,
+  replacement_traverse) for working with visibile object graphs.
+- The HasTraverseInternals protocol and related helpers that work with
+  InternalTraversal to automatically implement internal traversal logic.
+
+Notes
+-----
+- This documentation reflects the public API surface exposed by the module
+  as shown in the code excerpt. The full module may contain additional
+  members and helpers not enumerated here.

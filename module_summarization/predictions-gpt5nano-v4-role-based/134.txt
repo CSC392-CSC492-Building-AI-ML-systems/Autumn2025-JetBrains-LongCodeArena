@@ -1,0 +1,152 @@
+annihilation.rst
+
+Annihilation: Alchemical Transformations
+=======================================
+
+Overview
+--------
+This document describes the alchemical transformation capabilities implemented by the HybridTopologyFactory, with a focus on how atoms and interactions are treated during alchemical (annihilation) transformations. The factory creates a hybrid representation that blends an “old” (pre-change) topology with a “new” (post-change) topology, controlled by a lambda parameter. This enables smooth, reversible transitions between states for free energy calculations.
+
+Key concepts
+------------
+Alchemical interaction groups
+- unique_old_atom: atoms present only in the old system. Their interactions are enabled at lambda = 0 and disabled at lambda = 1.
+- unique_new_atom: atoms present only in the new system. Their interactions are disabled at lambda = 0 and enabled at lambda = 1.
+- core_atom: atoms that are part of a residue that changes between old and new states. Their interactions follow the old system at lambda = 0 and the new system at lambda = 1.
+- environment_atom: atoms that are mapped (present in both systems) but are not part of a changing residue. Their interactions remain always on and are not alchemically modified.
+
+Hybrid topology concept
+- The hybrid system consists of a mixture of old and new atoms/classes, allowing a continuous alchemical interpolation between the two endstates.
+- The lambda parameter governs the scaling of forces and interactions for the different atom classes, enabling an “annihilation” or “growth” of interactions as the system transitions from old to new.
+
+Code organization and exposure
+- InteractionGroup enum: Defines the four alchemical classes (unique_old, unique_new, core, environment) that categorize atoms for alchemical treatment.
+- _known_forces: A set of OpenMM force objects that are considered for alchemical scaling (e.g., HarmonicBondForce, HarmonicAngleForce, PeriodicTorsionForce, NonbondedForce, MonteCarloBarostat). The factory manages how these forces are scaled with lambda.
+
+Core functionality
+- The HybridTopologyFactory constructs:
+  - hybrid_system: An OpenMM System representing the combined, alchemically tunable system.
+  - new_to_hybrid_atom_map: Mapping from new-system atom indices to hybrid-system indices.
+  - old_to_hybrid_atom_map: Mapping from old-system atom indices to hybrid-system indices.
+  - hybrid_positions: Positions for the hybrid system ([n, 3] array).
+  - hybrid_topology: Topology object representing the hybrid system structure.
+  - omm_hybrid_topology: OpenMM Topology corresponding to the hybrid system.
+- The approach allows atoms to be present in both systems, with their interactions scaled as a function of lambda, enabling smooth transitions and energy calculations for free energy methods.
+
+Important implementation notes
+- The API is experimental and subject to change.
+- The class expects a topology proposal (from a topology proposal engine), current (old) positions, and new positions.
+- The alchemical behavior is controlled via a “functions” dictionary that specifies how each force component should scale with lambda. Keys are expected to follow the pattern lambda_<term>, e.g., lambda_bonds, lambda_angles, lambda_torsions, lambda_sterics, lambda_electrostatics.
+- If endstate is provided as 0 or 1, the implementation raises an exception (endstate must be None for HybridTopologyFactory usage). Endstate handling may be supported for other classes, but not here.
+
+Parameters (highlights)
+-----------------------
+The constructor accepts a large set of options that influence alchemical behavior and numerical stability. Key categories include:
+
+- topology_proposal: perses.rjmc.topology_proposal.TopologyProposal
+  - The base topology change description produced by the proposal engine.
+
+- current_positions: [n, 3] array-like
+  - Coordinates of atoms in the old state.
+
+- new_positions: [m, 3] array-like
+  - Coordinates of atoms in the new state.
+
+- use_dispersion_correction: bool
+  - Whether to apply long-range dispersion correction in the nonbonded term (often expensive for NCMC).
+
+- functions: dict or None
+  - Alchemical scaling rules for forces. If provided, all lambda terms must be specified. If None, derivatives may be unavailable.
+
+- softcore_alpha: float or None
+  - Softcore alpha parameter for LJ interactions (defaulting behavior when None).
+
+- bond_softening_constant, angle_softening_constant: float
+  - Factors to soften force constants for bonds/angles involving unique-old vs unique-core interactions at endpoints.
+
+- soften_only_new: bool
+  - If True, applies softening selectively to new atoms; otherwise applies globally as configured.
+
+- neglected_new_angle_terms, neglected_old_angle_terms: lists
+  - Lists of force term indices (in the new/old HarmonicAngleForce) that were neglected by geometry engines and thus must be treated specially during alchemical growth/shrinkage.
+
+- softcore_LJ_v2, softcore_electrostatics: bool
+  - Toggle softcore LJ v2 and softcore electrostatics.
+
+- softcore_LJ_v2_alpha, softcore_electrostatics_alpha: float
+  - Softcore alpha parameters for LJ and electrostatics.
+
+- softcore_sigma_Q: float
+  - Softcore sigma parameter for electrostatics.
+
+- interpolate_old_and_new_14s: bool
+  - When True, 1,4 interactions for the new atoms at lambda=0 or old atoms at lambda=1 are turned off; when False, they may remain present in nonbonded force and are handled differently.
+
+- omitted_terms: dict
+  - Terms (by new topology index) that must be annealed over the lambda protocol.
+
+- rmsd_restraint: bool
+  - If True, imposes an RMSD restraint between core heavy atoms and protein Cα atoms.
+
+- endstate: int or None
+  - Lambda endstate to parameterize (must be None for HybridTopologyFactory).
+
+- flatten_torsions, endstate-related flags, and additional kwargs
+  - Additional controls for torsion terms, end-state behavior, and extensibility.
+
+Usage pattern (illustrative)
+----------------------------
+The typical usage involves constructing a HybridTopologyFactory with an existing topology proposal and position sets, then using the resulting hybrid objects in a simulation workflow.
+
+Example
+.. code-block:: python
+
+    # Provided by the PES/proposal workflow
+    topology_proposal = ...  # perses topology proposal object
+    current_positions = ...  # numpy array of shape (N, 3)
+    new_positions = ...      # numpy array of shape (M, 3)
+
+    # Optional alchemical controls
+    functions = {
+        'lambda_bonds': ...,
+        'lambda_angles': ...,
+        'lambda_torsions': ...,
+        'lambda_sterics': ...,
+        'lambda_electrostatics': ...
+    }
+
+    factory = HybridTopologyFactory(
+        topology_proposal,
+        current_positions,
+        new_positions,
+        use_dispersion_correction=True,
+        functions=functions,
+        softcore_alpha=0.5,
+        bond_softening_constant=1.0,
+        angle_softening_constant=1.0,
+        interpolate_old_and_new_14s=False,
+        omitted_terms=None,
+        rmsd_restraint=False,
+        endstate=None
+    )
+
+    hybrid_system = factory.hybrid_system
+    hybrid_positions = factory.hybrid_positions
+    hybrid_topology = factory.hybrid_topology
+    omm_hybrid_topology = factory.omm_hybrid_topology
+    new_to_hybrid = factory.new_to_hybrid_atom_map
+    old_to_hybrid = factory.old_to_hybrid_atom_map
+
+Notes
+-----
+- The API is experimental and subject to change.
+- The four atom classes (unique_old, unique_new, core, environment) drive how interactions are scaled with lambda and hence how the annihilation/growth process behaves.
+- The HybridTopologyFactory encapsulates the complexity of combining old and new topologies while providing a unified interface for alchemical simulations.
+
+See also
+--------
+- Perses topology proposal and integration frameworks for alchemical transformations
+- OpenMM force objects and NonbondedForce scaling
+- MonteCarloBarostat as part of the forceset that may appear in the alchemical context
+
+This documentation focuses on the alchemical transformation aspects implemented by the HybridTopologyFactory, highlighting how atoms are categorized and how forces are scaled to realize annihilation-like transformations during simulations.

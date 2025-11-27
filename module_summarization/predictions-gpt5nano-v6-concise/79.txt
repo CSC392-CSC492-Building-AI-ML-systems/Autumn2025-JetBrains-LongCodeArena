@@ -1,0 +1,230 @@
+# classfiles.rst — GILDAS CLASS file reader
+
+A Python module that reads GILDAS CLASS files and converts them into a pyspeckit ObsBlock. The implementation defines helper utilities, data-format specifications, and dictionaries used to interpret the CLASS file headers. The primary reader (not shown in this excerpt) uses these helpers to parse the binary header and populate a pyspeckit.spectrum.ObsBlock.
+
+---
+
+## Overview
+
+- Purpose: Read a GILDAS CLASS file and produce a pyspeckit ObsBlock for downstream analysis.
+- Language & compatibility: Python 2/3 compatibility via six; uses numpy, astropy (for logging and optional utilities), and pyspeckit for ObsBlock handling.
+- Core idea: The module provides a formal specification of the CLASS header formats and a set of helpers to map raw binary header data into structured Python objects.
+
+---
+
+## Public API (exported names and data)
+
+This section lists the public symbols defined in the module, with brief descriptions.
+
+- `irange`
+  - Alias for range (to support Python 2/3 compatibility where necessary).
+  - Purpose: used for iteration when building header blocks.
+
+- `print_timing(func)`
+  - Decorator that prints the execution time of the decorated function.
+  - Usage: decorate a long-running read/parse function to get a timing log.
+  - Example:
+    - @print_timing
+      def load_class(...): ...
+
+- `ensure_bytes(string)`
+  - Utility to ensure a given string is in byte form.
+  - Behavior:
+    - On Python 3, converts to bytes using UTF-8.
+    - On Python 2, returns a str.
+  - Usage: normalize keys when looking up binary header codes in dictionaries.
+
+- `filetype_dict`
+  - Mapping from a 2-character (plus padding) header code to a human-readable file type.
+  - Keys are bytes (via `ensure_bytes` during initialization).
+  - Example values: 'Multiple_IEEE', 'Single_Vax', 'v2', etc.
+  - Purpose: determine the endianness/IEEE format of the CLASS file.
+
+- `fileversion_dict`
+  - Mapping from a header code to a version label (e.g., 'v1', 'v2').
+  - Supports multiple potential header versions.
+
+- `record_lengths`
+  - Mapping from filetype key (e.g., '1A', '2A') to the length of the fixed header region (in bytes).
+  - Example: {'1A': 512, '2A': 4096} (actual values reflect the CLASS specification).
+
+- `header_id_numbers`
+  - Mapping from integer header section codes to human-friendly header section names.
+  - Example: {0: 'USER CODE', -2: 'GENERAL', -3: 'POSITION', etc.}
+  - Used to interpret the header layout when parsing.
+
+- `header_id_lengths`
+  - Mapping from header section code (e.g., -2, -3, -4, -14) to the maximum length (in characters or fields) for that section.
+  - Some entries use `None` to indicate variable length headers.
+  - Example: {-2: 9, -3: 17, -4: 17, -14: 25}
+
+- `keys_lengths`
+  - A dictionary describing the layout of header sections.
+  - Each key is a header section name (e.g., 'unknown', 'COMMENT', 'GENERAL').
+  - The value is a list of tuples describing fields within that section:
+    - (field_name, length_in_items, dtype)
+  - Example entries:
+    - 'COMMENT': [('LTEXT', 1, 'int32'), ('CTEXT', 1024//4, '|S1024')]
+    - 'GENERAL': [('UT', 2, 'float64'), ('ST', 2, 'float64'), ('AZ', 1, 'float32'), ('EL', 1, 'float32'), ('TAU', 1, 'float32'), ('TSYS', 1, 'float32'), ('TIME', 1, 'float32')]
+
+- `We also import and expose (indirectly used in the module):`
+  - `pyfits` (Astropy fits)
+  - `numpy` / `np`
+  - `pyspeckit` (for ObsBlock)
+  - `log` from astropy for logging
+  - `ProgressBar` (optional) to show progress during long reads
+
+> Note: The actual reader entry point (function or class that returns a pyspeckit ObsBlock) is provided by the module’s public interface in the full implementation. The helpers above are used by that entry point to interpret the header structure and perform the read.
+
+---
+
+## Data model and header specification
+
+- The module is driven by a formal header specification copied from the CLASS file format reference. The following constructs are defined to support parsing:
+  - Filetype and version dictionaries (binary header codes → friendly labels).
+  - Fixed vs. variable length header sections (via `record_lengths` and `header_id_lengths`).
+  - A per-section field description (`keys_lengths`), where each header field is described by:
+    - Name
+    - Length (in units appropriate to the field)
+    - dtype (or string descriptor) for how to interpret the raw header data
+
+- Example interpretation flow:
+  1. Read the file header type code and map via `filetype_dict` to determine endianness/IEEE format.
+  2. Read the version code and map via `fileversion_dict`.
+  3. Use `record_lengths` to know how many bytes to read for the header block.
+  4. Iterate through header sections using `header_id_numbers` and `header_id_lengths` to identify and cut out each section.
+  5. For each section, consult `keys_lengths` to know how to parse each field, and populate Python-native values.
+  6. Finally, assemble the data into a pyspeckit ObsBlock for downstream analysis.
+
+---
+
+## Practical usage
+
+- Inspecting the dictionaries (for debugging or extension purposes)
+
+  ```python
+  import classfiles as cf
+
+  # See supported file types
+  print(cf.filetype_dict)
+
+  # See supported versions
+  print(cf.fileversion_dict)
+
+  # Check header layout for the GENERAL section
+  print(cf.keys_lengths['GENERAL'])
+  ```
+
+- Determining a header’s section by code (example)
+
+  ```python
+  code = -2
+  section_name = cf.header_id_numbers.get(code, 'UNKNOWN')
+  print('Code', code, 'represents section:', section_name)
+  ```
+
+- Timing a read operation (if you have a long-running read function)
+
+  ```python
+  from classfiles import print_timing
+
+  @print_timing
+  def read_class_file(path):
+      # implementation from the module (not shown here)
+      pass
+  ```
+
+- Byte-string handling for cross-version compatibility
+
+  ```python
+  from classfiles import ensure_bytes
+
+  key = ensure_bytes('1A  ')
+  # use key to index filetype_dict or related mappings
+  ```
+
+---
+
+## Examples
+
+- Example 1: Inspecting dictionary contents (developer-oriented)
+
+  ```python
+  import classfiles as cf
+  # Show supported binary codes and their human-friendly meanings
+  for k, v in cf.filetype_dict.items():
+      print(k, '->', v)
+  ```
+
+- Example 2: Getting a header section name from a code
+
+  ```python
+  import classfiles as cf
+  name = cf.header_id_numbers[-2]  # 'GENERAL'
+  print(name)
+  ```
+
+- Example 3: Checking the fixed header length for a file type
+
+  ```python
+  import classfiles as cf
+  length = cf.record_lengths.get('2A')
+  print('Header length for 2A:', length)
+  ```
+
+- Example 4: Viewing the GENERAL header layout
+
+  ```python
+  import classfiles as cf
+  for field in cf.keys_lengths['GENERAL']:
+      print(field)
+  ```
+
+---
+
+## Development notes and guidance
+
+- Extensibility:
+  - To support additional CLASS file variants, extend:
+    - `filetype_dict` and `fileversion_dict` with new binary codes.
+    - `record_lengths` for new file types.
+    - `header_id_numbers` and `header_id_lengths` for any new sections.
+    - `keys_lengths` to describe new fields and their dtypes.
+  - Ensure new entries use `ensure_bytes` for compatibility with the dictionary keys.
+
+- Dependency handling:
+  - Optional ProgressBar is attempted at import time; if unavailable, the code gracefully degrades to a no-op.
+  - The reader relies on Astropy (for logging and fits support) and pyspeckit (for ObsBlock).
+  - For Python 3, bytes handling (via `ensure_bytes`) is essential when dealing with binary header keys.
+
+- Testing:
+  - Unit tests should cover:
+    - Correct mapping for known codes in `filetype_dict` and `fileversion_dict`.
+    - Correct interpretation of `header_id_numbers` and `header_id_lengths`.
+    - Correct parsing of a sample header block according to `keys_lengths`.
+    - `ensure_bytes` behavior across Python versions.
+  - If a particular CLASS variant is added, include a fixture CLASS file and verify ObsBlock content matches expectations.
+
+- Performance:
+  - The heavy I/O path is wrapped with `print_timing` to help identify slow reads.
+  - Consider replacing or augmenting with a real-progress bar (if the long read blocks are user-visible in UI).
+
+---
+
+## Related concepts
+
+- ObsBlock: The target data structure from pyspeckit into which CLASS data are loaded.
+- CLASS format specification: The dictionaries and layouts here reference the official CLASS file format specification (binary header organization, section codes, and field types).
+- Cross-version compatibility: The module explicitly handles Python 2/3 compatibility with `six` and `ensure_bytes`.
+
+---
+
+## References
+
+- CLASS file format specification (header encoding and layout)
+- pyspeckit documentation for ObsBlock usage and ingestion patterns
+- astropy logging and optional ProgressBar integration
+
+---
+
+If you need a version of this doc aligned to a specific Sphinx/REST format (pure reStructuredText) or with explicit function/class names for the entry point, please share the exact public interface so the documentation can reflect the precise API.

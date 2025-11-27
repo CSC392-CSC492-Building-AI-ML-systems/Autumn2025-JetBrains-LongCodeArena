@@ -1,0 +1,199 @@
+Using timers
+============
+
+Overview
+--------
+
+This section documents common patterns for scheduling work to run in the future or at regular intervals using Python timers. Timers run in separate threads and callbacks should be fast and thread-safe. Use these patterns to implement timeouts, periodic maintenance tasks, and delayed actions without blocking the main thread.
+
+Choosing a timer approach
+-------------------------
+
+- One-shot delay: use threading.Timer for a single future callback.
+- Periodic actions: implement a small repeating-timer helper or use sched/asyncio depending on your run loop.
+- Lightweight scheduling: sched (standard library) for simple, event-driven tasks.
+- Asynchronous environments: asyncio call_later or call_at for integration with async code.
+
+Important notes
+--------------
+
+- Timers execute in separate threads; protect shared data with locks or thread-safe primitives.
+- Timer threads should not prevent program exit. Consider setting timer threads as daemon or ensure you cancel them on shutdown.
+- Keep timer callbacks short. Do not perform long-running work in a timer callback.
+
+One-shot timers
+--------------
+
+Use threading.Timer for a single execution after a delay.
+
+Example: schedule a function to run after 2 seconds
+
+.. code-block:: python
+
+    import threading
+
+    def greet(name):
+        print("Hello, {}!".format(name))
+
+    t = threading.Timer(2.0, greet, args=("Alice",))
+    t.daemon = True  # ensures program can exit even if timer is pending
+    t.start()
+
+    # If needed, cancel before it fires
+    # t.cancel()
+
+Repeating timers
+----------------
+
+Python's standard library does not provide a built-in repeating timer, but you can implement a lightweight helper.
+
+Example: a simple repeating timer
+
+.. code-block:: python
+
+    import threading
+    import time
+
+    class RepeatingTimer(object):
+        def __init__(self, interval, function, *args, **kwargs):
+            self._interval = interval
+            self._function = function
+            self._args = args
+            self._kwargs = kwargs
+            self._stop_event = threading.Event()
+            self._thread = threading.Thread(target=self._run)
+            self._thread.daemon = True
+
+        def _run(self):
+            next_time = time.time() + self._interval
+            while not self._stop_event.wait(max(0, next_time - time.time())):
+                self._function(*self._args, **self._kwargs)
+                next_time += self._interval
+
+        def start(self):
+            self._thread.start()
+
+        def stop(self):
+            self._stop_event.set()
+            self._thread.join()
+
+    # Usage
+    def ping():
+        print("ping at", time.time())
+
+    rt = RepeatingTimer(5.0, ping)
+    rt.start()
+
+    # Stop after some time
+    # time.sleep(20)
+    # rt.stop()
+
+Alternative: using sched
+------------------------
+
+For simpler event-driven scheduling in a single thread, you can use the sched module. Note that sched.run() blocks the calling thread unless you run the scheduler in its own thread.
+
+.. code-block:: python
+
+    import sched
+    import time
+
+    scheduler = sched.scheduler(time.time, time.sleep)
+
+    def say(message):
+        print(message, "at", time.time())
+
+    # Schedule first event
+    scheduler.enter(5, 1, say, argument=("Event 1",))
+
+    # Run scheduler in a separate thread to avoid blocking
+    import threading
+    t = threading.Thread(target=scheduler.run)
+    t.daemon = True
+    t.start()
+
+    # Schedule more events as needed
+    scheduler.enter(10, 1, say, argument=("Event 2",))
+
+Async timers (optional)
+-----------------------
+
+If your project uses asyncio (Python 3.4+), prefer the event loop's timing facilities.
+
+.. code-block:: python
+
+    import asyncio
+
+    async def periodic():
+        while True:
+            print("tick", asyncio.get_event_loop().time())
+            await asyncio.sleep(5)
+
+    asyncio.run(periodic())
+
+Shutdown and cleanup
+--------------------
+
+To ensure clean shutdown, cancel or stop timers on program exit.
+
+.. code-block:: python
+
+    import atexit
+
+    # Example for a one-shot timer
+    t = threading.Timer(2.0, some_cb)
+    t.start()
+
+    @atexit.register
+    def _shutdown():
+        try:
+            t.cancel()
+        except Exception:
+            pass
+
+    # If using a repeating timer, stop it similarly
+    # rt.stop()
+
+Guidelines and best practices
+-----------------------------
+
+- Prefer daemon threads for timers to avoid blocking process exit.
+- Keep timer callbacks short; offload heavy work to worker threads or a thread pool.
+- Use locks or thread-safe data structures when callbacks modify shared state.
+- For long-running schedules, consider integrating with an event loop (asyncio) or a dedicated task queue (e.g., Celery, rq) instead of long timer callbacks.
+
+API references
+--------------
+
+- threading.Timer(interval, function, args=None, kwargs=None)
+  - Starts a one-shot timer to call function after interval seconds.
+  - Methods: start(), cancel(), is_alive()
+  - Note: Set timer.daemon = True to avoid blocking program exit.
+
+- RepeatingTimer (example helper)
+  - A small utility to run a function periodically in a background thread.
+  - Provides start() and stop() for lifecycle management.
+
+- sched.scheduler(timefunc, delayfunc)
+  - Simple event-based scheduler in a single thread.
+  - Use scheduler.enter(delay, priority, callback, argument=()) to schedule events.
+
+- asyncio (Python 3.4+)
+  - Callbacks via loop.call_later(delay, callback, *args) or loop.call_at(when, callback, *args)
+
+Testing timers
+--------------
+
+- Mock time.sleep or monkeypatch time.time to simulate time progression.
+- Test that timer callbacks are invoked with expected arguments.
+- Verify cancellation behavior by ensuring callbacks are not called after cancel.
+
+Example real-world usage (conceptual)
+-------------------------------------
+
+- Implement a heartbeat to keep a connection alive:
+  - Use a repeating timer to send a keep-alive message every n seconds.
+- Implement a network operation timeout:
+  - Start a one-shot timer when initiating a request; cancel it when the operation completes successfully.
+
+This guide provides practical patterns you can adapt for timer-based scheduling in your codebase. If you need a ready-made, project-specific timer module example, specify your environment and threading or async constraints, and I can tailor the implementation.

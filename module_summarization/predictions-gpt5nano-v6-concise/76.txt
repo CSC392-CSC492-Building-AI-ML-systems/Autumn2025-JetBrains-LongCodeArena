@@ -1,0 +1,196 @@
+Feature extraction utilities
+============================
+
+This module provides utilities to create feature-extraction models and to inspect
+the graph nodes of a model in order to extract intermediate outputs. It includes
+ FX tracers that record a per-node name mapping and support treating certain
+submodules as leaves for selective tracing.
+
+Overview
+--------
+
+- LeafModuleAwareTracer
+  - FX Tracer that allows you to specify a set of leaf modules. These modules are
+    not traced through; instead, a single node will reference the leaf module’s
+    forward call.
+- NodePathTracer
+  - Extends LeafModuleAwareTracer and records a node-to-qualified-name mapping
+    (node_to_qualname) for every operation encountered during tracing.
+  - Stores a hierarchical, dot-separated path to the originating node, excluding
+    the top-level module name.
+  - Handles repeated node names by appending _{index} suffixes in a local scope.
+  - Used by the public API to determine which names are exposed as feature outputs.
+- Internal helpers (implementation details)
+  - _is_subseq(x, y): utility to check whether y is a subsequence of x.
+  - _warn_graph_differences(train_tracer, eval_tracer): warn if train and
+    eval graphs differ, guiding the user to select nodes for train/eval separately.
+
+Public API (high level)
+-----------------------
+
+- create_feature_extractor(model, return_nodes=None)
+  - Creates a new model that, when run, returns the outputs of the specified intermediate nodes.
+  - return_nodes is typically a mapping or a structure describing which nodes to extract and how to name them in the output.
+
+- get_graph_node_names(model)
+  - Returns a list of available node names (or keys) that can be used with the feature extractor.
+
+Notes:
+- The exact signatures may include additional arguments for customization (e.g., naming, output structure).
+- The node naming follows the rules implemented in NodePathTracer, including postfixing duplicates.
+
+Usage
+-----
+
+Below are representative usage patterns. Adapt node names to your model architecture.
+
+Example 1: Basic feature extraction from a pretrained model
+-----------------------------------------------------------
+
+- Goal: Extract features from specific intermediate modules and return them as a dict.
+
+.. code-block:: python
+
+    import torch
+    import torchvision
+    from torchvision.models.feature_extraction import create_feature_extractor
+
+    # Example model
+    model = torchvision.models.resnet18(pretrained=True)
+    model.eval()
+
+    # Define the nodes to extract. The keys are the desired output names,
+    # the values describe the corresponding nodes in the graph.
+    return_nodes = {
+        'layer4': 'layer4',      # output after layer4
+        'avg_pool': 'avgpool'     # after average pooling
+    }
+
+    feature_extractor = create_feature_extractor(model, return_nodes=return_nodes)
+
+    x = torch.randn(1, 3, 224, 224)
+    features = feature_extractor(x)
+
+    # features is a dict-like mapping with keys 'layer4' and 'avg_pool' (subject to implementation)
+    for name, feat in features.items():
+        print(name, feat.shape)
+
+Example 2: Inspect available graph node names
+----------------------------------------------
+
+- Goal: Discover which nodes can be extracted from a given model.
+
+.. code-block:: python
+
+    import torchvision
+    from torchvision.models.feature_extraction import get_graph_node_names
+
+    model = torchvision.models.resnet18(pretrained=True)
+    node_names = get_graph_node_names(model)
+    print(node_names)
+
+Example 3: Controlling leaf modules during tracing
+--------------------------------------------------
+
+- Goal: Treat specific submodules (e.g., activation functions) as leaves so their
+  internal structure is not traced.
+
+.. code-block:: python
+
+    import torch
+    import torch.nn as nn
+    import torchvision
+    from torchvision.models.feature_extraction import NodePathTracer, LeafModuleAwareTracer
+
+    class MyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv = nn.Conv2d(3, 16, 3)
+            self.relu = nn.ReLU()
+            self.fc = nn.Linear(16, 10)
+
+        def forward(self, x):
+            x = self.conv(x)
+            x = self.relu(x)
+            x = x.mean(dim=[2, 3])
+            x = self.fc(x)
+            return x
+
+    m = MyModel()
+    # Example leaf_modules: treat ReLU as a leaf
+    tracer = NodePathTracer(leaf_modules=(nn.ReLU(),))
+    traced = tracer.trace(m)
+    # Use the NodePathTracer-traced graph as needed (e.g., create a feature extractor)
+
+Example 4: Train vs. eval graph differences and guidance
+--------------------------------------------------------
+
+- When the graph structure differs between training and evaluation, you may need to
+  specify different output nodes for train and eval modes.
+- The internal _warn_graph_differences helper can be used to emit guidance about
+  aligning node choices for both modes.
+
+Documentation generation
+------------------------
+
+For developers contributing documentation, you can generate API docs via Sphinx
+using autodoc. A minimal approach:
+
+- Prerequisites: Sphinx, sphinx.ext.autodoc, sphinx.ext.napoleon (optional)
+- Typical steps:
+  - Create docs/ with index.rst and a dedicated module doc page, e.g., feature_extraction.rst.
+  - In feature_extraction.rst, use autosummary/autodoc directives.
+
+Suggested feature_extraction.rst structure (example):
+
+.. toctree::
+   :maxdepth: 2
+
+   feature_extraction
+
+feature_extraction
+==================
+
+Overview
+--------
+
+[Short description of the module and purpose.]
+
+Public API
+----------
+
+.. automodule:: torchvision.models.feature_extraction
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: torchvision.models.feature_extraction.NodePathTracer
+   :members:
+   :undoc-members:
+
+.. autoclass:: torchvision.models.feature_extraction.LeafModuleAwareTracer
+   :members:
+   :undoc-members:
+
+.. autofunction:: torchvision.models.feature_extraction.create_feature_extractor
+.. autofunction:: torchvision.models.feature_extraction.get_graph_node_names
+
+Examples
+--------
+
+Provide practical examples (as shown above) or link to separate code blocks.
+
+Notes
+-----
+
+- Ensure your docs build uses the correct module path; adjust to match your project layout.
+- If you have internal helper utilities (e.g., _warn_graph_differences), you can document their behavior in developer notes or API docs as internal references.
+
+Reference material
+------------------
+
+- NodePathTracer: traces operations and records a per-node qualified name, enabling stable extraction of intermediate features.
+- LeafModuleAwareTracer: allows specifying leaf modules to control tracing granularity.
+- _is_subseq and _warn_graph_differences: internal utilities to assist with graph consistency and user guidance.
+
+This documentation covers both usage and development considerations for feature extraction in this module, with practical examples to help developers integrate and debug feature extraction workflows.

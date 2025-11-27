@@ -1,0 +1,177 @@
+# miscmodels.rst — Generate description for t-distributed error models
+
+This module provides two demonstrative models that extend Statsmodels' likelihood-based infrastructure to handle linear and ARMA processes with Student-t distributed errors. The goal is to illustrate how to implement robust estimators via a generic maximum-likelihood framework and to offer usable examples for developers exploring robust time-series modeling.
+
+## Overview
+
+- TLinearModel
+  - A Maximum Likelihood Estimation (MLE) implementation for a linear regression model where the errors follow a Student-t distribution.
+  - Parameters:
+    - beta: regression coefficients
+    - df: degrees of freedom of the t-distribution
+    - scale: scale of the error distribution (absolute value enforced to be positive)
+  - Flexibility:
+    - df may be estimated or fixed (controlled by the fix_df flag).
+    - When df is fixed, the parameter vector excludes the df component.
+
+- TArma
+  - A univariate ARMA model with t-distributed errors.
+  - Inherits behavior from statsmodels.tsa.arma_mle.Arma but overrides the log-likelihood to employ a t-distribution for the innovations.
+  - Provides a per-observation log-likelihood via nloglikeobs, and a convenience fit_mle method.
+
+Both classes rely on the generic MLE machinery in Statsmodels (GenericLikelihoodModel and Arma) and implement their negatives of log-likelihoods in a way that leverages numerical differentiation for Hessians and gradients where appropriate.
+
+## API reference
+
+- TLinearModel(GenericLikelihoodModel)
+  - initialize(self)
+    - Sets up parameterization:
+      - k_vars: number of exogenous variables
+      - fix_df flag (default False)
+      - Number of free parameters (k_params) depends on whether df is fixed
+      - extra_params_names: ['df', 'scale'] or ['scale'] when df is fixed
+      - Configures fixed parameters, masks, and starting values
+  - _set_start_params(self)
+    - Establishes initial values for the parameter vector:
+      - Beta from OLS if available
+      - df (if not fixed) and scale (based on residuals)
+  - loglike(self, params)
+    - Returns the negative log-likelihood (as required by the GenericLikelihoodModel interface)
+  - nloglikeobs(self, params)
+    - Computes the per-observation contribution to the negative log-likelihood
+    - Key quantities:
+      - beta = params[:-2]
+      - df = params[-2]
+      - scale = abs(params[-1])
+      - loc = X @ beta
+      - x = (y - loc) / scale
+      - logpdf of t-dist with df, scaled by scale
+      - returns -logpdf components per observation
+  - predict(self, params, exog=None)
+    - Predicts the mean response for given parameters
+  - Note
+    - The implementation mirrors a standard t-distributed error model but uses numerical differentiation for gradients/hessians to produce standard errors and test statistics.
+
+- TArma(Arma)
+  - loglike(self, params)
+    - Returns the negative log-likelihood for the ARMA model with t-distributed errors
+  - nloglikeobs(self, params)
+    - Per-observation negative log-likelihood for the t-distributed innovations
+    - Assumes the ancillary parameter is the last element of the params vector (df and scale follow the usual arrangement)
+    - Key quantities:
+      - errorsest = self.geterrors(params[:-2])
+      - df = params[-2]
+      - scale = abs(params[-1])
+      - llike = - stats.t._logpdf(errorsest/scale, df) + log(scale)
+
+  - fit_mle(self, order, start_params=None, method='nm', maxiter=5000, tol=1e-08, **kwds)
+    - Entry point for maximum-likelihood fitting of the ARMA-t model
+    - order: (p, q) specification for the ARMA model
+
+> Note: The code contains a few TODOs and caveats (e.g., potential debugging remnants like store_params). The df-fixing behavior and parameter-restriction mechanisms are experimental and may require care when used in production.
+
+## Mathematical notes
+
+- TLinearModel
+  - Observations y_i are modeled as y_i = x_i'β + ε_i with ε_i ~ t_df(0, scale)
+  - The log-likelihood for a single observation uses the standard Student-t density with df degrees of freedom and a scale parameter
+  - The scale parameter is a positive quantity; the implementation uses abs(param[-1]) to enforce positivity
+  - Location is loc = Xβ; standardized residuals x = (y - loc)/scale
+
+- TArma
+  - Innovations are modeled as t-distributed with df degrees of freedom and scale
+  - The implied variance is not equal to scale^2; the model’s variance relation is X-dependent through the ARMA structure and the t-distributed errors
+  - The implementation returns the per-observation log-likelihood terms consistent with a t-distribution
+
+## Usage examples
+
+The following examples illustrate typical usage patterns. These examples assume the module containing TLinearModel and TArma has been loaded in your environment.
+
+1) Fitting a linear model with t-distributed errors (df estimated)
+
+- Objective: estimate β and df, with scale learned from the data
+- Data: synthetic regression data with t-distributed noise
+
+Code:
+
+- import required modules
+  - import numpy as np
+  - from scipy import stats
+  - from statsmodels.tools import add_constant (optional for intercept)
+  - from your_module import TLinearModel  (where the class is defined)
+
+- Generate data
+  - np.random.seed(123)
+  - n = 200
+  - X = np.column_stack((np.ones(n), np.random.randn(n)))
+  - β_true = np.array([1.0, 2.0])
+  - df_true = 5.0
+  - scale_true = 1.0
+  - ε = stats.t.rvs(df_true, size=n) * scale_true
+  - y = X @ β_true + ε
+
+- Fit
+  - model = TLinearModel(y, X)
+  - res = model.fit()
+  - print(res.summary())
+
+2) Fitting a linear model with fixed df
+
+- Objective: estimate β and scale with df fixed (e.g., df = 5)
+- Data: same as above
+
+Code:
+
+- model = TLinearModel(y, X)
+- model.fix_df = 5.0
+- res = model.fit()
+- print(res.summary())
+
+3) Fitting a univariate ARMA model with t-distributed errors
+
+- Objective: fit an ARMA model with t-distributed errors using the provided TArma class
+- Data: simulated ARMA process with t-distributed innovations
+
+Code:
+
+- from statsmodels.tsa.arma_mle import ARMA
+- from your_module import TArma
+
+- y = ... # your time series data
+- order = (1, 0)  # AR(1) as an example
+- model = TArma(y, order=order)
+- res = model.fit_mle(order=order)
+- print(res.summary())
+
+Notes on usage
+
+- The default behavior in TLinearModel is to estimate df. To fix df, set the fix_df attribute prior to calling initialize (e.g., immediately after construction but before the first fit).
+- The scale parameter is constrained to be positive by taking the absolute value of the corresponding parameter.
+- Results include standard errors and test statistics as produced by the underlying GenericLikelihoodModel machinery, which relies on numerical derivatives.
+- The approach provides robustness to outliers through the heavy tails of the Student-t distribution, compared to the normal errors assumption.
+
+## Internal details and caveats
+
+- Store/track of intermediate parameter vectors is not robustly implemented in all debugging configurations (e.g., references to store_params). This is a development showcase and may require refinement for production use.
+- Parameter-restriction logic (e.g., fixing some parameters while estimating others) is experimental in this module and may need additional validation.
+- The TArma implementation uses a non-standard parameterization (df and scale included in the parameter vector) consistent with the TLinearModel approach; ensure compatibility with your data and initialization.
+
+## Design rationale
+
+- The module demonstrates how to wrap a statistical model with a Student-t error structure into Statsmodels’ likelihood framework.
+- It highlights how to implement custom log-likelihoods while leveraging existing optimization and inference machinery.
+- It provides practical patterns for yielding robust estimates in the presence of outliers or heavy-tailed noise.
+
+## References
+
+- Original code comment/reference block (for context):
+  - Kenneth L. Lange, Roderick J. A. Little, Jeremy M. G. Taylor (1989)
+    Robust Statistical Modeling Using the t Distribution
+    Journal of the American Statistical Association
+    Stable URL: http://www.jstor.org/stable/2290063
+
+- This module is designed as an extensible example for developers exploring generic MLE and robust time-series modeling with Statsmodels.
+
+---
+
+If you’d like, I can tailor the documentation to your preferred style (RST vs Markdown) and add a small, self-contained runnable example package snippet that can be dropped into miscmodels.rst with proper Sphinx formatting.

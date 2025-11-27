@@ -1,0 +1,149 @@
+Verification scheme for FITS data (verification.rst)
+
+Overview
+- Purpose
+  - Provide a uniform, extensible framework to verify FITS-like data structures.
+  - Support reporting, interactive fixing, and controlled error handling (warnings vs. exceptions).
+- Core idea
+  - Validation results are collected into a hierarchical error list (_ErrList).
+  - Each leaf represents a verifiable condition as a tuple: (fixable, message).
+  - The framework can attempt to fix fixable issues automatically and report results according to the selected option.
+
+Public API and core concepts
+- VerifyError
+  - Exception raised when verification fails under certain reporting options.
+- VerifyWarning
+  - Warning class emitted for verifications when warnings are enabled.
+- VERIFY_OPTIONS
+  - Supported top-level options for verification:
+    - ignore, warn, exception
+    - fix, silentfix
+    - fix+ignore, fix+warn, fix+exception
+    - silentfix+ignore, silentfix+warn, silentfix+exception
+- _Verify
+  - Base mixin that implements the verification flow.
+  - run_option(self, option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+    - Executes the verification result for a single issue.
+    - Behavior:
+      - If option is "warn" or "exception": the issue is treated as unfixable (fixable=False).
+      - If not fixable: prepend "Unfixable error: " to the text.
+      - If fixable and a fix callable is provided: call fix(), then append fix_text to the message (default "Fixed.").
+    - Returns a tuple: (fixable, text)
+  - verify(self, option="warn")
+    - Orchestrates verification for all values on the instance.
+    - Validates the option against VERIFY_OPTIONS.
+    - If option is "ignore": do nothing.
+    - Delegates to self._verify(opt) to obtain an _ErrList of errors.
+    - Splits compound options (containing "+") into fix and report components:
+      - fix_opt, report_opt = opt.split("+") (if "+" present)
+      - For "fix" and "silentfix" (without "+"), fix_opt is the option and report_opt defaults to "exception" (unfixable errors cause an exception by default).
+    - Special-case: fix_opt == "silentfix" with report_opt == "ignore" means no reporting at all.
+    - Determines line filtering for reporting:
+      - silentfix: filter out fixable errors (only unfixable show up)
+      - fix with report_opt == "ignore": filter to show only fixable issues (those that were fixed)
+      - otherwise: show all
+    - Iterates errs.iter_lines(filter=...) to collect messages, tracking whether any issue is unfixable.
+    - Reporting:
+      - If any messages exist:
+        - Prepend "Verification reported errors:" and append a note about zero-based indexing.
+        - If fix_opt == "silentfix" and there are no unfixable issues, do nothing.
+        - If report_opt == "warn" or (fix_opt == "fix" and there are no unfixable issues), emit warnings for each line.
+        - Otherwise, raise VerifyError with the joined messages.
+- _ErrList
+  - A specialized nested list structure for verification messages.
+  - __init__(val=(), unit="Element")
+    - val: initial content (default empty)
+    - unit: label for the current level (e.g., "Header", "Dataset")
+  - __str__
+    - Returns the concatenated messages with proper indentation.
+  - iter_lines(filter=None, shift=0)
+    - Generator that yields (fixable, text) lines in a top-down, indented fashion.
+    - Leaves (non-_ErrList items) yield as (fixable, message) with indentation applied.
+    - Nested _ErrList items yield hierarchical sections with optional headers (e.g., "Header 0:", "Header 1:", etc.) when present.
+
+How verification results are represented
+- Structure
+  - The top-level _ErrList represents a collection of checks (potentially grouped by unit/section).
+  - Each non-list item in a level is a leaf: a tuple (fixable, message).
+  - Each nested _ErrList represents a sub-section; its unit attribute is used to print section headers.
+- Example leaf
+  - (True, "BITPIX value 32 is valid.")
+  - (False, "Missing NAXIS keyword.")
+- Example nested
+  - _ErrList(unit="Header")
+    - (False, "Missing NAXIS keyword.")
+    - _ErrList(unit="BITPIX check")
+      - (True, "BITPIX 16 converted to 8")  # fixable and fixed
+
+How to implement verifications in a subclass
+- Implement _verify(self, option) to build and return an _ErrList with the appropriate structure.
+- For each verifiable condition:
+  - Determine if it is fixable and, if so, provide a fix callable.
+  - Call self.run_option(...) with:
+    - option: the overall verification option (or a specific shaping of the option)
+    - err_text: human-readable description of the issue
+    - fix_text: description of the fix applied (default "Fixed.")
+    - fix: a callable that performs the fix (mutates the underlying data)
+    - fixable: whether the issue is fixable
+  - Append the returned (fixable, text) to the appropriate _ErrList (top-level or nested).
+- Example skeleton
+  .. code-block:: python
+
+     from .verification import _Verify, _ErrList
+
+     class FITSHeaderVerifier(_Verify):
+         def __init__(self, header):
+             self.header = header
+
+         def _verify(self, option):
+             errs = _ErrList(unit="Header")
+
+             # Example 1: required keyword missing (unfixable)
+             if "NAXIS" not in self.header:
+                 errs.append((False, "Missing NAXIS keyword."))
+
+             # Example 2: BITPIX should be in allowed values (fixable)
+             bitpix = self.header.get("BITPIX")
+             if bitpix not in (8, 16, 32, -32, -64):
+                 fix = lambda: self.header.__setitem__("BITPIX", 8)
+                 fixable, text = self.run_option(
+                     option=option,
+                     err_text=f"BITPIX value {bitpix} is invalid.",
+                     fix_text="Set BITPIX to 8",
+                     fix=fix,
+                     fixable=True,
+                 )
+                 errs.append((fixable, text))
+
+             return errs
+
+Example usage
+- Simple demonstration (conceptual)
+  - Create a verifier for a FITS header, then call verify with a chosen option:
+    - ver = FITSHeaderVerifier(header_dict)
+    - ver.verify("fix+warn")
+  - Behavior:
+    - Attempts to fix fixable issues, reports results via warnings (and/or exceptions) according to the option.
+    - Unfixable issues lead to VerifyError unless the option suppresses/report them differently.
+
+Practical notes and guidance
+- When designing verifications:
+  - Structure messages hierarchically with _ErrList so related checks group together under a common unit.
+  - Mark fixable issues clearly and supply meaningful fix callables that mutate the underlying data in a consistent way.
+  - Use the line-filtering logic to tailor output for users: show only unfixable errors, show only fixed issues, or show all.
+- Semantics of options
+  - ignore: skip verification entirely.
+  - warn vs. exception: whether to silently warn or raise an exception for unfixable issues.
+  - fix vs. silentfix: whether to attempt automatic fixes; silentfix suppresses output if nothing remains unfixed.
+  - Combinations with +ignore/+warn/+exception control what gets reported after fixes are applied.
+- User-facing messaging
+  - Before reporting, the system adds a header "Verification reported errors:" and a note about zero-based indexing to aid users when interpreting messages.
+  - Messages are emitted as warnings (VerifyWarning) or raised as errors (VerifyError) depending on the chosen option and the presence of unfixable issues.
+
+References and related concepts
+- This verification scheme is designed to work with, and complement, the FITS I/O verification patterns found in Astropy (astropy.io.fits context is referenced in messages).
+- The structure is intentionally generic to accommodate a wide range of FITS-conformant data validations (headers, data arrays, keywords, and structural constraints).
+
+Notes
+- The _Verify._verify method is expected to be implemented by subclasses to reflect domain-specific checks; the framework handles option parsing, fix application, and reporting.
+- The nested _ErrList structure allows clean, human-readable output for complex, multi-level verification results.

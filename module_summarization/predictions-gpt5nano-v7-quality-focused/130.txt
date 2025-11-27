@@ -1,0 +1,204 @@
+Unfamiliar FITS Data Structures
+===============================
+
+This document introduces a few internal, less frequently used data structures and utilities that appear in the FITS I/O stack. They are primarily intended for developers extending or debugging the I/O layer rather than end users working with standard FITS files. The sections below describe the purpose, usage, and representative examples of these components.
+
+Overview
+--------
+
+The following items are internal building blocks in the FITS verification and notification infrastructure:
+
+- The verification engine (_Verify) and its option set (VERIFY_OPTIONS)
+- The verification error container (_ErrList)
+- The event notification mechanism (NotifierMixin)
+
+Although these components are not part of the public user-facing API, understanding their behavior helps when debugging verification issues or extending the I/O layer.
+
+Verification framework
+----------------------
+
+What it is
+- The verification framework provides a structured way to check internal consistency or compliance of FITS-related objects and data.
+- It supports reporting, optional fixing of problems, and configurable reporting behavior (warnings, exceptions, or silent fixes).
+
+Key pieces
+- VERIFY_OPTIONS: A list of supported option strings that control how verification results are reported and whether fix actions are taken.
+- _Verify: A class containing helper methods to perform verification, report results, and optionally fix issues.
+
+Public-like interface (within code)
+- _Verify.run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+  - Executes a single verification result with a given option.
+  - Returns a tuple (fixable, text), where fixable indicates whether the issue can be fixed, and text contains the message to report or log.
+  - Behavior:
+    - If option is one of "warn" or "exception", the issue is treated as not fixable for the purpose of fixed-text reporting (fixable is False).
+    - If fixable is False, the text is augmented with an "Unfixable error" notice.
+    - If a fix function is provided and the issue is fixable, the fix function runs and the text is appended with the fix_text description.
+- _Verify.verify(option="warn")
+  - Performs verification across all relevant items on the instance.
+  - Accepts a wide range of option strings, including combinations like "fix+warn", "silentfix+ignore", etc.
+  - Produces messages describing verification outcomes and either warns or raises errors according to the chosen option.
+
+Usage examples
+- Basic usage of run_option:
+  .. code-block:: python
+
+     ver = _Verify()
+     ok, msg = ver.run_option(
+         option="warn",
+         err_text="Header SIMPLE keyword missing",
+         fix_text="Fixed.",
+         fix=lambda: None,  # replace with actual fix function if available
+         fixable=True,
+     )
+     # ok is a boolean indicating fixability; msg is the report text
+
+- Verifying an object with different reporting behavior:
+  .. code-block:: python
+
+     ver = _Verify()
+     ver.verify(option="fix+warn")  # attempt fixes, then warn about issues
+
+Notes
+- The option string may encode both reporting and fixing behavior (e.g., "fix+warn", "silentfix+ignore").
+- The exact behavior depends on how individual verification checks return their results and how the containing class uses _Verify.
+
+Verification error list
+-----------------------
+
+What it is
+- _ErrList is a specialized list designed to hold verification error messages in a nested, hierarchical structure.
+- It captures messages produced by verifications at different levels (e.g., per-header, per-record, per-HDU) and provides pretty-printed output with indentation that reflects the structure.
+
+Structure
+- Each top-level item in an _ErrList is either:
+  - A tuple of (fixable, message), where fixable is a boolean and message is a string.
+  - A nested _ErrList instance representing a deeper level of the structure.
+- Each nested _ErrList can itself contain tuples and further nested _ErrList instances.
+- unit attribute describes the label used when presenting the next level in the hierarchy (e.g., "Element", "Header", "Record").
+
+Core methods
+- __init__(val=(), unit="Element")
+  - Creates an error list with an optional initial value and a unit label for nested levels.
+- __str__()
+  - Returns a human-readable, multi-line string representation of the error structure.
+- iter_lines(filter=None, shift=0)
+  - Iterates through the nested structure, yielding (fixable, indented_message) pairs for top-level items and recursively for nested levels.
+  - The optional filter can be used to include or exclude specific messages based on their tuple content.
+  - The shift parameter controls indentation depth for nested levels.
+
+Usage example
+- Building a nested error structure:
+  .. code-block:: python
+
+     err = _ErrList(unit="HDU")
+     err.append((True, "SIMPLE keyword missing"))
+     header_errors = _ErrList(unit="Header")
+     header_errors.append((False, "BITPIX not an integer"))
+     err.append(header_errors)
+
+- Printing the structure:
+  .. code-block:: python
+
+     print(str(err))
+
+- Expected qualitative output (illustrative):
+  Verification
+  ============
+
+  Element 0:
+    SIMPLE keyword missing
+  Header 0:
+    BITPIX not an integer
+
+Notes
+- The representation is designed to be consumed by developers debugging verification failures.
+- The first element of each non-nested item is the fixability flag; the second is the message.
+
+Notifier mixin
+--------------
+
+What it is
+- NotifierMixin is a utility that enables objects to register listeners that observe changes on that object.
+- Listeners are registered with weak references to avoid reference cycles and to allow clean garbage collection.
+
+Key concepts
+- Listeners subscribe via an internal mechanism (e.g., _add_listener) so they receive updates when the subject notifies changes.
+- Change notifications are dispatched by calling _notify on the subject, with a change type and arguments.
+- If a listener does not implement the appropriate update method (named according to the change type), it is ignored.
+
+Common usage pattern
+- Subclass NotifierMixin to enable notification behavior.
+- Implement listener classes that respond to updates by implementing methods named _update_<change_type>.
+- Register listeners, trigger notifications, and react to changes in real time.
+
+Usage example
+- Simple notifier and listener example:
+  .. code-block:: python
+
+     class MyListener:
+         def _update_change(self, *args, **kwargs):
+             print("Received change:", args, kwargs)
+
+     class MySubject(NotifierMixin):
+         def __init__(self):
+             self._listeners = []
+         def do_something(self):
+             # Notify listeners that a change occurred
+             self._notify("change", 42, status="ok")
+
+     # Create subject and listener
+     subject = MySubject()
+     listener = MyListener()
+     subject._add_listener(listener)
+
+     # Trigger a notification
+     subject.do_something()
+
+- In this example, the listener implements _update_change to respond to the "change" notification (the method name is derived from the change type).
+
+Notes
+- _add_listener and _notify are internal mechanisms intended for internal communication between components in the FITS I/O stack.
+- Listeners are held via weak references, reducing the risk of memory leaks when objects go out of scope.
+
+Practical considerations
+------------------------
+
+- These structures are primarily relevant to developers extending or debugging the FITS I/O layer, rather than end users performing standard read/write operations.
+- They provide a robust framework for:
+  - Controlled verification and reporting of internal consistency checks.
+  - Structured, hierarchical reporting of verification failures.
+  - Dynamic, event-driven communication between components.
+
+API quick reference
+-------------------
+
+- VERIFY_OPTIONS
+  - A list of supported verification option strings, including "ignore", "warn", "exception", "fix", "silentfix", and various combinations with "+ignore", "+warn", "+exception".
+
+- _Verify
+  - run_option(self, option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True) -> (fixable: bool, text: str)
+  - verify(self, option="warn") -> None
+    - Accepts a variety of option strings to control reporting and fixing behavior.
+
+- _ErrList
+  - __init__(val=(), unit="Element")
+  - __str__(self) -> str
+  - iter_lines(self, filter=None, shift=0) -> iterator over (fixable, message) pairs with indentation-aware formatting
+  - Attributes:
+    - unit: label used for headers of nested levels
+
+- NotifierMixin
+  - _add_listener(listener)
+  - _notify(change_type, *args, **kwargs)
+  - Listeners implement methods named _update_<change_type> to handle notifications
+
+See also
+---------
+
+- The public verification entry points in the FITS I/O layer (where the _Verify and related classes are used) for a high-level understanding of how verification results propagate to users or higher-level code.
+
+Notes for maintainers
+---------------------
+
+- These components are internal APIs and may change without deprecation warnings. Use with care when extending or debugging the FITS I/O stack.
+- When adding new verification checks, consider how they report through the _Verify interface and how they populate _ErrList for consistent, readable output.

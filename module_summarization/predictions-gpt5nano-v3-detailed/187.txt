@@ -1,0 +1,198 @@
+Isotonic regression
+===================
+
+Isotonic regression provides monotone (increasing or decreasing) fits to data. It is useful when you expect a monotone relationship between inputs and outputs and want to enforce that constraint in the fitted values.
+
+Overview
+--------
+This module exposes:
+- check_increasing: determine whether y is monotonically correlated with x, using Spearman’s rho.
+- isotonic_regression: solve a univariate isotonic regression problem for a 1D target y, with optional weights and bounds.
+- IsotonicRegression: a transformer/regressor wrapper that supports fitting on X and y, with optional bounds and direction, and with configurable handling for out-of-domain inputs.
+
+API reference
+-------------
+
+check_increasing
+~~~~~~~~~~~~~~~~
+
+Determine whether y is monotonically correlated with x.
+
+Parameters
+- x: array-like of shape (n_samples,)
+- y: array-like of shape (n_samples,)
+
+Returns
+- increasing_bool: bool
+  True if x and y are non-decreasing (based on Spearman correlation), False otherwise.
+
+Notes
+- The sign of Spearman’s rho determines the direction.
+- A Fisher transform-based 95% confidence interval is computed to assess whether the interval spans zero; if so, a warning is emitted.
+
+Example
+```python
+from isotonic import check_increasing
+import numpy as np
+
+x = np.array([0, 1, 2, 3])
+y = np.array([0.1, 0.9, 1.1, 2.0])
+inc = check_increasing(x, y)
+print("Increasing:", inc)
+```
+
+isotonic_regression
+~~~~~~~~~~~~~~~~~~~
+
+Solve the isotonic regression with optional weights and bounds.
+
+Parameters
+- y: array-like of shape (n_samples,)
+  The data to fit.
+
+- sample_weight: array-like of shape (n_samples,) or None, default=None
+  Weights for each point. If None, equal weights are used.
+
+- y_min: float or None, default=None
+  Lower bound on the lowest predicted value. If None, defaults to -inf.
+
+- y_max: float or None, default=None
+  Upper bound on the highest predicted value. If None, defaults to +inf.
+
+- increasing: bool, default True
+  If True, fit an increasing function; if False, fit a decreasing function.
+
+Returns
+- y_: ndarray of shape (n_samples,)
+  Isotonic fit of y, respecting the specified direction and bounds.
+
+Notes
+- The implementation sorts y by the desired direction, performs an in-place isotonic regression, and clips to the requested bounds.
+- If y_min or y_max is provided, clipping is applied after the isotonic fit.
+
+Example
+```python
+import numpy as np
+from isotonic import isotonic_regression
+
+y = np.array([3.0, 1.0, 4.0, 2.0])
+y_fit = isotonic_regression(y, y_min=0.0, y_max=5.0, increasing=True)
+print(y_fit)
+```
+
+IsotonicRegression
+~~~~~~~~~~~~~~~~~~
+
+A reusable isotonic regression model that can be fit and used for predictions.
+
+Parameters
+- y_min: float, default=None
+  Lower bound on the lowest predicted value (minimum may still be higher).
+
+- y_max: float, default=None
+  Upper bound on the highest predicted value (maximum may still be lower).
+
+- increasing: bool or 'auto', default True
+  Determines whether predictions should be constrained to increase with X.
+  If 'auto', the direction is chosen based on the sign of the Spearman correlation estimate.
+
+- out_of_bounds: {'nan', 'clip', 'raise'}, default 'nan'
+  How to handle X values outside the training domain during prediction:
+  - 'nan': predictions are NaN
+  - 'clip': predictions are projected to the nearest interval endpoint
+  - 'raise': raises a ValueError
+
+Attributes
+- X_min_: float
+  Minimum value of input array X_ used for the left bound.
+
+- X_max_: float
+  Maximum value of input array X_ used for the right bound.
+
+- X_thresholds_: ndarray of shape (n_thresholds,)
+  Unique ascending X values used to interpolate the monotone function.
+
+  Note: This attribute is versioned (added in a specific release) for compatibility with downstream tools.
+
+- y_thresholds_: ndarray
+  The corresponding monotone y values at the X_thresholds_ points.
+
+Usage
+-----
+
+- Fitting and predicting with a monotone fit.
+
+```python
+import numpy as np
+from isotonic import IsotonicRegression
+
+# Training data
+X = np.array([0.0, 1.0, 2.0, 3.0])
+y = np.array([0.2, 0.9, 0.8, 1.5])
+
+# Create a model that auto-detects direction and clips bounds
+model = IsotonicRegression(y_min=None, y_max=None, increasing='auto', out_of_bounds='clip')
+
+# Fit the model
+model.fit(X, y)
+
+# Predict for new values
+X_new = np.array([0.5, 1.5, 2.5, 3.5])
+y_pred = model.predict(X_new)
+print(y_pred)
+```
+
+Notes and edge cases
+- Direction handling:
+  - increasing=True: fit an increasing monotone function.
+  - increasing=False: fit a decreasing monotone function.
+  - increasing='auto': direction is inferred from the data using a Spearman correlation test.
+- Bounds:
+  - y_min and y_max constrain the fitted values within the specified range. If not set, they default to -inf and +inf respectively.
+- Weights:
+  - You can provide sample_weight to emphasize certain observations during fitting.
+- Out-of-bounds behavior:
+  - When predicting, inputs outside the training X domain are handled according to out_of_bounds. Choose 'clip' for a smooth extrapolation, 'nan' to indicate undefined regions, or 'raise' to signal misuse.
+
+Practical considerations
+- Isotonic regression is a simple convex optimization problem in one dimension and can be solved efficiently; the implementation here uses an in-place contiguous algorithm for speed and memory efficiency.
+- The API mirrors common scikit-learn conventions, enabling seamless integration with pipelines.
+- When y_min > min(y) or y_max < max(y), clipping may be necessary to respect the bounds.
+
+Examples
+--------
+
+- Quick check_increasing and isotonic regression on a small dataset
+```python
+import numpy as np
+from isotonic import check_increasing, isotonic_regression
+
+x = np.array([1, 2, 3, 4])
+y = np.array([1.0, 2.1, 1.9, 3.5])
+
+inc = check_increasing(x, y)
+print("Increasing direction:", inc)
+
+y_fit = isotonic_regression(y, increasing=inc, y_min=0.0, y_max=3.0)
+print("Isotonic fit:", y_fit)
+```
+
+- Using IsotonicRegression with a fixed direction and out-of-bounds behavior
+```python
+import numpy as np
+from isotonic import IsotonicRegression
+
+X = np.array([0.0, 1.0, 2.0, 3.0])
+y = np.array([0.2, 0.8, 0.6, 1.2])
+
+model = IsotonicRegression(y_min=0.0, y_max=1.0, increasing='auto', out_of_bounds='clip')
+model.fit(X, y)
+y_pred = model.predict(np.array([0.5, 1.5, 2.5, 3.5]))
+print(y_pred)
+```
+
+References
+----------
+- Active set algorithms for isotonic regression; A unifying framework, Best & Chakravarti
+
+This documentation reflects the core usage and behavior of isotonic regression as implemented in this module, including the key parameters, return values, and practical usage patterns.

@@ -1,0 +1,122 @@
+Miscellaneous features of astropy.io.fits
+
+Overview
+This section covers two miscellaneous features used when working with astropy.io.fits:
+a verification framework for validating object state, and a NotifierMixin for implementing a simple observer pattern. Both are designed to aid robustness and inter-object communication when dealing with FITS-related data.
+
+1) Verification framework (verification of values within FITS-related objects)
+
+What it is
+- A lightweight framework that lets classes verify their internal values and report issues in flexible ways.
+- Designed to be used by classes that implement a _verify method returning a structured error list.
+- Supports various reporting and fixing options that control whether issues are ignored, warned, raised, or automatically fixed.
+
+Key components (from the source)
+- _Verify: Provides run_option and verify methods to execute verification with a chosen option.
+- _ErrList: A hierarchical list structure that stores verification errors in a nested, readable form.
+- VERIFY_OPTIONS: The set of supported option strings that control behavior.
+
+Supported options
+- ignore, warn, exception
+- fix, silentfix
+- fix+ignore, fix+warn, fix+exception
+- silentfix+ignore, silentfix+warn, silentfix+exception
+
+Notes on behavior
+- If option is ignore, verification does nothing.
+- The verification result is obtained by calling self._verify(opt), where _verify must be implemented by the class and return an _ErrList.
+- Options can be combined with a plus (e.g., "fix+warn") to separate the behavior for fixing and reporting.
+- If fix is requested and an issue is fixable, a provided fix function can be executed, and a fixed message can be appended.
+- Reporting can emit warnings (VerifyWarning) or raise an exception (VerifyError) depending on the chosen option.
+- The system prints a header, formats messages with indentation, and notes zero-based indexing to clarify positions.
+
+Usage pattern (example)
+- Implement a class that uses the verification framework by deriving (directly or via composition) from _Verify and implementing _verify(self, option). The method should return an _ErrList with entries describing each issue, where each entry is either:
+  - A tuple (fixable, message) for a simple issue, or
+  - A nested _ErrList for grouped issues at deeper levels.
+
+- Call verify with a chosen option to perform verification and report outcomes according to the option.
+- Example (conceptual):
+
+  - Simple class using verification
+    - Implement _verify(self, option): collect issues in an _ErrList and return it.
+    - Each issue is a tuple (fixable, message) or a nested _ErrList representing grouped issues.
+
+  - Running verification
+    - obj.verify("warn") issues warnings for each problem.
+    - obj.verify("fix+warn") may fix fixable issues and warn about the results.
+    - obj.verify("exception") raises VerifyError with a summary of issues.
+
+Practical example
+
+- The following demonstrates a minimal class that uses the verification system:
+
+  class MyFitsObject(_Verify):
+      def __init__(self, n):
+          self.n = n
+
+      def _verify(self, option):
+          errs = _ErrList()
+          if self.n is None:
+              errs.append((True, "n is None"))
+          elif not isinstance(self.n, int) or self.n < 0:
+              errs.append((True, f"n ({self.n}) must be a non-negative integer"))
+          return errs
+
+  obj = MyFitsObject(-3)
+  obj.verify("warn")  # emits a warning for the issue
+  # obj.verify("exception") would raise VerifyError with a detailed message
+
+Understanding the error list format
+- _ErrList stores messages in a nested structure suitable for hierarchical reporting.
+- Each non-nested item is a tuple (fixable, message).
+- The __str__ method renders a human-readable summary.
+- iter_lines() yields pairs of (fixable, indented_message) with appropriate indentation to reflect hierarchy.
+
+2) NotifierMixin: simple observer pattern for internal communication
+
+What it is
+- A mixin class that enables objects to register listeners and notify them of changes.
+- Listeners are registered with weak references, so they do not prevent garbage collection.
+- The notifier calls a listener’s method named based on the reported change type, enabling flexible, decoupled updates.
+
+How it works
+- Use _add_listener(listener) to subscribe a listener to changes on the notifier.
+- Use _notify(change_type, *args, **kwargs) to broadcast an event.
+  - This results in calling listener._update_<change_type>(*args, **kwargs) on each listener.
+- Listeners implement methods named according to the change type (e.g., _update_state, _update_config), and only those with a matching method are invoked.
+
+Usage example
+
+- A notifier with a simple state change:
+  class MyNotifier(NotifierMixin):
+      def __init__(self, name):
+          self.name = name
+      def do_something(self):
+          # something changed; notify listeners of the new state
+          self._notify("state", 42)
+
+- A listener that handles state updates:
+  class Listener:
+      def _update_state(self, value):
+          print("State updated to", value)
+
+  notifier = MyNotifier("Example")
+  listener = Listener()
+  notifier._add_listener(listener)
+  notifier.do_something()
+  # Output: State updated to 42
+
+Key points
+- NotifierMixin is designed for internal communication between components in the FITS-handling ecosystem.
+- Listeners are kept via weak references, preventing memory leaks due to reference cycles.
+- Change notifications are named via the change_type string, allowing flexible and extensible event handling.
+
+Best practices
+- When implementing your own classes that require verification or notification features, prefer deriving from _Verify and NotifierMixin as appropriate.
+- Provide clear, actionable messages in verification errors to facilitate debugging.
+- Use the “+” variants (e.g., fix+warn) when you want to automate fixes but still receive warnings about the changes.
+
+Reference to related documentation
+- The verification options align with the broader verify semantics in Astropy (see the verify reference). The behavior described here mirrors how verification is presented and surfaced to users, with warnings or exceptions as appropriate.
+- The NotifierMixin behavior aligns with a lightweight internal observer pattern that is common in the FITS handling components, enabling responsive updates to changes in state or configuration.

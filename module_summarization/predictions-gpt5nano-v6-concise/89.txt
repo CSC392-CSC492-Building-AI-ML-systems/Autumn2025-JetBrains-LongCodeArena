@@ -1,0 +1,176 @@
+# augmentations.rst
+
+## Overview
+
+This module provides a standard suite of image augmentations used by AutoAugment policy for ImageNet, RandAugment, and TrivialAugmentWide. The augmentations are implemented as DALI operators and are wired through the `@augmentation` decorator.
+
+Key ideas:
+- The decorator automatically computes the actual transformation parameter from a compact magnitude specification.
+- Each augmentation exposes a concise interface where the magnitude is selected from a discrete set of bins, and the sign is optionally randomized.
+- Parameters and magnitudes can be customized by creating augmented variants, e.g., changing the magnitude range or the mapping from magnitude to the actual parameter.
+
+The augmentations in this module are defined with example setups passed to `@augmentation`. You can easily adjust the parameters, for example to broaden the magnitude range of a transformation.
+
+---
+
+## How the augmentation decorator works
+
+- Each decorated function expects a single positional argument: a batch of samples (the input data).
+- Instead of directly supplying the transformation parameter, you supply:
+  - `magnitude_bin`: which magnitude bin to use (an integer index).
+  - `num_magnitude_bins`: how many magnitude bins to consider.
+- The decorator computes the actual parameter value as:
+  - `parameter = mag_to_param(magnitudes[magnitude_bin] * ((-1) ** random_sign))`
+  - where `magnitudes = linspace(mag_range[0], mag_range[1], num_magnitude_bins)`
+  - and `mag_to_param` is a function supplied per-augmentation (default mappings exist in the module).
+- This mechanism makes it easy to vary augmentation strength without hard-coding exact parameter values.
+
+Example:
+- If a transform has `mag_range=(0, 0.3)` and `mag_to_param` computes a pair `[x, y]` (or a single value), the decorator resolves the final parameter for the underlying operation from the specified magnitude bin (with a possible random sign).
+
+---
+
+## Augmentations exposed in this module
+
+- warp_x_param(magnitude) → [magnitude, 0]
+- warp_y_param(magnitude) → [0, magnitude]
+
+- shear_x(batch, ...)  (decorated)
+  - mag_range=(0, 0.3)
+  - randomly_negate=True
+  - mag_to_param=warp_x_param
+  - Uses a shear transform and applies it via warp with a computed shear.
+
+- shear_y(batch, ...)  (decorated)
+  - mag_range=(0, 0.3)
+  - randomly_negate=True
+  - mag_to_param=warp_y_param
+  - Similar to `shear_x`, but applies shear in the y direction.
+
+- translate_x(batch, rel_offset, shape, ...)  (decorated)
+  - mag_range=(0, 1)
+  - randomly_negate=True
+  - mag_to_param=warp_x_param
+  - Uses a translation matrix with an offset proportional to the x dimension of the input (relative offset).
+
+- translate_x_no_shape(batch, offset, ...)  (decorated, alias name="translate_x")
+  - mag_range=(0, 250)
+  - randomly_negate=True
+  - mag_to_param=warp_x_param
+  - No explicit shape required; the offset is computed from magnitude.
+
+- translate_y(batch, rel_offset, shape, ...)  (decorated)
+  - mag_range=(0, 1)
+  - randomly_negate=True
+  - mag_to_param=warp_y_param
+  - Uses a translation matrix with an offset proportional to the y dimension of the input (relative offset).
+
+- translate_y_no_shape(batch, offset, ...)  (decorated, alias name="translate_y")
+  - mag_range=(0, 250)
+  - randomly_negate=True
+  - mag_to_param=warp_y_param
+
+- rotate(batch, angle, ...)  (decorated)
+  - mag_range=(0., 30)
+  - randomly_negate=True
+  - No explicit shape param; uses rotation with a magnitude-derived angle
+  - `rotate_keep_size` controls whether the image size is preserved
+
+- shift_enhance_range(magnitude) → 1 + magnitude
+  - Helper used by brightness/contrast to map a [0, 0.9] magnitude into the standard enhancement scale
+  - Neutral magnitude corresponds to 1 (no change)
+
+- brightness(batch, parameter)  (decorated)
+  - mag_range=(0, 0.9)
+  - randomly_negate=True
+  - mag_to_param=shift_enhance_range
+  - Applies brightness adjustment
+
+- contrast(batch, parameter)  (decorated)
+  - mag_range=(0, 0.9)
+  - randomly_negate=True
+  - mag_to_param=shift_enhance_range
+  - Brightness and contrast are implemented with a channel-aware approach:
+    - Computes a mean (per spatial location) across H and W
+    - Uses a weighted RGB mean (0.299, 0.587, 0.114) as the center
+    - Applies a contrast transformation that centers around this mean
+    - Casts back to the input data type
+  - Note: The implementation follows a PIL-like model and is designed to work efficiently on GPU with DALI
+
+---
+
+## Customizing augmentations
+
+Each augmentation comes with a ready-to-use default magnitude range. You can create customized variants by chaining the decorator’s configuration:
+
+- Example: Extend the magnitude range for shear_x to up to 0.5
+  - my_shear_x = shear_x.augmentation(mag_range=(0, 0.5))
+
+- Example: Create a custom brightness with a different magnitude mapping
+  - my_brightness = brightness.augmentation(mag_range=(0, 1.2), mag_to_param=shift_enhance_range)
+
+- Example: Adjust translation without requiring a shape argument
+  - my_translate_x = translate_x_no_shape.augmentation(mag_range=(0, 350))
+
+Usage:
+- After creating a customized augmentation, call it with a batch and magnitude controls:
+  - out = my_shear_x(batch, magnitude_bin=3, num_magnitude_bins=10)
+  - out = my_brightness(batch, magnitude_bin=2, num_magnitude_bins=8)
+
+The decorator preserves the original signature for easy substitution, while enabling you to tweak per-augmentation behavior globally.
+
+---
+
+## Examples
+
+1) Basic usage (with default settings)
+
+- Apply brightness with a specified magnitude bin:
+  - out = brightness(batch, magnitude_bin=4, num_magnitude_bins=10)
+
+2) Customize and apply a new shear range
+
+- Create a customized shear_x
+  - my_shear_x = shear_x.augmentation(mag_range=(0, 0.5), randomly_negate=True)
+- Use the customized augmentation on a batch
+  - out = my_shear_x(batch, magnitude_bin=6, num_magnitude_bins=20)
+
+3) Translate with explicit shape requirements
+
+- Use translate_x with shape-aware semantics
+  - out = translate_x(batch, magnitude_bin=3, num_magnitude_bins=12, shape=batch.shape[1:3])
+- Use translate_x_no_shape without providing a shape
+
+  - out = translate_x_no_shape(batch, magnitude_bin=2, num_magnitude_bins=10)
+
+4) Contrast and brightness in a policy
+
+- Apply a small contrast and brightness in combination (using separate pipelines or sequential operators in a single pipeline)
+  - out1 = brightness(batch, magnitude_bin=2, num_magnitude_bins=10)
+  - out2 = contrast(batch, magnitude_bin=5, num_magnitude_bins=10)
+
+---
+
+## Data formats and compatibility
+
+- The module is implemented with NVIDIA DALI and uses its operators (e.g., `fn.transforms.shear`, `fn.warp_affine`, `fn.rotate`, `fn.brightness`, `fn.contrast`).
+- Conventions:
+  - The code comments indicate support for FHWC or HWC layouts for some operations (e.g., contrast).
+  - For brightness/contrast, the internal operations rely on per-channel means and standard RGB channel weights.
+- Shapes:
+  - Translation-based augmentations may require knowledge of image width/height to compute absolute offsets.
+  - The “no_shape” variants exist for convenience when a fixed offset is desired, without relying on the input shape.
+
+---
+
+## Notes and considerations
+
+- The documentation reflects the behavior described by the code and its decorator-based approach. The exact parameter passing is handled by the `@augmentation` decorator, which converts magnitude bins into concrete parameters at call time.
+- The code snippet for `contrast` ends with a partially formed return statement in the provided snippet. The documentation describes the intended behavior (center-based contrast adjustment) as implemented elsewhere in the module.
+- Ensure your environment has the required dependencies:
+  - NumPy (imported for color weights and related computations)
+  - NVIDIA DALI (core of the augmentation operations)
+
+---
+
+If you need additional examples or a quick-start template for integrating these augmentations into a DALI pipeline, I can provide a minimal runnable snippet tailored to your setup.

@@ -1,0 +1,178 @@
+Neural Networks – Supervised
+===========================
+
+Overview
+--------
+This module provides utility functions commonly used in supervised neural network models. It focuses on in-place activation operations to minimize memory allocations, their corresponding derivatives for backpropagation, and a set of standard loss functions frequently employed in regression and classification tasks.
+
+Key concepts
+- In-place activations: Functions that apply nonlinear activations directly on the input array to avoid extra allocations.
+- Derivatives (in-place): Backpropagation helpers that update the gradient signal in place, exploiting simple relations between activations and their derivatives.
+- Loss functions: Implementations of common supervised losses (squared loss for regression, and cross-entropy losses for classification).
+
+API at a glance
+- ACTIVATIONS: Mapping from activation name to in-place activation function.
+- DERIVATIVES: Mapping from activation name to in-place derivative function for backpropagation.
+- LOSS_FUNCTIONS: Registry of available loss functions (e.g., squared_loss, log_loss, binary_log_loss).
+
+In-place activation functions
+--------------------------------
+Each activation function mutates its input array in place.
+
+- identity
+  - Purpose: No transformation; effectively bypasses activation.
+  - Signature: inplace_identity(X)
+  - Notes: Acts as a no-op; useful for compatibility or debugging.
+
+- logistic
+  - Purpose: Sigmoid activation (logistic function).
+  - Signature: inplace_logistic(X)
+  - Implementation detail: Uses scipy.special.expit and writes results back into X.
+
+- tanh
+  - Purpose: Hyperbolic tangent activation.
+  - Signature: inplace_tanh(X)
+  - Implementation detail: Writes results back into X.
+
+- relu
+  - Purpose: Rectified Linear Unit activation.
+  - Signature: inplace_relu(X)
+  - Implementation detail: X := max(X, 0) in place.
+
+- softmax
+  - Purpose: K-way softmax activation (row-wise).
+  - Signature: inplace_softmax(X)
+  - Implementation detail: Numerically stable softmax computed in place per row:
+    - Subtract per-row maximum for numerical stability
+    - Exponentiate and normalize by row-sum
+
+Activation registry
+-------------------
+- ACTIVATIONS maps string names to the corresponding in-place activation functions:
+  - "identity" -> inplace_identity
+  - "tanh" -> inplace_tanh
+  - "logistic" -> inplace_logistic
+  - "relu" -> inplace_relu
+  - "softmax" -> inplace_softmax
+
+In-place derivatives for activations
+------------------------------------
+Backpropagation helpers that update the gradient signal (delta) in place, given the forward-pass activations (Z).
+
+- identity_derivative
+  - Purpose: No change to delta (derivative of identity is 1).
+  - Signature: inplace_identity_derivative(Z, delta)
+
+- logistic_derivative
+  - Purpose: Derivative of logistic sigmoid: Z * (1 - Z)
+  - Signature: inplace_logistic_derivative(Z, delta)
+  - Implementation detail: Updates delta with delta *= Z * (1 - Z)
+
+- tanh_derivative
+  - Purpose: Derivative of tanh: 1 - Z^2
+  - Signature: inplace_tanh_derivative(Z, delta)
+  - Implementation detail: Updates delta with delta *= (1 - Z**2)
+
+- relu_derivative
+  - Purpose: Derivative of ReLU: 1 for Z > 0, 0 for Z <= 0
+  - Signature: inplace_relu_derivative(Z, delta)
+  - Implementation detail: Sets delta to zero where Z == 0
+
+Notes:
+- DERIVATIVES maps string names to the corresponding in-place derivative functions:
+  - "identity" -> inplace_identity_derivative
+  - "tanh" -> inplace_tanh_derivative
+  - "logistic" -> inplace_logistic_derivative
+  - "relu" -> inplace_relu_derivative
+- Softmax derivative is not provided in this mapping due to its more intricate Jacobian; use specialized backpropagation logic when propagating through softmax layers.
+
+Loss functions
+--------------
+Support for common supervised losses (each returns a scalar value averaged over samples).
+
+- squared_loss(y_true, y_pred)
+  - Purpose: Regression loss (mean squared error / 2).
+  - Formula: mean((y_true - y_pred)^2) / 2
+  - Notes: Suitable for regression tasks where targets are continuous.
+
+- log_loss(y_true, y_prob)
+  - Purpose: Multi-class cross-entropy loss.
+  - Arguments:
+    - y_true: Ground-truth labels (one-hot or indicator matrix)
+    - y_prob: Predicted class probabilities, shape (n_samples, n_classes)
+  - Details:
+    - Clips probabilities for numerical stability: eps to 1 - eps
+    - If y_prob has a single column, it's expanded to two columns by appending 1 - y_prob and y_prob
+    - If y_true has a single column, it's expanded similarly
+    - Uses xlogy for stable log-gradient computation
+  - Output: Scalar loss averaged over samples
+
+- binary_log_loss(y_true, y_prob)
+  - Purpose: Binary cross-entropy loss (used for binary or multilabel setups)
+  - Arguments:
+    - y_true: Ground-truth labels (binary indicators)
+    - y_prob: Predicted probabilities, shape (n_samples, 1)
+  - Details:
+    - Clips probabilities for stability
+    - Computes: [ -xlogy(y_true, y_prob) - xlogy(1 - y_true, 1 - y_prob) ] averaged over samples
+  - Output: Scalar loss averaged over samples
+
+Loss function registry
+----------------------
+- LOSS_FUNCTIONS provides a mapping from string identifiers to the corresponding loss function implementations. It includes:
+  - squared_loss
+  - log_loss
+  - binary_log_loss
+- This registry enables selecting a loss function by name at runtime (e.g., in training loops or evaluation scripts).
+
+Usage tips
+----------
+- In-place activations and derivatives are designed to minimize memory allocations during forward and backward passes. Be mindful of aliasing: the same arrays may be mutated in multiple places if not carefully managed.
+- Softmax is implemented in-place with numerical stability in mind. It operates row-wise, so the input should be a 2D array with shape (n_samples, n_features) where each row represents the scores for a sample.
+- For cross-entropy losses, the code handles common scenarios where inputs may be in one-hot form or as single-column vectors by expanding them to a two-class representation when needed.
+- The derivative mappings cover common activations; for softmax-derived gradients, you may need a dedicated backpropagation routine that accounts for the full Jacobian when the softmax is followed by a cross-entropy loss.
+
+Example usage
+--------------
+- Applying an in-place ReLU to activations:
+  math
+  code-block:: python
+
+  Z = np.array([[...]], dtype=float)
+  ACTIVATIONS['relu'](Z)  # Z mutated in place to ReLU(Z)
+
+- Backpropagating through a tanh activation:
+  math
+  code-block:: python
+
+  Z = forward_output.copy()
+  delta = upstream_gradient.copy()
+  DERIVATIVES['tanh'](Z, delta)  # delta mutated to reflect tanh'(Z) * upstream_gradient
+
+- Computing cross-entropy loss (multi-class):
+  math
+  code-block:: python
+
+  y_true = np.array([...], dtype=float)  # one-hot or indicator
+  y_prob = classifier.predict_proba(X)      # shape (n_samples, n_classes)
+  loss = log_loss(y_true, y_prob)
+
+- Computing squared loss for regression:
+  math
+  code-block:: python
+
+  y_true = np.array([...], dtype=float)
+  y_pred = regressor.predict(X)
+  loss = squared_loss(y_true, y_pred)
+
+Dependencies
+------------
+- NumPy
+- SciPy (for the logistic sigmoid helper and numerically stable log operations)
+
+Notes for maintainers
+---------------------
+- The DERIVATIVES dictionary intentionally omits a softmax derivative due to the complexity of its Jacobian. If softmax backpropagation is required, consider integrating a dedicated gradient routine that handles the cross-entropy coupling correctly.
+- The LOSS_FUNCTIONS registry is designed for runtime configurability; ensure keys align with the function names for clarity (e.g., "squared_loss", "log_loss", "binary_log_loss").
+
+This documentation covers the functionality provided by neural_networks_supervised.rst related to Neural network models (supervised) and explains how to use the in-place activations, their derivatives, and the common loss functions in supervised training workflows.

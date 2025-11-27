@@ -1,0 +1,124 @@
+# Isotonic regression
+
+Isotonic regression is a non-parametric method for fitting a monotone function to data. Given a sequence of observations y and corresponding input values X (often univariate), isotonic regression finds a non-decreasing (or non-increasing) sequence ŷ that is as close as possible to y under a weighted least-squares criterion. The implementation uses a pool-adjacent-violators algorithm (PAVA) via the internal function `_inplace_contiguous_isotonic_regression`.
+
+Key features
+- Enforces monotonicity: increasing or decreasing relationship between X and the predicted y.
+- Supports sample weights.
+- Allows bounding the fitted values with y_min and y_max.
+- Automatic determination of monotonicity direction (increasing vs. decreasing) using Spearman correlation by default.
+- Predictable behavior for out-of-domain inputs via the IsotonicRegression wrapper (out_of_bounds handling).
+
+API overview
+- check_increasing(x, y) -> bool
+  - Determines whether y is monotonically increasing (or decreasing) with respect to x using Spearman correlation.
+  - Returns True if increasing, False if decreasing.
+  - May emit a warning if the 95% confidence interval of the Spearman estimate spans zero.
+
+- isotonic_regression(y, *, sample_weight=None, y_min=None, y_max=None, increasing=True) -> ŷ
+  - Solve the isotonic regression problem for a 1D target y.
+  - Parameters:
+    - y: 1D array-like of shape (n_samples,).
+    - sample_weight: array-like of shape (n_samples,), optional. Defaults to equal weights.
+    - y_min: lower bound on the fitted values; default is -inf if not provided.
+    - y_max: upper bound on the fitted values; default is +inf if not provided.
+    - increasing: whether the fitted ŷ should be non-decreasing (True) or non-increasing (False).
+  - Returns:
+    - ŷ: ndarray of shape (n_samples,), the isotonic fit of y.
+
+- IsotonicRegression
+  - A Scikit-learn-compatible estimator that supports fit/predict (and fit_predict) for isotonic regression.
+  - Parameters:
+    - y_min: float or None. Lower bound on the lowest predicted value. Defaults to None (interpreted as -inf).
+    - y_max: float or None. Upper bound on the highest predicted value. Defaults to None (interpreted as +inf).
+    - increasing: bool, or 'auto'. If True, fit non-decreasing; if False, non-increasing; if 'auto', determine direction from data using check_increasing.
+    - out_of_bounds: {'nan', 'clip', 'raise'}, default='nan'. How to handle inputs X outside the training domain during prediction.
+      - 'nan': predictions outside the training domain are NaN.
+      - 'clip': predictions are clipped to the nearest train-interval endpoint.
+      - 'raise': a ValueError is raised.
+  - Attributes (after fitting):
+    - X_min_: Minimum value of input X used for the left bound.
+    - X_max_: Maximum value of input X used for the right bound.
+    - X_thresholds_: Unique ascending X values used to interpolate the monotone function.
+    - y_thresholds_: Corresponding y values at the thresholds.
+  - Methods:
+    - fit(X, y, sample_weight=None): fit the isotonic regression model.
+    - predict(X): predict monotone y for new X values, respecting out_of_bounds.
+    - fit_predict(X, y, sample_weight=None): convenience wrapper.
+
+Usage notes
+- The core regression is 1D and assumes a univariate input X (commonly used with isotonic regression). The ŷ produced is the closest monotone (non-decreasing or non-increasing) sequence to the original y, under weighted least squares.
+- If y_min or y_max are provided, the fitted values are clipped to the specified bounds after the isotonic regression step.
+- The automatic determination of monotonicity direction (increasing) uses the sign of the Spearman correlation between X and y. If the confidence interval around the correlation estimate spans zero, a warning may be emitted by check_increasing.
+
+Implementation details
+- The heavy lifting for isotonic regression is performed by _inplace_contiguous_isotonic_regression(y, sample_weight), which applies the PAVA algorithm in place on a contiguous array.
+- The function check_increasing uses spearmanr to estimate the monotonicity direction and to optionally warn about uncertainty in this direction.
+- The IsotonicRegression class leverages these primitives and provides a convenient API compatible with Scikit-learn’s estimator interface.
+
+Examples
+1) Basic isotonic regression (increasing)
+```python
+import numpy as np
+from isotonic import isotonic_regression
+
+y = np.array([3.0, 1.0, 4.0, 2.0, 5.0])
+y_hat = isotonic_regression(y, increasing=True)
+print(y_hat)
+```
+
+2) Isotonic regression with sample weights
+```python
+import numpy as np
+from isotonic import isotonic_regression
+
+y = np.array([2.0, 8.0, 6.0, 3.0, 5.0])
+w = np.array([1, 2, 1, 1, 3])
+y_hat = isotonic_regression(y, sample_weight=w, increasing=True)
+print(y_hat)
+```
+
+3) Bounding the fitted values
+```python
+import numpy as np
+from isotonic import isotonic_regression
+
+y = np.array([0.5, 2.0, 1.5, 3.0])
+y_hat = isotonic_regression(y, y_min=0.0, y_max=2.0, increasing=True)
+print(y_hat)
+```
+
+4) Using the IsotonicRegression estimator
+```python
+import numpy as np
+from sklearn.isotonic import IsotonicRegression
+
+X = np.array([0.1, 0.4, 0.2, 0.9, 0.7])
+y = np.array([1.0, 2.5, 1.8, 3.0, 2.2])
+
+ir = IsotonicRegression(y_min=None, y_max=None, increasing='auto', out_of_bounds='nan')
+ir.fit(X, y)
+pred = ir.predict(X)
+print(pred)
+```
+
+5) Auto-detect increasing vs decreasing
+```python
+import numpy as np
+from isotonic import check_increasing, isotonic_regression
+
+x = np.array([1, 2, 3, 4, 5], dtype=float)
+y = np.array([2.0, 2.1, 2.1, 2.2, 2.3], dtype=float)
+increasing = check_increasing(x, y)
+y_hat = isotonic_regression(y, increasing=increasing)
+print(y_hat)
+```
+
+References
+- Best, M. J., & Chakravarti, N. (year). Active set algorithms for isotonic regression: A unifying framework. (Core reference for the isotonic regression approach.)
+- Fisher transformation and confidence intervals for Spearman correlation (used in check_increasing).
+
+Notes for developers
+- The isotonic regression implementation is designed to be efficient for 1D data by operating in-place on a contiguous array, minimizing extra allocations.
+- Bounds handling via y_min and y_max is applied after the isotonic projection. If you require bounds during the optimization, consider pre-post processing or custom wrappers.
+- The out_of_bounds parameter in IsotonicRegression is a user-facing convenience to handle predictions for inputs outside the training domain; implementers should align this behavior with your downstream application needs.

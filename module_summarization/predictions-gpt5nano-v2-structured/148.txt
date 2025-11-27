@@ -1,0 +1,181 @@
+# hdf5_parser.md
+
+General HDF5 file reader
+------------------------
+
+This module provides a set of predefined transformations used by the HDF5 reader to extract, manipulate, and interrogate data stored in HDF5 files. Transformations are registered on the HDF5Reader class and can operate on:
+
+- h5py.Dataset objects
+- numpy arrays
+- dictionaries mapping keys to datasets (useful for arbitrary child datasets where labels are not known in advance)
+
+Key concepts
+------------
+
+- Registration via decorator: Each transformation is registered to HDF5Reader through a decorator. The decorator also allows marking certain transformations as requiring a pre-processed attribute value (attribute_needed).
+- Robust error handling: Transformations are wrapped to raise a clear HDF5TransformationError if execution fails.
+- Flexible input handling: Transformations support dataset, numpy array, or dictionary inputs, enabling batch operations across multiple datasets when reading from groups.
+
+Public API (transformations)
+----------------------------
+
+All transformations are provided as standalone functions and are registered to HDF5Reader under their function names.
+
+- get_first_element(dataset)
+  - Purpose: Return the first element of the dataset.
+  - Input: dataset (h5py.Dataset | numpy.ndarray | dict)
+  - Output: First element (or dict of first elements if input is a dict)
+
+- index_dataset(dataset, index)
+  - Purpose: Return the element at the specified index.
+  - Input: dataset (h5py.Dataset | numpy.ndarray | dict), index (int)
+  - Output: Element at the given index
+
+- slice_dataset(dataset, slice_arg)
+  - Purpose: Apply slicing to the dataset.
+  - Input: dataset (h5py.Dataset | numpy.ndarray | dict), slice_arg (slice)
+  - Output: Sliced dataset
+
+- get_shape(dataset)
+  - Purpose: Get the shape of the dataset.
+  - Input: dataset (h5py.Dataset | numpy.ndarray | dict)
+  - Output: Shape or dict of shapes if input is a dict
+
+- get_name(dataset, full_path=False)
+  - Purpose: Get the dataset name.
+  - Input: dataset (h5py.Dataset | numpy.ndarray | dict), full_path (bool)
+  - Output:
+    - If input is a single dataset: dataset.name or the tail name
+    - If input is a dict: dict of names (full path if full_path is True, else tail names)
+
+- tile_array(dataset, n_repeats)
+  - Purpose: Repeat array along a new axis using numpy.tile.
+  - Input: dataset (h5py.Dataset | numpy.ndarray | dict), n_repeats (int)
+  - Output: Tiled array or dict of tiled arrays
+
+- repeat_array(dataset, n_repeats)
+  - Purpose: Repeat each element in the array using numpy.repeat.
+  - Input: dataset (h5py.Dataset | numpy.ndarray | dict), n_repeats (int)
+  - Output: Repeated array or dict of repeated arrays
+
+- get_all_child_datasets(group, ignore=None, contains=None)
+  - Purpose: Retrieve all datasets contained in a given group.
+  - Input:
+    - group: an h5py group-like object
+    - ignore: str or iterable of str (optional) — keys to ignore
+    - contains: str or iterable of str (optional) — include only keys containing these substrings
+  - Output: dict mapping dataset names to the corresponding h5py.Dataset objects
+
+Notes on usage
+--------------
+
+- Accessing the transforms:
+  - Transforms are registered on HDF5Reader._transforms with the function name as the key.
+  - If a transform requires a pre-processed attribute value, its name is added to HDF5Reader._attribute_transforms.
+
+- Input handling:
+  - If a transform receives a dict, the operation is applied to each value in the dict.
+  - If a transform receives a single dataset or array, it operates directly on that object.
+
+- Error handling:
+  - Failures in any transformation raise HDF5TransformationError with a descriptive message.
+
+Usage examples
+--------------
+
+The following examples demonstrate how the transformations can be used directly. In typical use, these transformations are invoked through the HDF5Reader integration, but calling them directly is useful for illustration and testing.
+
+1) Get the first element of a single dataset
+
+```python
+from masci_tools.io.parsers.hdf5.reader import HDF5Reader
+import h5py
+
+# Example: open a file and get the first element of a dataset
+with h5py.File('example.h5', 'r') as f:
+    ds = f['/path/to/dataset']
+    first = get_first_element(ds)  # or reader._transforms['get_first_element'](ds)
+    print(first)
+```
+
+2) Get the second element by index
+
+```python
+idx = 1
+element = index_dataset(ds, idx)
+```
+
+3) Slice a dataset
+
+```python
+sliced = slice_dataset(ds, slice(None, 10, None))  # ds[:10]
+```
+
+4) Get the shape (or shapes for a dict of datasets)
+
+```python
+shape = get_shape(ds)  # single dataset
+# or for a dict of datasets
+datasets = {'a': ds1, 'b': ds2}
+shapes = get_shape(datasets)
+```
+
+5) Get the dataset name (with optional full path)
+
+```python
+name_tail = get_name(ds)                 # 'dataset_name'
+name_full = get_name(ds, full_path=True) # '/path/to/dataset'
+```
+
+6) Tile and repeat arrays
+
+```python
+tiled = tile_array(ds, n_repeats=3)       # repeats the dataset 3 times using tile
+repeated = repeat_array(ds, n_repeats=2)  # repeats each element 2 times
+```
+
+7) Retrieve all child datasets in a group
+
+```python
+with h5py.File('example.h5', 'r') as f:
+    group = f['/path/to/group']
+    children = get_all_child_datasets(group, ignore=['ignore_this'], contains=['sub'])
+    # children is a dict {name: dataset}
+```
+
+Design and implementation highlights
+------------------------------------
+
+- Decorator-based registration:
+  - The hdf5_transformation decorator registers each function on HDF5Reader._transforms and marks attribute-dependent transforms in HDF5Reader._attribute_transforms when applicable.
+  - Wrapped transform functions raise HDF5TransformationError on failure to provide clear diagnostics.
+
+- Flexible data models:
+  - Transformations support:
+    - h5py.Dataset
+    - numpy.ndarray
+    - dict[str, <dataset-or-array>]
+  - This makes it convenient to operate on single datasets or multiple datasets organized under a group.
+
+- Consistent error reporting:
+  - All registered transformations report errors through HDF5TransformationError, ensuring a uniform error surface for downstream code.
+
+Prerequisites
+-------------
+
+- Python 3.7+
+- h5py
+- numpy
+
+Related modules
+--------------
+
+- masci_tools.io.parsers.hdf5.reader (HDF5Reader): The reader class that uses these transformations for reading and post-processing HDF5 data.
+
+Internal notes
+--------------
+
+- The source code provides a single decorator, a dedicated exception type (HDF5TransformationError), and a set of transformation functions designed to be robust and generic for HDF5 data access patterns.
+- While the code includes handling for dict inputs, users should ensure their input aligns with the expected structure (mapping keys to datasets or arrays) when using dict-based transformations.
+
+This documentation covers the general-purpose HDF5 file reader transformations and how to leverage them to extract and reshape data from HDF5 files in a flexible and robust manner.

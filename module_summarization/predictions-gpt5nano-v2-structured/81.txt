@@ -1,0 +1,152 @@
+# models.rst
+
+Overview
+--------
+This module provides two key utilities for building and fitting spectral models:
+
+- SimpleFitter wrapper: a lightweight helper to add a variable-height (background) component to any model.
+- Generic SpectralModel wrapper: a flexible, high-level class that wraps a model function for fitting, including support for multi-component models, annotations, integrals, and per-parameter metadata.
+
+The codebase returns a coherent API that can be used with the pyspeckit fitting routines (mpfit or lmfit) and integrates with the Parinfo system used by pyspeckit.
+
+SimpleFitter wrapper
+--------------------
+
+What is SimpleFitter?
+- A small helper class designed to accompany model functions in fitting workflows.
+- Primarily provides a mechanism to augment an existing model with a variable background height.
+
+Key components
+- vheightmodel(zeroheightmodel): A wrapper generator that returns a new model function with a variable height component.
+  - Behavior: If the keyword argument vheight is True (default), the wrapper adds a height parameter as a baseline to the underlying model; otherwise, it returns the original model evaluated without the height.
+  - Parameter order (in the wrapped function): height, amplitude, shift, width (the exact interpretation depends on the underlying zero-height model).
+
+- moments wrapper (moments): A thin wrapper that delegates to pyspeckit.spectrum.moments.moments to compute spectral moments from data.
+
+API
+- SimpleFitter
+  - Purpose: Base helper scaffold (see usage in fitting workflows).
+  - Initialization: Provided as a class with a placeholder __init__ in this snippet.
+
+- vheightmodel(zeroheightmodel)
+  - Returns: A new function vhm(xax, *pars, **kwargs) that adds a variable-height component to zeroheightmodel.
+  - Function signature (example):
+    - vhm(xax, height, amplitude, shift, width, **kwargs)
+  - Options:
+    - vheight in kwargs (default True): enables/disables the variable-height component.
+
+Usage example
+```python
+# Define a base model (no background height)
+def base_model(x, amp, x0, sigma):
+    return amp * np.exp(-0.5 * ((x - x0) / sigma) ** 2)
+
+# Create a new model with a variable background height
+from your_module import vheightmodel
+
+vhm = vheightmodel(base_model)
+
+# Evaluate the wrapped model
+x = np.linspace(-5, 5, 100)
+y = vhm(x, height=0.5, amp=1.0, x0=0.0, sigma=1.0)
+```
+
+Generic SpectralModel wrapper
+-----------------------------
+
+What is SpectralModel?
+- A wrapper class for a spectra model used with pyspeckit for data fitting.
+- Designed to support multi-component models, annotation handling, integrals, and per-parameter metadata.
+- Intended to be flexible: it can work with either mpfit or lmfit backends and integrates with the Parinfo system.
+
+Key features
+- Combines a user-supplied model function with metadata about parameters (names, limits, units, etc.).
+- Supports customization of parameter naming, fit units, centroid handling, and FWHM behavior.
+- Provides copy semantics (__copy__ and __deepcopy__) to facilitate safe model manipulation during fitting workflows.
+- Supports a flexible “guess types” mechanism to guide initial parameter guesses for standard 3-parameter fitters (amplitude, center, width).
+
+API
+- SpectralModel(modelfunc, npars, shortvarnames=None, fitunit=None, centroid_par=None, fwhm_func=None, fwhm_pars=None, integral_func=None, use_lmfit=False, guess_types=('amplitude', 'center', 'width'), **kwargs)
+
+  Parameters
+  - modelfunc: callable
+    The model function to be fitted. Should take an X-axis (spectroscopic axis) first, followed by input parameters, and return an array with the same shape as the input X-axis.
+  - npars: int
+    Number of parameters required by the model.
+  - shortvarnames: tuple or list (optional)
+    TeX-like or human-readable names to use for annotating parameters (defaults to ("A","\\Delta x","\\sigma")).
+  - fitunit: str (optional)
+    If provided, convert the X-axis to these units before passing to the model.
+  - centroid_par: parameter name/indicator (optional)
+    The parameter representing the centroid of the model (used for annotations or special handling).
+  - fwhm_func: callable (optional)
+    Function to compute the FWHM from parameters.
+  - fwhm_pars: any (optional)
+    Parameters for the FWHM function.
+  - integral_func: callable (optional)
+    Function to compute an analytic integral of the model if available.
+  - use_lmfit: bool (optional)
+    If True, use lmfit instead of mpfit for fitting.
+  - guess_types: tuple (optional)
+    A tuple listing the types of the different parameters when guessing. Valid values are 'amplitude', 'center', and 'width'. This is used by the internal guessing machinery (parse_3par_guesses) to translate human-friendly guesses into input guesses for the fitter.
+  - kwargs: dict (optional)
+    Additional keyword arguments used to configure the underlying parinfo (parameter metadata) and other fitting behavior.
+
+  Returns
+  - An instance of SpectralModel configured with the provided model function and metadata.
+
+Important internal behavior
+- __init__:
+  - Merges the module/documentation with the provided modelfunc’s docstring.
+  - Creates a default_parinfo structure via _make_parinfo and stores a working copy as parinfo.
+  - Stores the model function’s additional keyword arguments in modelfunc_kwargs.
+  - Validates guess_types against allowed types.
+
+- __copy__ and __deepcopy__:
+  - Provide shallow and deep copy semantics to safely duplicate model instances.
+
+- __call__(*args, **kwargs):
+  - Entry point for applying the model during fitting.
+  - Delegates to the chosen fitting backend (mpfit or lmfit) based on use_lmfit and kwargs.
+  - Logs invocation details for debugging purposes.
+
+Usage example
+```python
+import numpy as np
+
+# Example 3-parameter Gaussian model
+def gauss(x, A, x0, sigma):
+    return A * np.exp(-0.5 * ((x - x0) / sigma) ** 2)
+
+# Create a SpectralModel for fitting
+from pyspeckit.models import models  # assuming your module is exposed here
+sm = models.SpectralModel(gauss, npars=3, shortvarnames=("A", "x0", "\\sigma"))
+
+# Example data (x-axis and observed spectrum y)
+x = np.linspace(-5, 5, 200)
+y = gauss(x, 1.0, 0.0, 1.0) + 0.1 * np.random.randn(len(x))
+
+# Fit would be performed through the pyspeckit workflow (fitting engine not shown here)
+# The SpectralModel instance provides parameter metadata and the model function
+```
+
+Notes and further details
+- The module relies on several subpackages (pyspeckit.mpfit, pyspeckit.spectrum.parinfo, and related utilities) for fitting, parameter information, and logging.
+- The documentation within the code merges docstrings from the model function into the wrapper’s documentation, enabling richer, self-contained help strings.
+
+See Also
+- pyspeckit.mpfit (mpfit, mpfitException)
+- pyspeckit.spectrum.parinfo (ParinfoList, Parinfo)
+- pyspeckit.specwarnings (warn)
+- pyspeckit.spectrum.units (SpectroscopicAxis)
+
+Code references (for quick navigation)
+- SimpleFitter class
+- vheightmodel function
+- SpectralModel class (including __init__, __copy__, __deepcopy__, __call__)
+
+Examples
+- Adding a variable-height background to a model via vheightmodel
+- Wrapping a custom model with SpectralModel for fitting with mpfit or lmfit
+
+This documentation provides a concise reference for users looking to understand and utilize the SimpleFitter and SpectralModel wrappers in the module.

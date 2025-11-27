@@ -1,0 +1,211 @@
+# Kernel Ridge Regression (sklearn.kernel_ridge)
+
+This document provides a thorough overview of the KernelRidge module and the KernelRidge estimator implemented in scikit-learn. It is intended for developers integrating or extending this component, and for users who want a clear reference to its API, behavior, and usage patterns.
+
+---
+
+## Overview
+
+Kernel ridge regression (KRR) combines ridge regression with the kernel trick. It learns a linear function in the feature space induced by a kernel, which corresponds to a non-linear function in the original input space for non-linear kernels. The model has a closed-form solution, making it typically faster than iterative methods for medium-sized datasets, but it yields dense models (no sparsity in the dual coefficients).
+
+Key characteristics:
+- Works with both single-output and multi-output regression (the latter via shape `(n_samples, n_targets)` for `y`).
+- Supports a variety of kernels via a string name (e.g., `'rbf'`, `'poly'`, `'linear'`, etc.) or a user-supplied callable kernel.
+- Can operate with a precomputed kernel matrix (`kernel='precomputed'`).
+- Provides a direct, closed-form solution using a kernel matrix plus L2 regularization.
+- Uses Cholesky-based solving for numerical stability and efficiency (via `_solve_cholesky_kernel`).
+
+---
+
+## API Reference
+
+### Class: `sklearn.kernel_ridge.KernelRidge`
+
+Inherits from `MultiOutputMixin`, `RegressorMixin`, and `BaseEstimator`.
+
+- Full name: `sklearn.kernel_ridge.KernelRidge`
+
+- Primary purpose: Kernel ridge regression with flexible kernel choices.
+
+#### Parameters
+
+- `alpha` : float or array-like of shape `(n_targets,)`, default=`1.0`
+  Regularization strength. Must be non-negative. A higher value increases regularization, improving conditioning and reducing variance. If an array is provided, penalties correspond to each target.
+
+- `kernel` : str or callable, default=`"linear"`
+  Kernel mapping used internally. Passed directly to the kernel function:
+  - If a string, it must be one of the kernels supported by `pairwise_kernels` (e.g., `'linear'`, `'rbf'`, `'poly'`, `'sigmoid'`, etc.) or `"precomputed"`.
+  - If `"precomputed"`, `X` is treated as a precomputed kernel matrix.
+  - If a callable, it is invoked on pairs of samples. The callable should accept two 1D arrays (rows) and return a scalar kernel value. When using a callable, the callable may be paired with optional `kernel_params`.
+
+- `gamma` : float, default=None
+  Kernel coefficient for certain kernels (e.g., RBF, polynomial, sigmoid). Interpretation depends on the chosen kernel.
+
+- `degree` : int, default=`3`
+  Degree of the polynomial kernel. Ignored by non-polynomial kernels.
+
+- `coef0` : float, default=`1`
+  Independent term in polynomial and sigmoid kernels. Ignored by other kernels.
+
+- `kernel_params` : dict, default=None
+  Additional keyword parameters for the kernel function if `kernel` is callable.
+
+#### Attributes
+
+- `dual_coef_` : `ndarray` of shape `(n_samples,)` or `(n_samples, n_targets)`
+  Representation of the weight vector(s) in the kernel (dual) space after fitting.
+
+- `X_fit_` : `{ndarray, sparse matrix}` of shape `(n_samples, n_features)`
+  The training data used for fitting. If `kernel == "precomputed"`, this stores the training kernel matrix with shape `(n_samples, n_samples)` instead.
+
+- `n_features_in_` : int
+  Number of features seen during fit.
+
+- `feature_names_in_` : `ndarray` of shape `(n_features_in_,)` or `None`
+  Names of features seen during fit. Defined only if input `X` has feature names that are all strings.
+
+#### See Also
+
+- `sklearn.gaussian_process.GaussianProcessRegressor` — Gaussian process regressor with kernel hyperparameters.
+- `sklearn.linear_model.Ridge` — Linear ridge regression.
+- `sklearn.linear_model.RidgeCV` — Ridge regression with built-in cross-validation.
+- `sklearn.svm.SVR` — Support Vector Regression with a broad set of kernels.
+
+#### Internal Notes
+
+- Internally, training solves the linear system `(K + alpha * I) * alpha_dual = y` (where `K` is the kernel matrix) using a Cholesky decomposition for numerical stability. This solver is provided by `_solve_cholesky_kernel`.
+
+- The kernel matrix `K` is computed by `_get_kernel(X, Y)`:
+  - If `kernel` is callable: the provided kernel is invoked via `pairwise_kernels` with the given parameters.
+  - If `kernel` is a string: `pairwise_kernels(X, Y, metric=kernel, filter_params=True, **params)` is used, where `params` includes `gamma`, `degree`, and `coef0` (as applicable to the chosen kernel).
+
+- Multi-target support: If `y` has shape `(n_samples, n_targets)`, the model learns `n_targets` sets of dual coefficients.
+
+- Precomputed kernel: When `kernel == "precomputed"`, the model expects `X` to be a kernel matrix of shape `(n_samples, n_samples)` during fit, and the predictions are computed accordingly.
+
+---
+
+## Usage Examples
+
+### Basic example (linear kernel)
+
+```python
+from sklearn.kernel_ridge import KernelRidge
+import numpy as np
+
+# Generate synthetic data
+rng = np.random.RandomState(0)
+n_samples, n_features = 100, 5
+X = rng.randn(n_samples, n_features)
+y = rng.randn(n_samples)
+
+# Kernel ridge with linear kernel
+krr = KernelRidge(alpha=1.0, kernel="linear")
+krr.fit(X, y)
+y_pred = krr.predict(X[:5])
+print(y_pred)
+```
+
+### Non-linear kernel (RBF)
+
+```python
+# RBF kernel with gamma controlling the kernel width
+krr = KernelRidge(alpha=1.0, kernel="rbf", gamma=0.1)
+krr.fit(X, y)
+print(krr.dual_coef_.shape)  # (n_samples,)
+```
+
+### Multi-target regression
+
+```python
+# Multi-target response
+Y = rng.randn(n_samples, 3)
+
+krr = KernelRidge(alpha=np.array([1.0, 2.0, 3.0]), kernel="rbf", gamma=0.1)
+krr.fit(X, Y)
+Y_pred = krr.predict(X[:5])
+print(Y_pred.shape)  # (5, 3)
+```
+
+### Precomputed kernel
+
+```python
+from sklearn.metrics.pairwise import pairwise_kernels
+
+# Compute the training kernel matrix
+K = pairwise_kernels(X, X, metric="rbf", gamma=0.1)
+
+krr = KernelRidge(alpha=1.0, kernel="precomputed")
+krr.fit(K, y)
+
+# For predictions on new data, you need K_test = pairwise_kernels(X_test, X, ...)
+X_test = rng.randn(10, n_features)
+K_test = pairwise_kernels(X_test, X, metric="rbf", gamma=0.1)
+y_test_pred = krr.predict(K_test)
+```
+
+### Kernel as a callable
+
+```python
+# Define a custom kernel that operates on pairs of rows
+def my_kernel(x, y):
+    # Example: simple Gaussian-like similarity using Euclidean distance
+    return np.exp(-np.linalg.norm(x - y) ** 2)
+
+krr = KernelRidge(alpha=1.0, kernel=my_kernel)
+krr.fit(X, y)
+print(krr.dual_coef_.shape)
+```
+
+---
+
+## Best Practices
+
+- Scaling: Standardize features before applying kernel methods to improve conditioning and kernel behavior.
+- Kernel choice: Start with a linear kernel as a baseline; explore RBF, polynomial, and sigmoid kernels depending on the problem structure.
+- Regularization: Tune `alpha` to balance bias-variance; for multi-target problems, you may tune a single `alpha` or provide a per-target vector.
+- Hyperparameter tuning: Use cross-validation (e.g., via `GridSearchCV`) to select kernel-specific parameters (`gamma`, `degree`, `coef0`) and `alpha`.
+- Computational considerations: Kernel methods scale poorly with very large datasets due to kernel matrix storage (~O(n^2)). For large-scale problems, consider sparse models or approximation techniques.
+
+---
+
+## Implementation Notes for Developers
+
+- Core solver: Training relies on solving a regularized kernel system using a Cholesky decomposition via `_solve_cholesky_kernel`. This yields stable solutions for positive semi-definite kernel matrices.
+
+- Kernel computation: The method `_get_kernel(self, X, Y=None)` centralizes kernel computation:
+  - If `self.kernel` is callable, the function is used with the provided `kernel_params`.
+  - Otherwise, kernel parameters `gamma`, `degree`, and `coef0` are passed to `pairwise_kernels` as appropriate for the chosen kernel type.
+
+- Validation and constraints:
+  - Parameters are guarded by `_parameter_constraints` to enforce valid types and ranges (e.g., non-negative `alpha`, valid kernels, etc.).
+
+- Fitting attributes:
+  - After fitting, `X_fit_`, `dual_coef_`, and related attributes become available for prediction and inspection.
+  - For `kernel != "precomputed"`, `X_fit_` stores training data; for `kernel == "precomputed"`, it stores the training kernel matrix.
+
+- Multi-output support:
+  - The estimator naturally supports multi-target regression; shapes of `y` and `dual_coef_` adapt accordingly.
+
+- Compatibility:
+  - The class integrates with scikit-learn’s estimator API, including methods like `fit`, `predict`, `score` (via `RegressorMixin`), and parameter validation through `BaseEstimator`.
+
+---
+
+## See Also
+
+- `sklearn.svm.SVR` — Support Vector Regression with a broader set of kernel options and potential sparsity in the dual solution.
+- `sklearn.linear_model.Ridge` — Linear ridge regression (special case with linear kernel).
+- `sklearn.linear_model.RidgeCV` — Ridge regression with built-in cross-validation.
+- `sklearn.gaussian_process.GaussianProcessRegressor` — Kernel-based regression with probabilistic interpretation and kernel hyperparameter tuning.
+
+---
+
+## References
+
+- Kevin P. Murphy, “Machine Learning: A Probabilistic Perspective,” MIT Press, chapter on kernel methods and ridge regression.
+- scikit-learn documentation for kernel-based regression and kernelization concepts.
+
+---
+
+This documentation provides a developer-focused reference for the `KernelRidge` module, including API details, semantics of the parameters, internal mechanics, and practical usage examples.

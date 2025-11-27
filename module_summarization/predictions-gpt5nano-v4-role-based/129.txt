@@ -1,0 +1,130 @@
+Table Data
+==========
+
+Overview
+--------
+
+Table data in this context refers to tabular representations used within the table-handling components of the FITS-related tooling. The data model supports verification and change notification mechanisms to ensure table integrity and to propagate updates to interested listeners.
+
+Key concepts include:
+- A verification framework that can check and optionally fix table data issues.
+- A structured error reporting system that collects, formats, and displays issues found during verification.
+- A lightweight notifier mechanism that allows listeners to react to changes in table data.
+
+Verification framework
+----------------------
+
+The verification subsystem provides a consistent way to validate table data and determine how to report results. It is designed to be reusable by different table-like classes.
+
+Public constructs
+- VerifyError: Exception raised when verification fails in a non-recoverable way.
+- VerifyWarning: Warning emitted for verifiable issues that are not fatal.
+- VERIFY_OPTIONS: Allowed option strings that control verification behavior. Examples include:
+  - ignore
+  - warn
+  - exception
+  - fix
+  - silentfix
+  - fix+ignore, fix+warn, fix+exception
+  - silentfix+ignore, silentfix+warn, silentfix+exception
+
+Core logic (conceptual)
+- _Verify.run_option(option, err_text, fix_text, fix, fixable)
+  - Executes verification for a single issue, applying a fix if possible.
+  - Behavior is controlled by the option:
+    - If the option implies reporting (e.g., "warn" or "exception"), issues may be reported instead of being fixed.
+    - If fixable and a fix is provided, the fix is executed and a suffix (e.g., "Fixed.") is appended to the message.
+  - Returns a tuple (fixable, text) indicating whether the issue was fixable and the message to report.
+
+- _Verify.verify(option="warn")
+  - Entry point to verify all values in a table-like instance.
+  - Validates the option against VERIFY_OPTIONS; raises ValueError for unknown options.
+  - Delegates to the concrete implementation (self._verify(opt)) to collect issues into an _ErrList.
+  - Splits the option into fix and report components when applicable (e.g., "fix+warn").
+  - Applies filtering rules for reporting:
+    - silentfix suppresses reporting of fixable issues.
+    - fix with ignore reports only fixed issues.
+  - Builds a report message and either warns or raises an error depending on the chosen options.
+  - Includes a note about zero-based indexing (as used by the underlying FITS tooling).
+
+Error reporting
+---------------
+
+The verification results are stored in a nested error list structure that can be rendered as human-readable text with proper indentation to reflect hierarchy.
+
+Notable constructs
+- _ErrList (subclass of list)
+  - __init__(val=(), unit="Element")
+    - Creates a nested list of errors, with a unit label used for headers in multi-level reports.
+  - __str__(self)
+    - Converts the nested structure to a string by joining the second element of each top-level line.
+  - iter_lines(self, filter=None, shift=0)
+    - Generator that yields (prefix, indented_message) pairs for each error line.
+    - First pass: yields top-level messages (non-_ErrList items).
+    - Second pass: traverses nested _ErrList objects, indenting appropriately.
+    - The unit attribute is used to annotate headers for deeper levels (e.g., “Element 0:”).
+  - Behavior
+    - filter: optional function to select which items to yield.
+    - shift: indentation level offset used for pretty-printing.
+
+Usage pattern (conceptual)
+- A table-like class implements a _verify method that returns an _ErrList with the collected issues.
+- Call table.verify(option) to perform verification and report results according to the chosen option.
+- To inspect issues programmatically:
+  - errs = table._verify(option)
+  - for fixable, message in errs.iter_lines(filter=some_filter):
+    - Interpret fixable as an indicator whether an issue could be fixed.
+    - Use message as the human-readable report.
+
+Notifier mechanism
+------------------
+
+The module provides a lightweight notifier mixin to propagate changes from a table object to registered listeners.
+
+NotifierMixin (conceptual)
+- Purpose: Allow objects to register listeners and notify them of changes.
+- Listener management is cautious: listeners are stored with weak references to avoid preventing garbage collection.
+- Internal methods (prefixed with an underscore) indicate intended internal-use only:
+  - _add_listener(listener)
+  - _notify(change_type, *args, **kwargs)
+    - Invokes listener._update_change_type(*args, **kwargs) on all registered listeners that implement the corresponding update method.
+- Usage pattern:
+  - A table-like object can subclass NotifierMixin to allow other components (e.g., UI elements, other data structures) to react to data changes.
+  - Listeners must implement appropriate update methods (e.g., _update_change_type) to respond to specific change events.
+
+Notes for Table Data developers
+- The verification framework is designed to be subclassed; concrete table-like classes should implement _verify(self, opt) to produce an _ErrList describing any issues found.
+- The reporting behavior (warnings vs. exceptions) and the ability to auto-fix issues are controlled entirely by the option string.
+- The _ErrList.iter_lines method provides a robust and nicely formatted, hierarchical view of errors suitable for end-user reporting.
+- The zero-based indexing note is important for users interpreting error messages related to table row/column indexing.
+
+Examples (pseudo-code)
+- Verifying with reporting as warnings:
+  tbl.verify("warn")
+
+- Verifying and fixing where possible, with silent reporting of fixable issues:
+  tbl.verify("silentfix")
+
+- Verifying with both fixing and warning/exception reporting:
+  tbl.verify("fix+warn")
+  tbl.verify("fix+exception")
+
+- Inspecting errors programmatically:
+  errs = tbl._verify("warn")
+  for fixable, msg in errs.iter_lines():
+      if fixable is not None:
+          # fixable indicates whether the issue can be fixed
+          pass
+      # process or display msg as needed
+
+Reference
+---------
+
+- VerifyError: Exception raised for unrecoverable verification failures.
+- VerifyWarning: Warning raised for verifiable issues when not treated as errors.
+- VERIFY_OPTIONS: Accepted verification option strings controlling behavior.
+- _Verify: Core verification logic including run_option and verify methods.
+- _ErrList: Nested error structure used to represent verification results.
+- NotifierMixin: Mechanism to register listeners and notify them of changes to table data.
+
+This section provides the essentials for understanding how Table Data integrates verification and change notification, enabling robust and user-friendly handling of table-like data within the FITS tooling.

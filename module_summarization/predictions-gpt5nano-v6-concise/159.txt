@@ -1,0 +1,159 @@
+Memory alignment
+================
+
+This document explains memory alignment for developers working with the alignment.rst section and related code in this project. It covers fundamental concepts, practical guidance for C extensions and NumPy arrays, and representative examples to help you write and verify correctly aligned memory across platforms and SIMD targets.
+
+Overview
+--------
+
+- Memory alignment defines the byte boundary that data types must start at in memory.
+- Proper alignment enables fast, hardware-friendly access and prevents faults on some architectures.
+- Alignment requirements depend on the data type, the platform/ABI, and the SIMD instructions you intend to use.
+- In NumPy, alignment is relevant for how arrays are laid out in memory and how C extensions or SIMD-accelerated code can safely operate on buffers exposed by NumPy.
+
+Key concepts
+------------
+
+- Alignment vs. padding
+  - Alignment: the non-wasteful boundary (in bytes) on which data must begin.
+  - Padding: unused bytes inserted to satisfy alignment constraints, increasing the overall size of a data structure.
+
+- Natural alignment
+  - Each primitive type has a natural alignment (often equal to its size, e.g., 8-byte alignment for 64-bit types on 64-bit platforms).
+  - SIMD-friendly data often requires larger alignments (e.g., 16-byte for SSE, 32-byte for AVX, 64-byte for AVX-512).
+
+- SIMD and alignment
+  - Aligned loads/stores are faster and sometimes required by intrinsics.
+  - Unaligned access is possible on many CPUs but may incur penalties or require special handling.
+
+- Alignment in C/C++
+  - alignas (C11, C++11) specifies the alignment of a type or object.
+  - alignof(T) yields the alignment requirement of a type T.
+  - Compiler-specific options:
+    - GCC/Clang: __attribute__((aligned(n)))
+    - MSVC: __declspec(align(n))
+  - For portable code, prefer alignas and alignof when available and guard with feature checks.
+
+- Alignment in Python and NumPy
+  - NumPy exposes memory buffers to C extensions; alignment matters when passing buffers to SIMD kernels.
+  - dtype.alignment (in NumPy) reflects the alignment requirement of the dtype on the current platform.
+  - When creating structured dtypes, align=True can be used to align fields within the structure (per-ABI alignment).
+
+- Allocation and management of aligned memory
+  - Use platform-appropriate APIs for aligned allocations:
+    - POSIX: posix_memalign, aligned_alloc (C11)
+    - Windows: _aligned_malloc
+  - Ensure that the alignment requested matches the SIMD boundary you intend to use.
+
+How this project uses alignment
+-------------------------------
+
+- The codebase may detect and expose SIMD capabilities and alignment requirements to enable optimized paths.
+- When exposing memory buffers to SIMD routines or to NumPy from C extensions, proper alignment guarantees correctness and performance.
+- Understanding and validating alignment helps prevent subtle crashes or slowdowns when working with low-level kernels, memoryviews, or custom typed buffers.
+
+Querying and verifying alignment in NumPy
+-----------------------------------------
+
+- NumPy dtype alignment
+  - dtype.alignment reports the required alignment (in bytes) for elements of that dtype on the current platform.
+- Verifying array alignment in Python
+  - You can inspect the starting address of an array and compare it against the desired boundary.
+
+Example (Python):
+- Check alignment of a NumPy array intended for SIMD-friendly code
+  - import numpy as np
+  - a = np.empty(1024, dtype=np.float64)
+  - address = a.ctypes.data
+  - print("Address modulo 32:", address % 32)
+  - print("Element alignment (dtype.alignment):", a.dtype.alignment)
+
+Examples
+--------
+
+C example: aligning a struct to a 16-byte boundary (C11 or compiler-supported extensions)
+
+.. code-block:: c
+
+    // C11 (preferred, if supported)
+    #include <stdalign.h>
+
+    struct alignas(16) Vec4 {
+        double x, y, z, w;
+    };
+
+    // or using compiler-specific attributes (if C11 not available)
+    // struct ___attribute__((aligned(16))) Vec4 { double x, y, z, w; };
+
+    // Usage note:
+    // Allocate buffers that will be used with 16-byte SIMD loads/stores
+    // and ensure any pointers used for SIMD operations are 16-byte aligned.
+
+C example: aligned allocation
+
+.. code-block:: c
+
+    #include <stdlib.h>
+
+    size_t n = 1024;
+    void* p = NULL;
+
+    // POSIX (preferred on POSIX systems)
+    if (posix_memalign(&p, 32, n * sizeof(double)) != 0) {
+        // handle error
+    }
+
+    // Use p as a double* buffer, then free with free(p)
+
+Python / NumPy example: inspecting alignment of an array buffer
+
+.. code-block:: python
+
+    import numpy as np
+
+    a = np.empty(1024, dtype=np.float64)
+    address = a.ctypes.data
+    print("Buffer address:", address)
+    print("Aligned to 32 bytes:", address % 32 == 0)
+    print("dtype alignment (bytes):", a.dtype.alignment)
+
+Guidelines for developers
+-------------------------
+
+- Prefer explicit alignment guarantees when implementing low-level APIs:
+  - Use alignas/alignof (C/C++) to express ABI requirements.
+  - When writing SIMD-accelerated kernels, align the input/output buffers to the required boundary (e.g., 16, 32, or 64 bytes).
+- When building structured dtypes in NumPy, consider using align=True to ensure that fields are padded to ABI boundaries if you plan to expose the dtype to C extensions.
+- When returning or sharing raw buffers with Eigen/BLAS/IM codes or other C extensions, ensure the allocator provides the required alignment.
+- For portability:
+  - Detect the target SIMD capability and set alignment accordingly.
+  - Validate alignment at runtime in tests, especially on CI runners with diverse architectures.
+- Testing tips:
+  - Write unit tests that allocate aligned buffers and perform SIMD-like loads/stores to verify correctness.
+  - In NumPy-based tests, check pointer addresses and dtype.alignment on all supported platforms.
+
+Common pitfalls
+--------------
+
+- Assuming double has 16-byte alignment on all platforms; it often has 8-byte alignment on many ABIs.
+- Failing to align buffers passed to SIMD intrinsics, causing slower performance or crashes on some platforms.
+- Using packed structures inadvertently when ABI alignment is required.
+- Overlooking alignment requirements when constructing or wrapping buffers from Python to C extensions.
+
+References
+----------
+
+- C11 alignment facilities:
+  - alignas, alignof, _Alignas, _Alignof
+  - <stdalign.h> on platforms that support C11
+- SIMD guidelines:
+  - SSE (128-bit), AVX (256-bit), AVX-512 (512-bit) alignment and usage
+- NumPy alignment:
+  - numpy.dtype.alignment
+  - struct dtype alignment considerations with align=True
+
+Notes
+-----
+
+- This document provides practical guidance for developers contributing to alignment.rst and implementing memory-aligned operations across C/C++ extensions and NumPy-backed code.
+- Always tailor alignment choices to the target hardware and the SIMD intrinsics you intend to use.

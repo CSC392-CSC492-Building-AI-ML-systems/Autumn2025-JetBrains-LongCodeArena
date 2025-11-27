@@ -1,0 +1,150 @@
+# cockroach_engine.rst
+
+Module: CockroachEngine
+
+Overview
+- CockroachEngine is a specialized engine that extends Piccolo’s PostgresEngine to target CockroachDB.
+- It inherits all behavior from PostgresEngine and adds CockroachDB-specific initialization to enable a particular cluster setting.
+- Asyncpg is lazy-loaded to avoid a hard dependency unless Cockroach-specific functionality is actually used.
+
+Key Behaviors
+- Engine type: cockroach
+- Version handling: min_version_number is 0 (Cockroach doesn’t align with standard Postgres versioning in this context)
+- Cockroach-specific preparation:
+  - On initialization, prep_database attempts to enable a CockroachDB cluster setting:
+    - SET CLUSTER SETTING sql.defaults.experimental_alter_column_type.enabled = true;
+  - If the current user lacks privileges to set cluster options, a colored warning is emitted using colored_warning with Level.medium.
+
+Design and Relationship to PostgresEngine
+- CockroachEngine inherits from PostgresEngine, reusing its core connection management, query execution, migrations, and transaction handling.
+- The only Cockroach-specific logic added is the preparation step to enable experimental alter-column-type behavior in CockroachDB.
+- This design minimizes duplication and provides a Cockroach-compatible path with minimal divergence from the Postgres engine.
+
+Implementation Details
+- Lazy asyncpg import:
+  - asyncpg = LazyLoader("asyncpg", globals(), "asyncpg")
+  - This delays importing asyncpg until it is actually needed, reducing import-time dependencies when the module is loaded but not used.
+- Initialization:
+  - __init__(config, extensions=(), log_queries=False, log_responses=False, extra_nodes=None) -> None
+  - The constructor simply forwards arguments to PostgresEngine, preserving existing behavior and configuration models.
+- Preparation step:
+  - async def prep_database(self):
+    - Attempts to run:
+      - SET CLUSTER SETTING sql.defaults.experimental_alter_column_type.enabled = true;
+    - Catches asyncpg.exceptions.InsufficientPrivilegeError to warn the user if privileges are insufficient.
+
+API Reference
+
+Class: CockroachEngine(PostgresEngine)
+- engine_type: "cockroach"
+- min_version_number: 0
+- __init__(config: dict, extensions: Sequence[str] = (), log_queries: bool = False, log_responses: bool = False, extra_nodes: dict[str, CockroachEngine] | None = None) -> None
+  - Inherits all parameters from PostgresEngine; additional handling for CockroachDB is in prep_database.
+- async def prep_database(self) -> None
+  - Executes the Cockroach-specific cluster setting to enable experimental alter column type behavior.
+  - On insufficient privileges, emits a colored warning with a medium level:
+
+    "=> Unable to set up Cockroach DB functionality may not behave as expected. Make sure your database user has permission to set cluster options."
+
+Usage Guide
+
+When to use
+- Use CockroachEngine when targeting CockroachDB instances that speak the Postgres wire protocol and where you want to leverage Piccolo’s Postgres-based tooling.
+- The engine enables a Cockroach-specific cluster setting necessary for certain alter-column-type operations.
+
+Configuration
+- Configuration is passed as a dictionary (config) to the engine, consistent with how Piccolo’s engines are configured.
+- Typical keys (example):
+  - database: database name
+  - user: username
+  - password: password
+  - host: hostname or IP
+  - port: connection port (default for CockroachDB is 26257)
+  - ssl: SSL configuration (if applicable)
+
+Example
+
+Python example: basic initialization
+- The following creates a CockroachEngine instance with a standard config.
+- Note: This assumes asyncpg is installed if you plan to use features requiring it.
+
+```python
+from cockroach_engine import CockroachEngine
+
+config = {
+    "database": "mydb",
+    "user": "admin",
+    "password": "secret",
+    "host": "cockroach.local",
+    "port": 26257,
+    # "ssl": { ... }  # if using TLS
+}
+
+engine = CockroachEngine(config=config)
+```
+
+Example: with multiple nodes (extra_nodes)
+- You can provide extra_nodes to represent additional CockroachDB nodes in the cluster. Each node is itself a CockroachEngine instance.
+
+```python
+from cockroach_engine import CockroachEngine
+
+node1_config = {
+    "database": "mydb",
+    "user": "admin",
+    "password": "secret",
+    "host": "cockroach-node1.local",
+    "port": 26257,
+}
+
+node2_config = {
+    "database": "mydb",
+    "user": "admin",
+    "password": "secret",
+    "host": "cockroach-node2.local",
+    "port": 26257,
+}
+
+engine_node1 = CockroachEngine(config=node1_config)
+engine_node2 = CockroachEngine(config=node2_config)
+
+cluster_engine = CockroachEngine(config=node1_config, extra_nodes={"node2": engine_node2})
+```
+
+Behavior and Troubleshooting
+
+- On initialization, CockroachEngine tries to enable the cluster setting:
+  - sql.defaults.experimental_alter_column_type.enabled = true
+- If the configured user lacks permission to set cluster options, a warning is emitted:
+  - Message: “Unable to set up Cockroach DB functionality may not behave as expected. Make sure your database user has permission to set cluster options.”
+- This warning is non-fatal; the engine will continue to operate, but some operations that rely on enabling experimental alter column type may not be available or behave differently.
+
+Developer Notes
+
+- Dependency management:
+  - asyncpg is loaded lazily. Ensure you have asyncpg installed in environments where you actually run CockroachEngine operations that require database access.
+- Extensibility:
+  - The extra_nodes parameter allows modeling CockroachDB clusters with multiple nodes, which can be useful for distributed testing scenarios.
+- Compatibility:
+  - min_version_number is set to 0 to reflect Cockroach’s versioning peculiarities; this should not impact typical usage but is a signal for version-related checks within the engine family.
+
+Testing
+
+- Unit tests should cover:
+  - Successful prep_database when the user has privileges (ensuring the cluster setting is applied).
+  - Warning path when an InsufficientPrivilegeError is raised.
+- To simulate privilege errors, you can mock asyncpg.exceptions.InsufficientPrivilegeError in tests and assert that colored_warning is invoked with Level.medium.
+
+Related Modules
+
+- PostgresEngine (piccolo.engine.postgres.PostgresEngine)
+  - CockroachEngine extends this class; all standard PostgresEngine capabilities (SQL generation, migrations, transactions, connection handling) are preserved.
+- piccolo.utils.lazy_loader.LazyLoader
+  - Used to defer importing asyncpg until needed.
+- piccolo.utils.warnings.colored_warning
+  - Used to emit user-facing warnings when cluster settings cannot be applied.
+
+Notes for Contributors
+
+- If CockroachDB enhancements become necessary beyond enabling the experimental alter column type, consider adding additional prep_database steps guarded by privilege checks.
+- Maintain parity with PostgresEngine behavior where CockroachDB semantics align, to minimize surprises for developers migrating code between engines.

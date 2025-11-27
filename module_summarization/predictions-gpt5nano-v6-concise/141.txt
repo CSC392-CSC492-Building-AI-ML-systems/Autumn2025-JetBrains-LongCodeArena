@@ -1,0 +1,153 @@
+.. _connect-to-remote-data:
+
+Connect to remote data
+====================
+
+Overview
+--------
+
+This module provides a high-level interface to connect to and read data from
+remote filesystems (via fsspec) in a chunked, delimiter-aware manner suitable for
+integration with Dask. The primary entry point is read_bytes, which returns
+delayed objects representing blocks of data read from one or more files. It
+supports:
+
+- Reading single files or multiple files via a glob pattern or a list of paths
+- Remote filesystems (e.g., s3://, hdfs://) when the corresponding filesystem
+  libraries are installed
+- Blocked/chunked reads with a specified blocksize, with safe boundaries around
+  delimiters
+- Optional header samples, for inspecting a file’s structure
+- Optional inclusion of the originating path for each block
+
+Key ideas
+---------
+
+- The function resolves the target paths with fsspec using get_fs_token_paths and
+  creates OpenFile objects that handle compression and streaming for each path.
+- Blocks are determined by the given blocksize. If blocksize is None, entire files
+  are read as single blocks. Otherwise, offsets and lengths are computed per file
+  to produce properly chunked blocks.
+- If a delimiter is provided, blocks are aligned so that boundaries follow the
+  delimiter, ensuring block boundaries do not split lines/records in the middle.
+- A sample header can be returned (default 10 KiB) to help infer the data format.
+
+API reference
+-------------
+
+read_bytes parameters
+
+- urlpath: str or list/tuple/os.PathLike
+  Absolute or relative filepath(s). Can include a protocol like s3:// to read
+  from alternative filesystems. To read multiple files, pass a globstring or a
+  list of paths; all paths must share the same protocol.
+
+- delimiter: bytes or None
+  Optional delimiter on which to split blocks (e.g., b'\\n'). If provided,
+  blocks are aligned to delimiters.
+
+- not_zero: bool
+  If True, seek the start-of-file delimiter, discarding header.
+
+- blocksize: int or str or None
+  Chunk size in bytes. Defaults to "128 MiB". If None, chunks correspond to
+  whole files.
+
+- sample: int, str, bool
+  Whether to return a header sample. False means no sample. Defaults to 10 KiB.
+  If a string, it is interpreted as a byte size (e.g., "1 MiB").
+
+- compression: str or None
+  Compression type (e.g., 'gzip', 'xz') or None. Must support efficient random access.
+  If compression is set to "infer", the actual compression is inferred from the file
+  name. Note: chunked reads are not supported for compressed files; set blocksize=None
+  to read whole files.
+
+- include_path: bool
+  If True, include the path corresponding to each block in the output.
+
+- kwargs: dict
+  Storage options and other parameters passed to fsspec (e.g., host, port,
+  username, password).
+
+Returns
+-------
+
+- sample: bytes
+  The header sample (unless sample is False).
+
+- blocks: list of lists of dask.delayed.Delayed
+  For each input file, a list of delayed objects, each computing to a block of
+  bytes from that file.
+
+- paths: list of strings (only if include_path is True)
+  The list of input paths corresponding to the blocks.
+
+Example usage
+-------------
+
+Read a set of local or remote files using a delimiter, returning samples and blocks:
+
+.. code-block:: python
+
+   sample, blocks = read_bytes('2015-*-*.csv', delimiter=b'\\n')  # doctest: +SKIP
+
+Read from a remote filesystem (e.g., S3) with a delimiter:
+
+.. code-block:: python
+
+   sample, blocks = read_bytes('s3://bucket/2015-*-*.csv', delimiter=b'\\n')  # doctest: +SKIP
+
+Include the originating path for each block:
+
+.. code-block:: python
+
+   sample, paths, blocks = read_bytes('2015-*-*.csv', include_path=True)  # doctest: +SKIP
+
+Use a header sample (default 10 KiB) to inspect the data structure:
+
+.. code-block:: python
+
+   sample, blocks = read_bytes('data/*.csv', delimiter=b'\\n')  # doctest: +SKIP
+
+Disable sampling when not needed:
+
+.. code-block:: python
+
+   sample, blocks = read_bytes('data/*.csv', sample=False)  # doctest: +SKIP
+
+Notes on behavior
+-----------------
+
+- If blocksize is specified and a file’s size cannot be determined, an error is raised
+  suggesting to set blocksize=None to read whole files.
+- Chunked reads are not supported for compressed files. To read compressed data, you
+  may set blocksize=None (read whole files) or avoid compression for chunked reads.
+- The function uses fsspec’s filesystem abstraction, making storage options and
+  credentials pluggable via storage_options passed in kwargs.
+- The internal read for each block uses read_block_from_file with a copy of the lazy
+  file handle to safely read the requested bytes/orchestrate delimiter-aware reads.
+
+Internal implementation highlights (high level)
+---------------------------------------------
+
+- The filesystem, token, and file paths are resolved with get_fs_token_paths(urlpath, mode="rb", storage_options=kwargs).
+- For each path, an offset list and a length list are computed to define blocks. If not_zero is set or the file has a known size, offsets are aligned to preserve entire blocks around delimiters.
+- A delayed_read wrapper around read_block_from_file is created for each block, using a unique Dask key derived from the file’s token and offset.
+- If include_path is True, the corresponding path is returned alongside the blocks.
+
+Implementation caveats
+----------------------
+
+- When a file’s size cannot be determined, you cannot safely perform chunked reads.
+- If compression is set to None, normal reading applies; if compression is specified, the file must be readable with random access.
+- For compressed files, consider using blocksize=None to read whole files or ensure the compression supports seek operations.
+
+See also
+--------
+
+- read_block_from_file: Low-level helper to read a block from a lazy OpenFile object.
+- OpenFile (from fsspec.core): Abstraction representing a lazily-opened file on a filesystem.
+- tokenize (from dask): Generates a hashable key for caching/identification of delayed tasks.
+
+If you need examples tailored to your environment (e.g., specific remote backends, credentials, or custom delimiter handling), provide your filesystem configuration and data layout to adapt the usage accordingly.

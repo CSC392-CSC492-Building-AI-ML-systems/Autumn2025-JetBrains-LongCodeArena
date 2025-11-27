@@ -1,0 +1,126 @@
+scheduling-policies.rst
+
+Scheduling policies
+===================
+
+This document describes the policies used by Dask's distributed scheduler to (1) select the preference of tasks to execute next and (2) select the preference of workers to run those tasks on. The scheduler uses a combination of priorities, data locality, resource awareness, and pluggable extensions to balance throughput, memory usage, and data movement in diverse cluster configurations.
+
+Overview
+--------
+
+- Task preference: When multiple tasks are ready to run (their dependencies are satisfied), the scheduler assigns an order of execution based on per-task priorities. Priorities are designed to favor tasks that unlock more work, reduce long dependency chains, and minimize expensive data movements or memory pressure.
+- Worker preference: Given a ready task, the scheduler chooses a worker to execute it on. Preferences consider data locality (where input data already resides), memory and CPU availability, and inter-worker data transfer costs. The goal is to place work where it can run efficiently while keeping memory usage within limits.
+
+Key concepts
+------------
+
+- Ready tasks and priorities
+  - A task becomes ready when all of its dependencies have completed.
+  - Each ready task is assigned a priority value that reflects its potential to advance the overall computation (e.g., shorter path to finishing a chunk of work, data locality benefits, or critical-path considerations).
+  - The scheduler selects higher-priority tasks first, subject to available resources and locality constraints.
+- Data locality
+  - If the inputs or intermediate data for a task already reside on a particular worker, the scheduler prefers executing that task on those workers to minimize expensive data transfers.
+  - Data locality is a central heuristic for both task placement and rerouting decisions.
+- Memory pressure and resource awareness
+  - Worker memory usage and available CPU cores influence whether a worker is eligible to receive a new task.
+  - Tasks may be postponed or deprioritized if placing them would cause memory pressure or false contention for resources on a worker.
+- Extensions and pluggable policies
+  - The scheduler is extensible via policy plugins. Built-in extensions influence both task and worker preferences.
+  - Examples include work-stealing, shuffle-based scheduling, and monitoring/diagnostics extensions.
+
+Task preference policy
+----------------------
+
+What it governs
+- The ordering of ready tasks for execution across the cluster.
+- How to choose among multiple ready tasks on a single worker (when a worker can run more than one task simultaneously or when choosing which task to pull from the global pool).
+
+How it works (high level)
+- Compute a per-task priority when a task enters the ready state. Priorities encode factors such as:
+  - Position in the dependency graph (potential to unlock downstream work).
+  - Data locality considerations (data already present on target workers).
+  - Task size or estimated cost (to balance short vs long tasks).
+  - Age or staleness, so older tasks aren’t starved.
+- Maintain a ready queue sorted by priority. The scheduler selects the highest-priority ready task that can be executed given the target worker’s resources and locality.
+- Adapt to memory pressure and erred tasks:
+  - Tasks that have previously failed or are memory-intensive may be deprioritized or retried in a controlled manner.
+
+Data locality and movement
+- Prioritize tasks whose inputs or partial results already reside on the target worker to reduce data transfer.
+- When no strong locality is available, the scheduler may schedule on a nearby or least-loaded worker to balance load and minimize transfers.
+
+Memory and resource considerations
+- A worker’s current memory footprint and available resources influence task eligibility.
+- If a worker is memory-constrained, the scheduler may delay scheduling additional tasks to that worker or select lower-cost tasks.
+
+Extensions that influence task priority
+- WorkStealing (stealing extension): enables idle workers to steal tasks from busy workers to balance load and improve utilization.
+- Shuffle and other extensions: provide alternative heuristics for distributing work or improving data locality under certain workloads.
+
+Worker preference policy
+------------------------
+
+What it governs
+- For a given ready task, which worker should execute it.
+- How to select a worker for new tasks when multiple workers could perform the work efficiently.
+
+How it works (high level)
+- Evaluate candidate workers based on:
+  - Data locality: prefer workers that already hold relevant input data or recent intermediates.
+  - Resource availability: CPU, memory headroom, and other per-worker resources are considered.
+  - Data transfer costs: minimize cross-network transfers when moving data to a worker.
+  - Load balancing: spread work to avoid hotspots and underutilized workers.
+- If multiple workers are similarly suitable, apply a fair distribution strategy (e.g., randomized or round-robin within the set of suitable workers).
+
+Data locality and movement
+- Scheduling prefers workers that minimize data movement, prioritizing those with necessary data already in memory.
+- When data needs to be transferred, the scheduler weighs the cost against the benefit of completing the task quickly.
+
+Memory management
+- Worker memory usage is a critical gating factor for task assignment.
+- The scheduler avoids overloading workers with tasks that would exceed their memory capacity, reducing the risk of memory spillover or task erasures.
+
+Extensions that influence worker choice
+- WorkStealing: supports cross-worker task borrowing to balance load and reduce idle time.
+- Shuffle: provides alternative strategies for distributing work across workers.
+
+Tuning and configuration
+------------------------
+
+- Extensions configuration
+  - The scheduler registers a set of built-in extensions (for example, locks, memory management, pub/sub, events, and stealing). These extensions influence how tasks and workers are chosen.
+  - Extensions can be enabled or disabled to tailor scheduling behavior to the cluster’s characteristics.
+- Observability
+  - Enable verbose scheduler logging to observe scheduling decisions, ready-queue priorities, and worker assignments.
+  - Scheduler plugins and tutorials may expose diagnostics that illuminate how priorities are computed and how workers are selected.
+
+Common scenarios and behaviors
+------------------------------
+
+- Data-local workflow
+  - Tasks that operate on large datasets already cached on a subset of workers will be prioritized for those workers to minimize transfers.
+- Heterogeneous clusters
+  - Workers with more memory or faster CPUs may receive higher-cost tasks if the data locality and resource fit justify the assignment.
+- Steady-state balancing
+  - Work-stealing attempts to keep all workers busy by moving tasks away from heavily loaded workers to idle ones, improving overall utilization.
+
+Built-in extensions (representative examples)
+- WorkStealing: enables dynamic redistribution of tasks across workers to balance load.
+- ShuffleSchedulerPlugin: provides an alternate task placement strategy aimed at improving distribution characteristics.
+- SpansSchedulerExtension, MemorySamplerExtension, and others: augment scheduling with additional capabilities (monitoring, diagnostics, or data-aware policies).
+
+Illustrative example (conceptual)
+- A ready task A has inputs that reside on Worker X. Worker X has ample memory but is near capacity on CPU. A second ready task B has smaller data transfers but would require moving its inputs to any worker. The scheduler evaluates both tasks against the available workers, prioritizes A for Worker X due to locality, but may pick a different worker for B if locality or resource profiles favor it and if stealing or balancing logic suggests rebalancing.
+
+Notes
+-----
+
+- The policies described here are implemented via a pluggable extension mechanism. The default configuration includes extensions such as WorkStealing and Shuffle, which influence both task and worker preferences.
+- Internal data structures referenced by these policies include per-task states, ready queues with computed priorities, and worker state (resources, locality, and memory usage).
+- For deeper insight into the scheduler’s decision-making process, enable scheduler debugging logs and inspect the behavior of the active extensions in your cluster.
+
+See also
+--------
+
+- Extensions and plugin system (e.g., WorkStealing, Shuffle) for concrete implementations of scheduling heuristics.
+- Internal task and worker state representations (TaskStateState, ready-queue, and per-worker resource tracking) used by the policies.

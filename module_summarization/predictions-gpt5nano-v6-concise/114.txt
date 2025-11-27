@@ -1,0 +1,240 @@
+# Simulation utilities: Raster plotting, plan summarization, and limit checking
+
+This document provides developer-focused guidance for using and extending the three utilities exposed in the simulation module:
+
+- plot_raster_path(plan, x_motor, y_motor, ax=None, probe_size=None, lw=2)
+- summarize_plan(plan) (and the alias print_summary)
+- check_limits(plan)
+
+The utilities are designed to work with Bluesky-style plans that yield Msg objects and to assist in visualizing, inspecting, and validating plans that drive motor positions.
+
+---
+
+## API reference
+
+### plot_raster_path(plan, x_motor, y_motor, ax=None, probe_size=None, lw=2)
+
+Plot a raster path described by a plan.
+
+- Parameters
+  - plan: iterable
+    - Must yield Msg objects and not be a coroutine.
+  - x_motor, y_motor: str
+    - Names of the x and y motors (matched against `msg.obj.name`).
+  - ax: matplotlib.axes.Axes, optional
+    - Axes to plot on. If None, a new figure/axes is created.
+  - probe_size: float, optional
+    - If provided, draw probes as circles with this radius (in the same units as motor positions).
+    - If None, read points are plotted as markers at each event.
+  - lw: float, optional
+    - Line width for the path between points.
+
+- Returns
+  - A dictionary with:
+    - `'path'`: the Path2D object returned by the line plot.
+    - `'events'`: either a PathCollection of read points (if `probe_size` is None) or a PatchCollection of circles (if `probe_size` is provided).
+
+- Behavior and notes
+  - The function walks through the plan and tracks the latest values for the x and y motors when it encounters `Msg` objects with `command == 'set'` and `obj.name` matching the given motor names.
+  - When it encounters a `Msg` with `command == 'save'`, it records the current (x, y) as a trajectory point.
+  - The function then plots the trajectory and either scatter points or circular probes.
+  - If the first relevant `set` messages occur before a `'save'`, the trajectory may start with `(None, None)` values unless the plan provides valid values in the expected order.
+  - The function assumes motor positions are numeric.
+
+- Example
+  - A minimal example demonstrates how to plot a raster path from a simple plan of Msg objects. See the Examples section for a runnable snippet using a small mock plan.
+
+---
+
+### summarize_plan(plan)
+
+Print a minimal textual summary of a plan, showing moves and where events are created.
+
+- Parameters
+  - plan: iterable
+    - Must yield Msg objects.
+
+- Returns
+  - None. The function prints a compact summary to stdout via the Bluesky `print_summary_wrapper`.
+
+- Implementation notes
+  - Internally uses `print_summary_wrapper(plan)` to generate a compact representation, then consumes it (the body intentionally contains a no-op placeholder to preserve the generator usage pattern).
+
+- alias
+  - `print_summary` is available as a back-compat alias for `summarize_plan`.
+
+- Example
+  - Basic usage:
+    ```python
+    summarize_plan(plan)
+    # or
+    print_summary(plan)
+    ```
+
+- Caution
+  - The output depends on how the plan is yielded and on the behavior of `print_summary_wrapper`.
+
+---
+
+### check_limits(plan)
+
+Validate that a plan will not move devices outside of their limits.
+
+- Parameters
+  - plan: iterable
+    - Must yield Msg objects.
+
+- Behavior
+  - Iterates through the plan; for each message with `command == 'set'` and not in the `ignore` list:
+    - If the associated object has a `check_value` method, it is called with the proposed value `msg.args[0]`.
+    - If the object does not provide `check_value`, a warning is emitted, and the object is added to the `ignore` list to avoid repeated warnings.
+  - Warnings are emitted via `warnings.warn`.
+
+- Notes
+  - This function does not mutate the plan; it only validates potential safety of the proposed values.
+  - If a device object has a `check_value` method, that method is used to perform per-value limit checks.
+  - If no `check_value` is available, the function warns and then ignores further checks for that object.
+
+- Example
+  - A plan with an object that provides `check_value` will be validated against its limits; objects without `check_value` will generate a warning.
+
+  ```python
+  from bluesky.msg import Msg
+
+  class DummyDevice:
+      def __init__(self, name, vmin, vmax):
+          self.name = name
+          self.vmin = vmin
+          self.vmax = vmax
+      def check_value(self, v):
+          if not (self.vmin <= v <= self.vmax):
+              raise ValueError(f"Value {v} out of bounds for {self.name}")
+
+  x = DummyDevice('x', 0.0, 5.0)
+  y = DummyDevice('y', -2.0, 2.0)
+
+  plan = [
+      Msg('set', x, (3.0,)),
+      Msg('set', y, (1.0,)),
+      Msg('save', x, ()),
+  ]
+
+  check_limits(plan)
+  ```
+
+---
+
+## Usage examples
+
+The following examples demonstrate typical usage patterns with simple, self-contained plans. They assume Bluesky Msg objects and minimal device mocks.
+
+- Example 1: Plot a raster path from a simple plan
+
+  ```python
+  from bluesky.msg import Msg
+
+  class DummyDevice:
+      def __init__(self, name):
+          self.name = name
+
+  # Simple devices with names 'x' and 'y'
+  x = DummyDevice('x')
+  y = DummyDevice('y')
+
+  # Construct a tiny plan that sets x/y and saves positions
+  plan = [
+      Msg('set', x, (0.0,)),
+      Msg('set', y, (0.0,)),
+      Msg('save', None, ()),
+      Msg('set', x, (1.0,)),
+      Msg('set', y, (2.0,)),
+      Msg('save', None, ()),
+  ]
+
+  # Plot (no axis provided; a new figure is created)
+  out = plot_raster_path(plan, 'x', 'y', probe_size=None, lw=2)
+  ```
+
+- Example 2: Print a summary of a plan
+
+  ```python
+  # Assuming `plan` is defined as above (or any iterable of Msg)
+  summarize_plan(plan)
+  # or
+  print_summary(plan)
+  ```
+
+- Example 3: Check device limits for a plan
+
+  ```python
+  check_limits(plan)
+  ```
+
+Note: In real usage, the plan typically comes from Bluesky’s RunEngine, and Msg objects include richer state (e.g., complete device objects and time stamps). The examples here use lightweight dummy objects to illustrate the expected shapes.
+
+---
+
+## Implementation details and considerations
+
+- plan expectations
+  - plot_raster_path and summarize_plan expect plan to yield Msg objects.
+  - The functions are not designed to handle coroutines or non-Msg iterables.
+
+- Msg structure (as used by these utilities)
+  - msg.command: string, e.g., `'set'` or `'save'`
+  - msg.obj: the object associated with the message; must have a `.name` attribute for `plot_raster_path`
+  - msg.args: tuple of positional arguments; the first element for `'set'` is the numeric value to assign
+
+- plot_raster_path details
+  - It accumulates trajectory points at each `'save'` event.
+  - When `probe_size` is None, read points are plotted as markers; otherwise, a collection of circles is rendered at trajectory points.
+  - The function sets the aspect ratio to 'equal' to preserve spatial relationships.
+
+- summarize_plan details
+  - Uses Bluesky’s `print_summary_wrapper` to render a concise plan summary.
+  - The function iterates over the wrapper’s output, but the body is a no-op, relying on the wrapper’s side effects (printing).
+
+- check_limits details
+  - If a device has a `check_value` method, that method is invoked with the proposed value.
+  - If not, a warning is emitted and the device is added to an ignore list to avoid repeated warnings.
+
+---
+
+## Development and testing guidance
+
+- Unit tests
+  - Create lightweight Msg objects that mirror the essential attributes (`command`, `obj.name`, `args`).
+  - Test `plot_raster_path` with a plan containing a mix of `set` and `save` messages, verifying:
+    - The returned dict contains `'path'` and `'events'`.
+    - The plotted trajectory length matches the number of `save` events.
+    - The axis labels reflect `x_motor` and `y_motor`.
+  - Test `summarize_plan` with a synthetic plan and capture stdout to verify a summary is produced.
+  - Test `check_limits` with devices that implement `check_value` and with devices that do not, ensuring warnings are emitted in the latter case.
+
+- Mocking and fixtures
+  - Use small dummy objects with a `.name` attribute to simulate motor devices.
+  - For `check_limits`, provide a device with a known range to confirm correct behavior and an object without `check_value` to verify warnings.
+
+- Dependencies
+  - These utilities rely on matplotlib for plotting and Bluesky’s Msg structure (e.g., `msg.command`, `msg.obj.name`, `msg.args`).
+  - The summarization path relies on Bluesky’s `print_summary_wrapper`.
+
+---
+
+## Compatibility and notes
+
+- Python compatibility: code is Python 3.x (as used with Bluesky and matplotlib).
+- Matplotlib requirements: the plotting path uses standard Matplotlib APIs (`plot`, `scatter`, and collections).
+- Bluesky expectations: Msg objects with `command`, `obj`, and `args` attributes; `obj` must have a `name` attribute for plotting.
+
+---
+
+## See also
+
+- Bluesky: print_summary_wrapper
+- Bluesky Msg structure and typical plan composition
+- matplotlib.collections.PatchCollection and matplotlib.patches.Circle for probe rendering
+
+---
+
+If you’d like, I can tailor this documentation to match the exact formatting/style of your simulation.rst (RST) or convert it to a concise RST block suitable for inclusion.

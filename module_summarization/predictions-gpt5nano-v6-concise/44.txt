@@ -1,0 +1,218 @@
+# Azure Storage Library Provider Documentation
+
+This document documents the AzureStorageLibraryProvider class, a library provider that reads items from a Microsoft Azure Storage container. It explains configuration, usage, internals, and examples to help developers integrate and use this provider effectively.
+
+---
+
+## Overview
+
+AzureStorageLibraryProvider is a library provider that sources its catalog and file contents from an Azure Storage container (Blob Storage). It supports both public containers and containers protected by Access Policies and SAS tokens.
+
+Key features:
+- Builds a navigable model of container blobs as a directory-like tree.
+- Lists directory contents and reads blob data via HTTP(S) requests.
+- Optional local caching of blob contents and ETag handling for efficient revalidation.
+- Intended to be used within the ASAB library framework (inherits from `LibraryProviderABC`).
+
+Configuration notes:
+- The provider URL must begin with `azure+` and be followed by the Azure Blob Storage container URL.
+- If the container is not publicly accessible, a SAS token can be supplied in the URL query string.
+- Optional local cache directory can be configured (true/false or a path).
+
+---
+
+## Class and API
+
+### AzureStorageLibraryProvider
+
+Inherits from `LibraryProviderABC`. The instance is created with:
+- `library`: The parent library object.
+- `path`: A URL-like string starting with `azure+`, representing the container URL (and SAS if needed).
+- `layer`: The layer to which this provider belongs.
+
+Key behavior:
+- On initialization, parses the URL portion after `azure+`.
+- Schedules an asynchronous startup task to load the directory model from the container.
+- Builds an in-memory model of the container’s blobs as a tree of directories and items.
+- Provides asynchronous methods to list directory contents and read blob data.
+
+Core attributes:
+- `URL`: Parsed URL of the target container.
+- `Model`: In-memory model of the container contents (constructed by `_load_model`).
+- `Path`: Original `path` string used to configure the provider.
+- `CacheDir`: Optional path for local caching. Can be `None` (disabled), a system temp-derived path (when config is `true`), or a user-specified path.
+
+Notes:
+- The directory cache is prepared if caching is enabled.
+- The startup method (`_start`) loads the model and marks the provider as ready.
+- The internal model uses helper classes (e.g., `AzureDirectory`, `AzureItem`) to represent directories and blobs; these are only touched via the provider’s logic.
+
+---
+
+## Configuration
+
+Configure Azure storage access and caching in your library’s configuration.
+
+- Location: `[library]` section (as used by `Config.get("library", "azure_cache")`).
+- Option: `azure_cache`
+  - `false`: Disable caching (no local cache is used).
+  - `true`: Enable caching in a temporary directory, unique per provider instance.
+  - `<path>`: Use a user-specified directory path for caching. The provider ensures the directory exists.
+
+Example configurations (RST-like config format for clarity):
+
+- Disable caching
+  - azure_cache = false
+
+- Enable caching in a temp directory
+  - azure_cache = true
+
+- Use a custom cache directory
+  - azure_cache = /path/to/cache/dir
+
+Provider URL format:
+- The `path` passed to the provider must start with `azure+`, followed by the Azure Blob Storage URL (including container and optional SAS token).
+- Example:
+  - path = "azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER"
+  - With SAS token (when necessary):
+    - path = "azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER?sv=2020-10-02&si=XXXX&sr=c&sig=XXXXXXXXXXXXXX"
+
+Important notes:
+- If the container’s public access level is not set to Public, you must supply read/list access via an Access Policy or SAS (as shown in the example).
+- When SAS is used, the URL’s query string must be preserved in requests to access blobs.
+
+---
+
+## How it works
+
+### Startup
+
+- The provider schedules `_start()` as an asynchronous task.
+- `_start()` calls `_load_model()` to build the in-memory representation of the container’s contents.
+- If a model is successfully built, `_start()` calls `_set_ready()` to mark the provider as ready for use.
+
+### Loading the model (`_load_model`)
+
+- Constructs a REST call to list container contents:
+  - GET to: `[container_url]?restype=container&comp=list`
+  - This uses the `aiohttp` client.
+- On HTTP 200, parses the XML response (via `xml.dom.minidom`).
+- Builds a hierarchical model (directories and items) from the blob names:
+  - Each blob name is split by `/` to form directory levels.
+  - A directory node is created as needed.
+  - The blob becomes an `AzureItem` under the final directory.
+- Stores the result in `self.Model` as a tree of `AzureDirectory` and `AzureItem`.
+- Logs a warning if the list operation fails.
+
+### Listing items (`list`)
+
+- Accepts a path that must start with `/`, with no double slashes and no trailing slash (except root `/`).
+- Traverses `self.Model` according to the path parts.
+- Raises `RuntimeError("Not ready")` if the model hasn’t loaded yet.
+- Raises `KeyError` if the path does not exist or does not refer to a directory.
+- Returns a list of `LibraryItem` entries for the current directory’s children.
+
+### Reading an item (`read`)
+
+- Accepts a blob path (must satisfy the same path rules as `list`).
+- Uses a cache key derived from the SHA-256 hash of the path.
+- If caching is enabled, reads a local ETag from `<cachedir>/<etag>` (if available) and sends an `If-None-Match` header to the server.
+- Performs GET to retrieve the blob content:
+  - URL base: same container URL, with the blob path appended.
+  - If response is 200, uses the returned data.
+  - If a cached version is available and the server responds with 304 Not Modified, the provider can serve the local cached content.
+- If caching is enabled and an ETag is provided, writes the new content to the cache and updates the `.etag` file.
+
+Notes:
+- The code snippet for `read` is incomplete in the provided sample; the documented behavior is based on the implemented caching logic and standard HTTP caching semantics (ETag/If-None-Match).
+- The method returns an IO-like object (as per the typing annotation `typing.IO`), suitable for reading blob data.
+
+---
+
+## Usage examples
+
+These examples illustrate typical usage patterns from a developer perspective. They assume integration with the ASAB library framework and its asynchronous event loop.
+
+1) Basic provider setup (no caching)
+
+- Configuration:
+  - azure_cache = false
+- Purpose: Read from a public container or one secured with SAS in the URL, without local caching.
+
+Code sketch:
+- Create provider with path: "azure+https://ACCOUNT.blob.core.windows.net/CONTAINER"
+- Use `await provider._start()` or rely on the library’s startup mechanism to run the coroutine.
+
+2) Enable caching with a custom directory
+
+- Configuration:
+  - azure_cache = /var/cache/asab.azure
+- Purpose: Cache blobs locally to speed repeated reads and reduce network usage.
+
+Code sketch:
+- Set up provider with path as in (1); on first read, data is cached in the specified directory.
+- Subsequent reads may serve data from cache if the server reports unchanged (ETag handling).
+
+3) List root contents and read a blob
+
+Code sketch (high level):
+
+- items = await provider.list('/')
+  - items is a list of LibraryItem with properties like name and type
+- for item in items:
+  - if item.type == 'dir': list(item.name) to explore subdirectories
+  - else: data = await provider.read(item.name)  # returns a file-like object
+  - with data as f:
+      contents = f.read()
+      process(contents)
+
+4) Using SAS token in URL
+
+- path = "azure+https://ACCOUNT.blob.core.windows.net/CONTAINER?sv=2020-10-02&si=XXXX&sr=c&sig=XXXXXXXXXXXXXX"
+- This enables access to non-public containers with explicit permissions.
+
+---
+
+## Error handling and behavior
+
+- Not ready: If `_load_model` has not completed or failed, `list()` raises `RuntimeError("Not ready")`.
+- Missing path: If a listed path does not exist or is not a directory, `list()` raises a `KeyError`.
+- Read errors: Network or HTTP errors during `read()` lead to appropriate HTTP-related exceptions raised by `aiohttp` or custom handling in the implementation.
+- Caching: If cache is disabled or the cache directory cannot be created, cache-related functionality simply does not execute.
+
+---
+
+## Integration tips
+
+- Ensure the environment has required dependencies:
+  - aiohttp for asynchronous HTTP requests
+  - xml.dom.minidom for XML parsing (part of Python standard library)
+- Ensure the library’s configuration mechanism is correctly wired to supply the `azure_cache` option.
+- When using SAS tokens, keep token security in mind; tokens often have expiration times and scoped permissions.
+- This provider is designed to be used within the ASAB framework; it relies on the framework for lifecycle management, event loop integration, and scheduling.
+
+---
+
+## Troubleshooting
+
+- If listing or reading fails with “Not ready”:
+  - Verify that the provider has successfully loaded the model.
+  - Check logs for errors emitted during `_load_model` or `_start()`.
+- If no items appear under a directory:
+  - Verify container contents and blob names; ensure XML parsing succeeded.
+  - Check that blob names contain hierarchical separators and that the code builds directories accordingly.
+- If caching does not appear to work:
+  - Confirm `azure_cache` is enabled (true or a valid path) and the process has write permissions to the cache directory.
+  - Verify ETags are being retrieved from responses; ensure the server returns ETag headers.
+
+---
+
+## References and related concepts
+
+- Azure Blob Storage REST API: listing containers and blobs with `restype=container&comp=list`
+- HTTP caching: ETag and If-None-Match semantics
+- ASAB library provider interface: `LibraryProviderABC`, `LibraryItem`, and expected provider lifecycle
+
+---
+
+If you need adjustments to align with your project’s specific conventions for documentation (RST style, additional sections, or different terminology), I can tailor this content accordingly.

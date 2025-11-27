@@ -1,0 +1,155 @@
+How Mitogen Works
+===================
+
+Overview
+--------
+
+Mitogen provides a lightweight, extensible messaging backbone that enables execution and data exchange across process or machine boundaries. A small bootstrap module is shipped to every new slave context, which then establishes the full capability set used by the master to load modules, call functions, forward logs, and manage routing.
+
+Key ideas
+- Master and slave contexts communicate through a minimal, well-defined protocol built from small, numeric message types.
+- A central Router and a set of Routes determine how messages are delivered to the appropriate receiver (module, service, or context).
+- A sentinel value signals disconnection or unroutable messages, allowing the router to clean up and recover gracefully.
+- The bootstrap module implements core functionality in a compact form to minimize the size of the remote payload.
+
+Core Protocol and Message Types
+--------------------------------
+
+Mitogen defines a compact protocol using a small set of numeric message types. Each message carries a type identifier and payload that the receiver interprets to perform an action.
+
+Enumerated message types (values shown are their constants):
+- GET_MODULE (100)
+- CALL_FUNCTION (101)
+- FORWARD_LOG (102)
+- ADD_ROUTE (103)
+- DEL_ROUTE (104)
+- ALLOCATE_ID (105)
+- SHUTDOWN (106)
+- LOAD_MODULE (107)
+- FORWARD_MODULE (108)
+- DETACHING (109)
+- CALL_SERVICE (110)
+- STUB_CALL_SERVICE (111)
+
+How these are used
+- GET_MODULE and LOAD_MODULE instruct a slave to locate, load, or reuse a module.
+- CALL_FUNCTION and CALL_SERVICE perform remote execution or service invocations.
+- FORWARD_LOG propagates log records from a remote context to the master.
+- ADD_ROUTE and DEL_ROUTE modify how messages are delivered by the Router.
+- ALLOCATE_ID assigns identifiers used to track objects or requests across contexts.
+- SHUTDOWN and DETACHING request graceful teardown or notify that a context is exiting.
+- FORWARD_MODULE and STUB_CALL_SERVICE enable modular loading and proxying of service calls.
+
+Routing, Dead Signals, and Robustness
+-------------------------------------
+
+IS_DEAD sentinel
+- IS_DEAD (value 999) signals that a remote receiver is disconnected or cannot be routed.
+- It appears in the reply_to field to indicate that the sender should stop delivering messages to that destination.
+- When received, it typically triggers cleanup in the Router and prevents further attempts to route to the dead target.
+
+Routing model
+- The Router maintains a set of routes that map destinations to recipients (modules, services, or contexts).
+- When a route is missing or a destination dies, Mitogen uses IS_DEAD to propagate a reliable shutdown/cleanup signal.
+- The ADD_ROUTE and DEL_ROUTE messages mutate the routing table at runtime, enabling dynamic topology changes.
+
+Environment, Compatibility, and Portability
+--------------------------------------------
+
+Python version handling
+- The code distinguishes Python 2 and Python 3 at runtime.
+- PY24 indicates Python 2.4-era features; PY3 indicates Python 3.x.
+- Type aliases provide consistent handling across Python versions:
+  - BytesType and UnicodeType distinguish binary vs. text data.
+  - BufferType provides a memoryview-based buffer abstraction on Python 3 and an appropriate buffer type on Python 2.
+
+Encoding and buffers
+- MITOGEN uses a Latin-1 codec alias (LATIN1_CODEC) to safely encode/decode single-byte data without involving a full Unicode codec path.
+- Buffer handling is expressed via BufferType, returning a memoryview slice on Python 3 for zero-copy data access, or the native buffer type on older Python versions.
+- Any text data exchanged over the protocol can be carried as either bytes or str, with the AnyTextType alias representing both.
+
+Cross-cutting concerns
+- The code suppresses a deprecation warning for the imp module, reflecting historical compatibility concerns.
+- Absolute imports for select are used to reduce import-time surprises across Python versions.
+- Warnings are configured to avoid noise related to profiling or other non-fatal conditions.
+
+Bootstrap and Initialization
+----------------------------
+
+Bootstrap module as the remote starter
+- The module shown here is designed to run in the slave context as the bootstrap implementation.
+- It implements most package functionality but intentionally remains separate from non-essential code to reduce its size.
+- This bootstrap sits in every new slave context to set up the full Mitogen runtime without requiring the entire master-side code to be shipped.
+
+Operational model
+- The master negotiates work via the Router and a set of Routes to push work to the slave(s).
+- A slave loads requested modules, executes functions, and forwards logs back to the master.
+- As new routes are added or removed, the Router adapts to changes in topology, enabling dynamic orchestration.
+
+Platform Nuances and Observability
+----------------------------------
+
+WSL detection
+- Mitogen detects Windows Subsystem for Linux by inspecting /proc/sys/kernel/osrelease.
+- If Microsoft is present in the osrelease, IS_WSL is set to True, enabling platform-specific handling where needed.
+
+Logging
+- Two loggers are configured:
+  - LOG for general Mitogen events
+  - IOLOG for I/O-related events
+- IOLOG is set to the INFO level to provide visibility into runtime data exchange without overwhelming normal logs.
+
+Default I/O and buffering considerations
+- A default, high-performance buffer size (around 128 KiB) is described as a sweet spot in the design notes.
+- This size influences:
+  - The efficiency of Side.read/Side.write operations
+  - The size of buffers used in socketpair-backed communication
+  - The balance between CPU usage and memory consumption on both sides
+- System-specific constraints (like pipe buffer sizes) are considered when choosing these defaults.
+
+Code-level Considerations for Advanced Users
+--------------------------------------------
+
+Practical patterns you’ll encounter
+- Route management: Add or delete routes at runtime to reflect changing topology or failover scenarios.
+- Module loading: Use LOAD_MODULE to load code on a remote slave; subsequent CALL_FUNCTIONs can invoke that code.
+- Logging routing: FORWARD_LOG streams remote logs to the master for centralized observability.
+
+Guidance
+- Keep routes up to date; stale routes may trigger IS_DEAD and cleanup paths.
+- Prefer detachment and controlled shutdown (DETACHING, SHUTDOWN) to avoid abrupt termination and resource leaks.
+- When targeting cross-version environments, rely on the provided type aliases and buffer abstractions to maintain consistent behavior.
+
+Examples (conceptual)
+- Request a module load on a slave:
+  - Master sends LOAD_MODULE with the target module name.
+  - Slave loads the module and establishes a route for future messages.
+- Call a function remotely:
+  - Master issues CALL_FUNCTION with a reference to the loaded module and the function to execute.
+  - Slave executes and returns results or raises an error, delivered back through the same path.
+
+Notes and Assumptions
+---------------------
+
+- The bootstrap module is intentionally compact to minimize the payload delivered to new slave contexts.
+- The protocol is designed to be extensible; new message types can be added by extending the numeric namespace and corresponding handling logic.
+- The IS_DEAD sentinel helps ensure clean teardown in partially connected or partially failed topologies.
+
+Key Constants at a Glance
+-------------------------
+
+- GET_MODULE = 100
+- CALL_FUNCTION = 101
+- FORWARD_LOG = 102
+- ADD_ROUTE = 103
+- DEL_ROUTE = 104
+- ALLOCATE_ID = 105
+- SHUTDOWN = 106
+- LOAD_MODULE = 107
+- FORWARD_MODULE = 108
+- DETACHING = 109
+- CALL_SERVICE = 110
+- STUB_CALL_SERVICE = 111
+- IS_DEAD = 999
+
+This document describes how Mitogen works at a high level, focusing on the bootstrap behavior, the core protocol, routing, and cross-version considerations. For implementation details, refer to the code paths that implement the message handling, routing, and module loading logic.

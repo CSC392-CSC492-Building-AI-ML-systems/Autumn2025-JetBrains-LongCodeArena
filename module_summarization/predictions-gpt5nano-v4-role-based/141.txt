@@ -1,0 +1,149 @@
+Connect to remote data
+======================
+
+This document describes the capabilities and usage of the remote data connection code, focusing on how to connect to remote data sources, read data in chunks, and work with samples and metadata. The primary entry point is the read_bytes function, which orchestrates remote file access through fsspec, supports glob patterns, multiple files, and optional compression handling, and returns data as Delayed objects suitable for Dask workflows.
+
+Overview
+--------
+
+- Connect to remote data sources via fsspec-compatible protocols (e.g., s3://, hdfs://, gs://) or local paths.
+- Read one or more files in configurable blocks, enabling parallel or delayed processing with Dask.
+- Optional splitting of data into blocks aligned to a delimiter (e.g., newline) to ensure block integrity.
+- Support for compressed data, with restrictions on chunked reads for compressed files.
+- Optional inclusion of the source path with the data blocks and retrieval of a sample header.
+- Returns:
+  - sample: a bytes object containing a header sample (or None if not requested)
+  - blocks: a list of lists of delayed objects, one sublist per file; each delayed computes to a block of bytes
+  - paths (optional): the corresponding file paths if include_path is True
+
+Key concepts
+------------
+
+- Filesystem abstraction: All access is mediated through fsspec, allowing uniform access to various remote filesystems.
+- Delayed execution: Per-block reads are constructed as Dask Delayed objects, enabling lazy, parallelized computation.
+- Block alignment: When blocksize is provided, reads are partitioned into blocks with careful alignment to delimiters if specified.
+- Compression handling: If compression is set to "infer" or a specific type, the code enforces that chunked reads are not performed on compressed files.
+- Sampling: A header sample can be read from the first file to infer schema or metadata without loading full data.
+
+API surface
+-----------
+
+read_bytes(urlpath, delimiter=None, not_zero=False, blocksize="128 MiB", sample="10 kiB",
+           compression=None, include_path=False, **kwargs)
+
+- urlpath: str or list/tuple/os.PathLike
+  - A path or pattern (e.g., 'data/2015-*-*.csv', 's3://bucket/data/*.csv').
+  - Can include multiple files; all files must share the same protocol.
+- delimiter: bytes or None
+  - Optional delimiter to split blocks, e.g., b'\n'.
+  - When provided, blocks are formed to end at a delimiter boundary.
+- not_zero: bool
+  - If True, skip the header by advancing the start offset to skip the first byte and adjusting the block length.
+- blocksize: int or str or None
+  - Size of each block in bytes. Accepts strings like "128 MiB".
+  - If None, perform non-chunked reads (one block per file).
+- sample: int, str, bool
+  - Whether or not to return a header sample.
+  - False means no sample; True uses a default of "10 kiB" for backward compatibility.
+  - If str or int, interpreted as a byte size (e.g., "1 MiB" or 2**20).
+- compression: str or None
+  - Compression type (e.g., 'gzip', 'xz', 'bz2') or None.
+  - If compression is 'infer', the code will attempt to detect compression from the file extension.
+  - Chunked reads are not allowed for compressed files unless blocksize is None.
+- include_path: bool
+  - If True, include the original file path alongside each block in the return.
+- kwargs: dict
+  - Storage-specific options (e.g., host, port, username, password) passed to fsspec via storage_options.
+
+Return values
+-------------
+
+- sample: bytes
+  - The header sample read from the first file (or None if no sample requested).
+- blocks: list[list[delayed]]
+  - For each input file, a list of Delayed objects. Each delayed computes to a block of bytes from that file.
+  - The outer list corresponds to input files; the inner list contains the per-file blocks.
+- paths: list[str] (only if include_path is True)
+  - The corresponding paths for each file, matching the structure of blocks.
+
+How it works (high level)
+-------------------------
+
+1. Validate input type (str, list/tuple, or os.PathLike).
+2. Use get_fs_token_paths(urlpath, mode="rb", storage_options=kwargs) to obtain:
+   - fs: an fsspec filesystem instance
+   - fs_token: a token used for naming and cache purposes
+   - paths: resolved absolute file paths
+3. If no paths are resolved, raise an OSError.
+4. Normalize and validate blocksize:
+   - If blocksize is a string, convert to bytes.
+   - If blocksize is None, plan to read whole files without chunking.
+   - If a blocksize is provided and compression is set to "infer" (or any compression), raise an error since chunked reads aren’t supported for compressed data.
+5. Compute per-file offsets and lengths for chunked reads:
+   - For each path, determine the file size via fs.info(path)["size"].
+   - If size is None, raise an error.
+   - If size is 0, skip (empty file).
+   - Otherwise, partition the file into blocks, attempting to evenly distribute blocks across the file, with adjustments to align boundaries.
+   - If not_zero is True, skip the first byte of the first block.
+6. Build per-file delayed read tasks:
+   - For each file, generate a unique token with tokenize(fs_token, delimiter, path, fs.ukey(path), compression, offset).
+   - Create a Delayed object for each offset using read_block_from_file(OpenFile(fs, path, compression=compression), off, l, delimiter).
+   - Collect these into a list per-file and append to the overall output.
+7. Read sample header:
+   - If sample is requested, read from the first file (without seeking if starting at zero unless required by the delimiter logic).
+   - If delimiter is None, read the requested sample size directly.
+   - If a delimiter is provided, read until the first delimiter after the initial chunk to complete a boundary.
+8. Return:
+   - sample
+   - blocks (list of per-file lists of Delayed objects)
+   - paths (only if include_path is True)
+
+Practical examples
+------------------
+
+- Read all CSV blocks from a remote S3 bucket with newline-delimited records, returning a sample header:
+  - sample, blocks = read_bytes('s3://bucket/data/*.csv', delimiter=b'\\n')
+- Read blocks across multiple local files, ensuring each block boundary ends on a newline:
+  - sample, blocks = read_bytes('data/2020-*/part-*.csv', delimiter=b'\\n')
+- Include the source paths for each block:
+  - sample, blocks, paths = read_bytes('data/2020-*/part-*.csv', delimiter=b'\\n', include_path=True, compression=None, blocksize='64 MiB')
+- Read with a specific blocksize and no sampling:
+  - blocks = read_bytes('data/*.csv', blocksize='128 MiB', sample=False)
+
+Notes and caveats
+-----------------
+
+- Compression and chunking:
+  - If compression is set to 'infer' or a specific type, and you request chunked reads (blocksize not None), a ValueError will be raised. To read in chunks with a compressed file, set blocksize=None.
+- File size discovery:
+  - Chunked reads rely on knowing the file size from the filesystem. If the filesystem cannot determine size (size is None), chunked reads are not possible and you must set blocksize=None.
+- Delimiter-aware reads:
+  - When a delimiter is provided, blocks are formed so that the end of a block coincides with a delimiter boundary, ensuring records or logical units are not split in the middle.
+- Not zero:
+  - The not_zero flag allows skipping the first byte of the first block (e.g., to skip a header row). This is done by adjusting the first offset and block length accordingly.
+- Remote storage options:
+  - Pass storage options via kwargs (e.g., host, port, username, password) to configure the remote filesystem (e.g., S3 credentials, HDFS user settings, etc.).
+- Return shape:
+  - The blocks structure is a list with one inner list per input path. Each inner list contains Delayed objects representing the data blocks for that file.
+- Error handling:
+  - If an input path resolves to no files, an OSError is raised.
+  - If a path is not a string, os.PathLike, or a sequence of paths, a TypeError is raised.
+
+Implementation notes (conceptual)
+-------------------------------
+
+- The code uses fsspec to resolve the filesystem, token, and list of paths.
+- A per-file block strategy computes offsets and lengths for chunked reads, ensuring alignment and efficient I/O.
+- Delayed objects are created with unique keys to enable effective task graph caching and reuse.
+- The OpenFile wrapper abstracts closing semantics and ensures the correct compression mode is used for streaming reads.
+- Sample extraction reads from the first file, respecting delimiter handling to land on a boundary.
+
+Related concepts
+--------------
+
+- fsspec: Unified interface to local and remote filesystems.
+- Dask Delayed: Lays out computations as lazy graph nodes for parallel execution.
+- Read-block utilities: read_block_from_file is used to fetch specific byte ranges with proper handling of delimiters.
+- Tokenization and caching: tokenize is used to generate stable, unique keys for each block/read operation.
+
+If you need further customization (e.g., support for additional delimiters or advanced compression workflows), you can extend read_bytes by adjusting the block construction logic or integrating additional compression handlers.

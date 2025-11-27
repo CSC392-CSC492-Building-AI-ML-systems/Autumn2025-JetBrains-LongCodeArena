@@ -1,0 +1,143 @@
+FleurXMLModifier
+================
+
+Overview
+--------
+
+FleurXMLModifier is a low-level utility for organizing and grouping changes to a Fleur input file (inp.xml) in a robust, batched manner. It serves as a low-level counterpart to higher-level modifiers (e.g., FleurinpModifier) and relies on the established XML setter interfaces provided by masci_tools.util.xml.
+
+Key ideas
+
+- Changes are not applied immediately. Instead, they are collected as tasks and executed in a single pass.
+- Setter methods are dynamically exposed and grouped into three categories based on how they modify the XML:
+  - XPath-based setters (XPATH_SETTERS)
+  - Schema dictionary setters (SCHEMA_DICT_SETTERS)
+  - NMMPMAT (local orbital/nmmpmat) setters (NMMPMAT_SETTERS)
+- The class is designed to be extensible: extra setter functions can be merged into the standard sets via _extra_functions.
+
+Core concepts
+
+- ModifierTask: A lightweight record describing a single modification task.
+  - name: name of the setter method to invoke
+  - args: positional arguments (tuple)
+  - kwargs: keyword arguments (dict)
+
+- FleurXMLModifier collects tasks in self._tasks and applies them later through a dynamic facade (get_avail_actions), which maps the setter names to concrete callable implementations.
+
+Public API
+----------
+
+Note: The documented methods reflect the interface visible in the code snippet and accompanying class docstring. Setter methods (e.g., set_inpchanges, shift_value, set_species) come from the XML setter modules and are not defined directly in FleurXMLModifier; they are dynamically exposed via the dictionaries built from XPATH_SETTERS, SCHEMA_DICT_SETTERS, NMMPMAT_SETTERS.
+
+Constructor and class-level behavior
+
+- __new__(cls, validate_signatures=True)
+  - Builds composite action dictionaries on first access:
+    - xpath_functions: combination of _xpath_functions and any extras registered under 'xpath'
+    - schema_dict_functions: combination of _schema_dict_functions and extras under 'schema_dict'
+    - nmmpmat_functions: combination of _nmmpmat_functions and extras under 'nmmpmat'
+  - The extra functions mechanism allows project-wide extension without modifying the core dictionaries.
+
+- __init__(self, validate_signatures: bool = True)
+  - Initializes internal state:
+    - self._tasks: list of ModifierTask
+    - self.validate_signatures: flag controlling potential argument validation
+
+fromList
+
+- classmethod fromList(cls, task_list: list[tuple[str, dict[str, Any]]], *args, **kwargs) -> FleurXMLModifier
+  - Create an instance and immediately populate it with a list of tasks.
+  - Returns the configured FleurXMLModifier instance.
+
+  Example:
+  - fm = FleurXMLModifier.fromList([
+      ('set_inpchanges', {'Kmax': 4.0}),
+      ('shift_value', {'Gmax': 5.0}),
+    ])
+
+add_task_list
+
+- add_task_list(self, task_list: list[tuple[str, dict[str, Any]]]) -> None
+  - Accepts a sequence of (name, kwargs) pairs.
+  - Obtains the available actions via self.get_avail_actions() and invokes each action by name with the provided kwargs.
+  - Raises ValueError if an unknown modification name is encountered.
+
+  Example:
+  - fm.add_task_list([('set_inpchanges', {'Kmax': 4.0}), ('shift_value', {'Gmax': 5.0})])
+
+Validation helpers
+
+- _validate_signature(self, name: str, *args: Any, **kwargs: Any) -> None
+  - Deprecated helper that issues a DeprecationWarning and forwards to _validate_arguments(name, args, kwargs).
+  - Included for backward compatibility; prefer _validate_arguments (not shown in the excerpt) for proper validation.
+
+Internal dispatch: locating the setter function
+
+- _get_setter_function_and_prefix(self, name: str) -> tuple[Callable[[Any], Any], tuple[str, ...]]
+  - Determines which underlying setter function (XPath, schema dict, or NMMPMAT) should be used for a given modification name.
+  - Returns:
+    - func: the callable implementing the modification
+    - prefix: a tuple describing the argument path context used by the setter
+      - ('xmltree',) for XPath setters
+      - ('xmltree', 'schema_dict') for schema dictionary setters
+      - ('xmltree', 'nmmplines', 'schema_dict') for NMMPMAT setters
+  - If the function does not exist, raises a ValueError indicating the setter could not be validated.
+
+Notes on architecture and extensibility
+---------------------------------------
+
+- The core action dictionaries:
+  - _xpath_functions
+  - _schema_dict_functions
+  - _nmmpmat_functions
+- These are populated from:
+  - XPATH_SETTERS
+  - SCHEMA_DICT_SETTERS
+  - NMMPMAT_SETTERS
+- Extra functions can be merged into the respective categories via _extra_functions:
+  - _extra_functions: dict[Literal['xpath','schema_dict','nmmpmat'], dict[str, Callable]]
+- __new__ ensures that, on first instantiation, the class-level action mappings are extended with any registered extras. This enables project-specific extensions without modifying the base dictionaries.
+
+Usage pattern
+-------------
+
+- Create a modifier:
+  - fmode = FleurXMLModifier()
+- Add changes by calling setter-style methods (names correspond to the entries in XPATH_SETTERS, SCHEMA_DICT_SETTERS, NMMPMAT_SETTERS):
+  - fmode.set_inpchanges({'Kmax': 4.0})
+  - fmode.shift_value({'Gmax': 5.0})
+  - fmode.set_species('all-Fe', {'lo': [...]})
+- Combine multiple changes and apply them to an input file in one go:
+  - new_xmltree, additional_files = fmode.modify_xmlfile('/path/to/input/file/inp.xml')
+- Optional: build from a predefined list of tasks:
+  - fm = FleurXMLModifier.fromList([('set_inpchanges', {'Kmax': 4.0})])
+
+Notes and caveats
+-----------------
+
+- The setter methods exposed by FleurXMLModifier come from the XML setter modules. The docstrings for these setters are auto-generated and may be overwritten by a pre-commit hook; changes to the docstrings in this class may be overwritten.
+- The public API relies on a get_avail_actions method (not shown in the excerpt) to enumerate available task names. Unknown task names raised by add_task_list lead to a ValueError.
+- The class is designed to act as a low-level, robust collector of changes and is intended to be used in batch processing of Fleur input files.
+
+Example reference (from the class docstring)
+--------------------------------------------
+
+- Basic usage:
+  - fmode = FleurXMLModifier()
+  - fmode.set_inpchanges({'Kmax': 4.0})
+  - fmode.shift_value({'Gmax': 5.0})
+  - fmode.set_species('all-Fe', {'lo': [{'n':3, 'l': 's', 'type': 'SCLO'},
+                                      {'n':3, 'l': 'p', 'type': 'SCLO'}]})
+  - new_xmltree, additional_files = fmode.modify_xmlfile('/path/to/input/file/inp.xml')
+
+Files and modules referenced
+----------------------------
+
+- masci_tools.util.xml.collect_xml_setters (XPATH_SETTERS, SCHEMA_DICT_SETTERS, NMMPMAT_SETTERS)
+- masci_tools.util.xml.xml_setters_names (set_attrib_value)
+- masci_tools.util.xml.common_functions (clear_xml, eval_xpath_one, get_inpgen_comments, readd_inpgen_comments)
+- masci_tools.util.schema_dict_util (ensure_relaxation_xinclude)
+- masci_tools.io.fleur_xml (load_inpxml)
+- masci_tools.util.typing (XMLFileLike, FileLike)
+
+This documentation focuses on the FleurXMLModifier class, its role, public API, behavior, and how it integrates with the existing XML setter infrastructure.

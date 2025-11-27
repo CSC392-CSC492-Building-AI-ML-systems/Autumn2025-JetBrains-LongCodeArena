@@ -1,0 +1,163 @@
+Fields
+======
+
+This document describes the base Field type used to define model attributes in Tortoise ORM, how fields declare their Python type, and how per-dialect overrides work. It focuses on practical usage and concrete examples.
+
+Constants
+---------
+
+- CASCADE
+- RESTRICT
+- SET_NULL
+- SET_DEFAULT
+
+These strings represent common foreign key actions and are defined here for convenience.
+
+Base Field type
+---------------
+
+The Field class is the foundation for all model fields. It provides basic behavior and a pluggable typing system via a small metaclass.
+
+Key ideas
+- You declare a field by creating a subclass that combines Field with a Python type.
+- The combined bases drive the inferred Python type for the field (field_type).
+- The field_type is set by the metaclass _FieldMeta when you declare a class like Field, or a derived field that mixes Field with a Python type.
+
+Field declaration patterns
+- Simple, explicit Python type via multiple inheritance:
+
+  - Example: create a new integer field
+    .. code-block:: py3
+
+        from tortoise.fields import Field
+
+        class MyInt(Field, int):
+            SQL_TYPE = "INTEGER"
+
+- Flexible typing with multiple Python types (Union)
+  - Example: a field that can hold either int or str
+    .. code-block:: py3
+
+        from typing import Union
+        from tortoise.fields import Field
+
+        class Flexible(Field, int, str):
+            pass
+
+        # field_type becomes Union[int, str]
+
+Constructor and basic validation
+--------------------------------
+
+Field.__init__ parameters (as commonly used in field declarations):
+- source_field: Optional name of the underlying database column if it differs from the field name.
+- generated: Indicates the field is DB-generated.
+- pk: Marks this field as a Primary Key (only one per model is allowed).
+- null: Allows NULL in the database.
+- default: Default value for the field (evaluated on model creation if not provided).
+- unique: Enforces uniqueness in the database.
+- index: Creates an index on this field.
+- description: Optional description (used in tooling and DB comments).
+- model: Optional reference to the owning Model type.
+- Additional keyword arguments are accepted for dialect-specific overrides.
+
+Validation rules enforced at construction time
+- If indexable is False and (unique or index) is requested, a ConfigurationError is raised.
+- If pk and null are both True, a ConfigurationError is raised.
+- If pk is True, index and unique are forced to True.
+
+Value conversion
+----------------
+
+Two helper methods control Python–DB type conversion:
+
+- to_db_value(value, instance)
+  - Converts a Python value to the value suitable for the database.
+  - If value is None or already of the target Python type (field_type), returns value as-is.
+  - Otherwise, it converts via field_type(value).
+
+- to_python_value(value)
+  - Converts a DB value to the Python type.
+  - If value is None or already of the target Python type (field_type), returns value as-is.
+  - Otherwise, it converts via field_type(value).
+
+Usage patterns
+--------------
+
+1) Simple integer field with explicit SQL type
+
+   .. code-block:: py3
+
+      from tortoise.models import Model
+      from tortoise.fields import Field
+
+      class MyInt(Field, int):
+          SQL_TYPE = "INTEGER"
+
+      class User(Model):
+          id = MyInt(pk=True)
+          age = MyInt(null=True, default=18)
+
+   Notes:
+   - field_type is inferred as int via the _FieldMeta metaclass.
+   - You can override SQL_TYPE per dialect if needed.
+
+2) Union/multiple Python types
+
+   .. code-block:: py3
+
+      from tortoise.models import Model
+
+      class Flexible(Field, int, str):
+          pass
+
+      class User(Model):
+          id = Flexible(pk=True)
+          data = Flexible(default=None)
+
+   In this case, field_type is Union[int, str].
+
+3) Per-dialect overrides
+   You can customize dialect-specific behavior by providing an inner dialect class.
+
+   .. code-block:: py3
+
+      from typing import Optional
+      from pypika.terms import Term
+      from tortoise.fields import Field
+
+      class MyStr(Field, str):
+          SQL_TYPE = "VARCHAR(255)"
+
+          class _db_sqlite:
+              SQL_TYPE = "TEXT"
+              skip_to_python_if_native = False
+
+              def function_cast(self, term: Term) -> Term:
+                  # Example: customize casting for this dialect
+                  return functions.Cast(term, SqlTypes.NUMERIC)
+
+   Notes:
+   - The inner class name follows the pattern _db_<dialect>.
+   - You can override SQL_TYPE, skip_to_python_if_native, and other behaviors.
+   - You may implement dialect-specific methods (e.g., function_cast) to influence DB emulation logic.
+
+4) Using the field in a model
+   - After declaring a field type, you typically assign it to a model attribute as shown above.
+   - Field instances are created at class definition time, so no explicit instance creation is required in user code.
+
+Additional considerations
+------------------------
+
+- The field_type attribute is a read-only property on the instance, set by _FieldMeta during class creation.
+- If you do not specify a Python-type mixin (i.e., you directly subclass Field), you still have a valid field, but you lose the typed conversion benefits unless a concrete Python type is provided via multiple inheritance.
+- The to_db_value and to_python_value methods provide a straightforward way to ensure values are coerced to the appropriate Python or database representations.
+
+Advanced usage hints
+--------------------
+
+- Use a Python type mixin to declare the intended Python type and let the metaclass set field_type automatically.
+- Use the dialect override inner class to adapt to dialect-specific SQL types or casting behavior without changing your field definition in application code.
+- Combine Field with a numeric or string type to create common primitive fields that are portable across models.
+
+If you need concrete examples tailored to a specific database or a set of field types (e.g., CharField, TextField, IntegerField), mention your target dialect and I can add precise, ready-to-use snippets.

@@ -1,0 +1,257 @@
+# Table Data (table.rst)
+
+Table Data provides a flexible, column-oriented data structure for manipulating tabular data in Python. This guide is aimed at developers implementing or using table-like data in the codebase (e.g., astropy.table.Table and related components). It covers the data model, common operations, I/O, metadata, and advanced hooks such as change notification and internal verification.
+
+---
+
+## 1. Data Model
+
+- A Table is a collection of columns that share a common length (a fixed number of rows).
+- Each column is a 1D array-like structure (typically a NumPy array or a masked array) and has:
+  - A name (string)
+  - Optional metadata (per-column metadata)
+  - Optional unit (physical unit)
+  - Optional description or format hints
+- Table-wide metadata is stored in a meta dictionary.
+- Masked data support is provided to represent missing values without destroying the array shape.
+- The table supports iteration, indexing, and vectorized operations by operating on columns.
+
+Key concepts:
+- Columns: independent 1D arrays; operations on a column affect its data type and length.
+- Rows: a specific position across all columns. Row-wise operations are built on column data.
+- Metadata: per-table and per-column metadata to preserve descriptive information.
+
+---
+
+## 2. Creating Tables
+
+- From a dictionary of columns:
+  - Keys are column names; values are 1D arrays or sequences of equal length.
+- From a list of dictionaries (records):
+  - Each dict represents a row; keys are column names.
+- From existing NumPy arrays or masked arrays.
+- Optional per-column metadata, units, and descriptions.
+
+Code examples:
+- Create a simple table from columns
+  - from dict of arrays
+  - from records
+  - with metadata
+
+```python
+from astropy.table import Table
+import numpy as np
+
+# From explicit columns
+t = Table({'ra': [10.0, 20.0, 30.0],
+           'dec': [-5.0, 0.0, 5.0],
+           'mag': [14.2, 13.5, 14.8]})
+
+# From a list of records
+records = [
+    {'ra': 10.0, 'dec': -5.0, 'mag': 14.2},
+    {'ra': 20.0, 'dec':  0.0, 'mag': 13.5},
+    {'ra': 30.0, 'dec':  5.0, 'mag': 14.8},
+]
+t2 = Table(records)
+
+# Masked data (missing values)
+t['mag'] = np.ma.masked_values(t['mag'], value=-999.0)
+
+# Add column metadata and units
+t['ra'].unit = 'deg'
+t['ra'].description = 'Right ascension'
+t.meta['telescope'] = 'ExampleScope'
+```
+
+- Accessing structure
+```python
+# Column access
+ra_col = t['ra']
+# Row access (as a Row object)
+row1 = t[0]
+# Access a value by row/column
+val = t['mag'][1]  # magnitude of second row
+```
+
+---
+
+## 3. Basic Operations
+
+- Column operations:
+  - Add, rename, or remove columns
+  - Broadcast arithmetic across a column
+- Row operations:
+  - Filter rows by boolean masks
+  - Sort rows by a column
+- Indexing:
+  - t[col_name] yields a column
+  - t[row_index] yields a row
+  - t[row_index, col_name] or t[row_index:row_index+N] for slices
+
+Examples:
+```python
+# Add a new computed column
+t['color_index'] = t['mag'] - 2.5 * (t['ra'] / 3600.0)
+
+# Rename a column
+t.rename_column('mag', 'magnitude')
+
+# Filter rows where magnitude < 14
+bright = t[t['magnitude'] < 14]
+
+# Sort by magnitude
+t_sorted = t.sort('magnitude')
+```
+
+- Representation:
+  - Printing the table shows a compact view with column names, lengths, and sample values.
+
+---
+
+## 4. Metadata and Units
+
+- Table.meta: a dictionary for global metadata (e.g., author, observing run).
+- Column metadata: each column can hold its own metadata (name, unit, description, etc.).
+- Units:
+  - Attach to columns via `.unit` (e.g., 'deg', 'mag')
+  - Helpful for preserving physical meaning during calculations and I/O
+- Descriptions and formats help with user-facing documentation and automated formatting.
+
+Example:
+```python
+t.meta['dataset'] = 'example_observation'
+t['ra'].unit = 'deg'
+t['dec'].unit = 'deg'
+t['ra'].description = 'Right ascension (J2000)'
+t['dec'].description = 'Declination (J2000)'
+```
+
+---
+
+## 5. I/O and Formats
+
+- FITS BinTable (FITS binary table) is a common serialized form for Table data.
+- Other formats supported via backends (e.g., CSV, CSV-like ECSV, and more) in higher-level interfaces.
+
+FITS example:
+```python
+from astropy.io import fits
+
+# Write to FITS
+hdu = fits.BinTableHDU.from_table(t)
+hdu.writeto('table.fits', overwrite=True)
+
+# Read back
+t_loaded = Table.read('table.fits', format='fits')
+```
+
+Other I/O considerations:
+- Preserve metadata and units during I/O.
+- Handle masked values gracefully; missing data should map to appropriate mask or sentinel values in the target format.
+
+---
+
+## 6. Advanced Hooks (Developers)
+
+### NotifierMixin (change notification)
+- NotifierMixin enables listeners to observe changes on a table-like object.
+- Internal API (underscored) is intended for internal use to communicate changes between components.
+- Register listeners with `_add_listener`, and notify observers via `_notify(change_type, *args, **kwargs)`.
+
+Example (conceptual):
+```python
+class MyListener:
+    def _update_change_type(self, change_type, *args, **kwargs):
+        print("Table changed:", change_type)
+
+listener = MyListener()
+table._add_listener(listener)
+# Mutate the table; observers will be notified via _notify
+```
+
+Notes:
+- This mechanism is primarily for internal coordination and GUI/event-driven code, not for general user workflows.
+- It helps keep derived data or views in sync with the underlying table.
+
+### Verification (internal integrity checks)
+- The codebase includes an internal verification framework (e.g., `_Verify`) to check consistency and report errors or warnings.
+- Typical usage is internal; end users generally rely on standard operations and I/O with predictable error handling.
+- Verification options control whether issues are raised, warned, or automatically fixed.
+
+Example (conceptual):
+```python
+# Internal verification might be invoked as part of a table operation
+# opt can be 'warn', 'exception', 'ignore', 'fix', etc.
+# This is an internal mechanism and not part of the public API.
+# t._verify(option='warn')
+```
+
+---
+
+## 7. Performance and Practical Tips
+
+- Store homogeneous data per column to enable vectorized NumPy operations.
+- Use masked arrays when missing data are common to avoid irregular shapes.
+- Avoid per-element Python loops when possible; prefer vectorized operations on columns.
+- For large tables, consider memory-mapping backends or streaming approaches if supported by the I/O layer.
+
+---
+
+## 8. Examples Gallery
+
+- Basic creation and arithmetic
+```python
+from astropy.table import Table
+import numpy as np
+
+t = Table({'id': [1, 2, 3],
+           'flux': np.array([1.2, 3.4, 5.6], dtype=float)})
+
+t['log_flux'] = np.log10(t['flux'])
+```
+
+- Filtering and aggregation
+```python
+bright = t[t['flux'] > 2.0]
+mean_flux = t['flux'].mean()
+```
+
+- I/O round-trip
+```python
+from astropy.io import fits
+
+hdu = fits.BinTableHDU.from_table(t)
+hdu.writeto('table.fits', overwrite=True)
+
+t2 = Table.read('table.fits', format='fits')
+```
+
+- Metadata usage
+```python
+t.meta['telescope'] = 'ExampleScope'
+t['flux'].unit = 'erg/s/cm2'
+```
+
+---
+
+## 9. API Reference (Quick Look)
+
+- Table
+  - Creation: Table(data=None, *args, **kwargs)
+  - Columns: t.columns, t.colnames, t['name'], t.add_column(...)
+  - Metadata: t.meta, t['column'].description, t['column'].unit
+  - Manipulation: t.rename_column, t.remove_column, t.sort, t['new'] = ...
+  - I/O: Table.read(...), Table.write(...)
+- Column types
+  - Standard numpy arrays, MaskedArray for missing data
+  - Per-column metadata and units
+- NotifierMixin (internal)
+  - _add_listener(listener)
+  - _notify(change_type, *args, **kwargs)
+- Verification (internal)
+  - _Verify and related helpers for internal state checking
+
+---
+
+If you need a focused subsection (e.g., only how to use Table with FITS I/O, or a deeper dive into the NotifierMixin hooks), tell me and I can tailor the section for that use case.

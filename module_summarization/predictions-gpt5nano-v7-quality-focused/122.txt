@@ -1,0 +1,150 @@
+# Unified renderable interface (renderable.rst)
+
+Overview
+- The renderable module provides a unified API for rendering objects via templates.
+- Rendering uses Django’s render_to_string with a template name and a context that includes the renderable instance itself as "me".
+- The API supports optional CSS class handling and (in the BEM variant) a structured approach to block/element naming.
+
+Public API
+
+- join_css_classes_list(css_classes_list)
+  - Joins a list of CSS class names into a single string.
+  - Implementation detail: uses two spaces as the separator.
+  - Example:
+    - Input: ["card", "highlight"]
+    - Output: "card  highlight"
+
+- AbstractRenderable
+  - Purpose: Base class that defines a unified render interface.
+  - Attributes:
+    - template_name (class attribute, default None): Default template name.
+  - Key methods:
+    - get_template_names() -> str
+      - Returns the template name(s) for rendering.
+      - If template_name is set, returns it.
+      - If not set, raises NotImplementedError with guidance to set template_name or override get_template_names().
+    - get_context_data(request=None) -> dict
+      - Returns context data for rendering.
+      - Default data: {'me': self}
+    - render(request=None, extra_context_data=None) -> str
+      - Renders the template using render_to_string.
+      - Builds context by merging extra_context_data (if provided) with get_context_data(request=request).
+      - Uses template_name from get_template_names(), and passes request to render_to_string when provided.
+  - Notes:
+    - The render flow centers on the template name and the context derived from the renderable instance.
+
+- AbstractRenderableWithCss(AbstractRenderable)
+  - Purpose: Extends AbstractRenderable with a unified API for CSS class management.
+  - Key methods:
+    - get_base_css_classes_list() -> list
+      - Returns the base CSS classes (default: []).
+    - get_extra_css_classes_list() -> list
+      - Returns additional CSS classes (default: []).
+    - get_css_classes_list() -> list
+      - Produces the complete list of CSS classes.
+      - Combines base and extra CSS class lists.
+      - Returns a list (order: base first, then extra).
+    - get_test_css_class_suffixes_list() -> list
+      - List of CSS class suffixes to include during automatic tests.
+      - Default: [].
+    - css_classes (property)
+      - Returns the final CSS classes string.
+      - Implementation:
+        - Converts get_css_classes_list() to a list, then optionally appends test CSS classes suffixes using cradmin_test_css_class if DJANGO_CRADMIN_INCLUDE_TEST_CSS_CLASSES is True.
+        - Uses join_css_classes_list to produce the final string.
+      - Note: Imports cradmin_tags lazily to avoid circular imports.
+    - get_css_classes_string() -> str
+      - Deprecated helper that warns and returns css_classes.
+  - Deprecations:
+    - get_css_classes_string() is deprecated; prefer using the css_classes property.
+
+- AbstractBemRenderable(AbstractRenderable)
+  - Purpose: Base class for renderables that follow BEM naming conventions.
+  - Constructor: __init__(bem_block=None, bem_element=None, bem_variant_list=None, extra_css_classes_list=None)
+    - bem_block (str): BEM block string. Cannot be supplied together with bem_element.
+    - bem_element (str): BEM element string. Must contain '__' and cannot be supplied with bem_block.
+    - bem_variant_list (list): Variants for the block/element (suffixes after ‘--’).
+    - extra_css_classes_list (list): Additional CSS classes.
+    - Validation:
+      - If both bem_block and bem_element are provided, raises ValueError.
+      - If bem_element is provided and does not contain '__', raises ValueError.
+    - Stores:
+      - self._bem_block
+      - self._bem_element
+      - self._bem_variant_list
+      - self._extra_css_classes_list
+  - Key methods:
+    - get_test_css_class_suffixes_list() -> list
+      - List of CSS class suffixes for tests.
+      - Default: [].
+    - bem_block_or_element (property)
+      - Returns self.get_bem_block() if set; otherwise self.get_bem_element().
+    - get_bem_block() -> str
+      - Returns the BEM block string (self._bem_block).
+    - get_bem_element() -> str
+      - Returns the BEM element string.
+      - Note: In the current code, this returns self._b (likely a bug). Expectation is that it returns self._bem_element.
+
+Rendering workflow (how these pieces fit together)
+- A renderable class derives from AbstractRenderable (and optionally AbstractRenderableWithCss or AbstractBemRenderable).
+- Provide a template name by setting template_name or by overriding get_template_names().
+- Build context via get_context_data(request) and, if needed, pass extra_context_data to render().
+- For CSS-related renderables, override get_css_classes_list() (or rely on base/extra lists) and access the computed CSS via the css_classes property.
+- For BEM-based renderables, instantiate with bem_block or bem_element (but not both). Access bem_block_or_element to obtain the primary BEM target.
+
+Practical examples
+
+- Simple renderable
+  - Purpose: Render a template with default context.
+  - Example:
+    - class MyCard(AbstractRenderable):
+        template_name = "card/detail.html"
+    - Usage:
+      - renderable = MyCard()
+      - html = renderable.render()
+
+- Renderable with CSS
+  - Purpose: Add CSS classes to the rendered component.
+  - Example:
+    - from renderable import AbstractRenderableWithCss
+
+    - class MyCard(AbstractRenderableWithCss):
+        template_name = "card/detail.html"
+
+        def get_base_css_classes_list(self):
+            return ["card"]
+
+        def get_extra_css_classes_list(self):
+            return ["highlight"]
+
+    - Usage:
+      - renderable = MyCard()
+      - classes = renderable.css_classes  # "card  highlight" (double-spaced)
+      - html = renderable.render()
+
+- BEM-based renderable
+  - Purpose: Use BEM naming for CSS class organization.
+  - Example:
+    - class MyBEMCard(AbstractBemRenderable):
+        template_name = "card/detail.html"
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(bem_block="card", bem_element="card__title", bem_variant_list=["large"])
+
+    - Usage:
+      - renderable = MyBEMCard()
+      - bem_target = renderable.bem_block_or_element  # "card" or "card__title" depending on initialization
+      - html = renderable.render()
+
+Caveats and notes
+- get_template_names()
+  - If template_name is not set, you must override get_template_names() or provide template_name, otherwise NotImplementedError is raised.
+- CSS class assembly
+  - CSS classes are joined with two spaces, not a single space.
+  - The css_classes property supports optional test CSS suffixes controlled by DJANGO_CRADMIN_INCLUDE_TEST_CSS_CLASSES.
+- Bem element bug note
+  - In AbstractBemRenderable, get_bem_element() currently returns self._b, which is likely a bug. The intended behavior is to return self._bem_element.
+- Deprecations
+  - get_css_classes_string() is deprecated; prefer using the css_classes property.
+
+This documentation reflects the unified renderable interface provided by renderable.rst, including the core rendering workflow, CSS handling, and BEM support.

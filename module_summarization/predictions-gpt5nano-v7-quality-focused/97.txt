@@ -1,0 +1,152 @@
+how Mitogen works
+==================
+
+This guide explains the core concepts, data flow, and practical usage of Mitogen’s internal messaging and remote execution model. It focuses on how the pieces described in the code fit together to form a fast, persistent, message-driven runtime for running Python on remote contexts.
+
+Overview
+--------
+
+Mitogen uses a small, binary protocol over a persistent channel between a local (master) process and one or more remote (slave) contexts. The local side runs a central router/broker that issues commands, and the remote side runs a bootstrap module that handles requests and executes code there. Communication is driven by a compact set of numeric opcodes; each message carries an instruction type, routing metadata, and a payload.
+
+Key concepts
+
+- Channel: a bidirectional communication path (socketpair, SSH session, etc.) used to transport encoded messages.
+- Router: central dispatcher that examines incoming messages, routes them to the appropriate destination, and signals completion via reply channels.
+- Broker: coordinates channels, routes, and object lifetimes. It allocates remote IDs, loads modules, and invokes functions on the remote side.
+- Remote bootstrap: a minimal bootstrap implementation shipped to every new slave context. It initializes the remote environment so that Mitogen can send and receive further protocol messages.
+- Routing: explicit mapping from IDs to destinations (remote contexts, objects, or services). Routes can be added or removed at runtime.
+- Remote objects and IDs: a unique identifier assigned by the master to track remote objects and results. ALLOCATE_ID creates a new ID for a remote object.
+- Dead signal (IS_DEAD): a sentinel value placed in reply_to to indicate a channel or remote destination is no longer reachable.
+
+Core protocol and message types
+------------------------------
+
+Mitogen defines a compact set of opcodes that drive remote operations. The following opcodes appear in the code and form the backbone of the protocol:
+
+- GET_MODULE
+- CALL_FUNCTION
+- FORWARD_LOG
+- ADD_ROUTE
+- DEL_ROUTE
+- ALLOCATE_ID
+- SHUTDOWN
+- LOAD_MODULE
+- FORWARD_MODULE
+- DETACHING
+- CALL_SERVICE
+- STUB_CALL_SERVICE
+
+Message framing
+
+- Each message is an encoded payload that includes:
+  - The opcode (one of the values above)
+  - A reply_to field (an ID that indicates where the response should be delivered)
+  - A payload with operation-specific data (e.g., module name, function name, arguments)
+- Responses travel back along the same channel or their designated reply_to destination.
+
+Special values
+
+- IS_DEAD: signals disconnection or an inability to route a message. When received in reply_to, it commonly triggers a ChannelError or similar cleanup.
+
+Data encoding and portability
+-----------------------------
+
+Mitogen supports Python 2 and Python 3 environments. To maintain compatibility across versions and to support efficient data transfer, Mitogen uses:
+
+- A compatibility layer for text/binary data (BytesType, UnicodeType, etc.)
+- Python’s pickle for serializing complex objects
+- A Latin-1 codec instance (LATIN1_CODEC) for stable, byte-for-byte encoding
+- A zero-copy-friendly BufferType abstraction for buffer handling
+
+Important detail: the code comment notes that the bootstrap module is designed to be minimal and is embedded in the remote context to bootstrap the slave process.
+
+Default I/O sizing
+------------------
+
+- The default size for Side.read/Side.write operations is 128 KiB. This affects how large messages are buffered and how much data can be transferred per I/O call. It also interacts with the OS pipe/buffer sizes when running over inter-process or inter-machine transports.
+
+Bootstrap and slave context workflow
+------------------------------------
+
+1. Master opens a Channel to a remote context (e.g., a slave process).
+2. The remote side receives a bootstrap payload and loads the bootstrap module.
+3. The bootstrap initializes a Router/Broker on the remote side and registers the remote channel as its transport.
+4. The master and remote sides exchange initial routing information and allocate IDs for remote objects as needed.
+5. Once bootstrapped, the master can issue operations such as LOAD_MODULE, GET_MODULE, CALL_FUNCTION, and CALL_SERVICE.
+
+Typical operation sequence
+--------------------------
+
+To execute a function on the remote side, the master typically follows this sequence:
+
+- ALLOCATE_ID: reserve an ID for the result or for a temporary remote object.
+- ADD_ROUTE: register the remote destination (the slave context) in the routing table.
+- LOAD_MODULE: ensure the target module exists on the remote side (or create a proxy if necessary).
+- GET_MODULE: retrieve a module handle or reference on the remote side.
+- CALL_FUNCTION: invoke a function within the loaded module, providing args/kwargs, and specify reply_to with the allocated ID.
+- Await a response on the reply_to channel; the payload contains the return value or exception details.
+- DEL_ROUTE (when no longer needed): clean up routing for that operation or object.
+- SHUTDOWN or cleanup (DETACHING) when the remote side is no longer required.
+
+Illustrative example (conceptual, not API-specific)
+--------------------------------------------------
+
+The following illustrates the protocol conceptually. It is not the exact API surface, but shows how messages flow:
+
+- Master sends an ALLOCATE_ID for a future result:
+  {
+    "opcode": ALLOCATE_ID,
+    "reply_to": None,
+    "payload": {"id": 12345}
+  }
+
+- Master loads a module on the remote side:
+  {
+    "opcode": LOAD_MODULE,
+    "reply_to": 12345,
+    "payload": {"module": "mymodule"}
+  }
+
+- Master calls a function on the remote side:
+  {
+    "opcode": CALL_FUNCTION,
+    "reply_to": 12345,
+    "payload": {
+      "module": "mymodule",
+      "function": "myfunc",
+      "args": [1, 2],
+      "kwargs": {"opt": True}
+    }
+  }
+
+- Remote side returns the result:
+  {
+    "opcode": CALL_FUNCTION,
+    "reply_to": 12345,
+    "payload": {"result": <value>, "error": null}
+  }
+
+Practical notes for developers
+------------------------------
+
+- The bootstrap module on the slave is intentionally small and fast to load. It sets up the minimal runtime to interpret protocol messages and perform requested actions.
+- The routing layer allows dynamic reconfiguration: you can add or remove routes as contexts appear or disappear.
+- Module loading and function invocation are decoupled: you can load modules once and reuse them across multiple calls, or forward module proxies between contexts as needed.
+- Data marshaling relies on Python’s standard serialization (pickle) with a robust byte-oriented transport (Latin-1 and memory views) to minimize overhead and maximize compatibility.
+
+Performance considerations
+--------------------------
+
+- The 128 KiB default I/O buffer size is chosen as a balance between throughput and memory usage. Larger messages may incur more latency due to system calls and kernel buffering; smaller messages increase the number of I/O operations.
+- For high-throughput scenarios, tuning the underlying transport (socket options, NIC buffers, compression thresholds if used, etc.) can yield noticeable improvements.
+
+Debugging and diagnostics
+-------------------------
+
+- Mitogen uses Python logging facilities. The IO-specific logger (mitogen.io) emits I/O events and can be elevated to DEBUG for diagnostics.
+- Observing message opcodes and payload structures can help identify protocol mismatches or routing issues.
+
+Summary
+-------
+
+Mitogen orchestrates remote execution through a compact, opcode-driven protocol between a master (broker/router) and one or more slaves (bootstrap-enabled contexts). It manages routing, module loading, and function invocation with a focus on persistent connections and efficient data transport. The bootstrap module on each remote context enables rapid startup, after which the master can perform remote operations using a small, well-defined set of message types. This design yields low-overhead remote execution suitable for professional development workflows.

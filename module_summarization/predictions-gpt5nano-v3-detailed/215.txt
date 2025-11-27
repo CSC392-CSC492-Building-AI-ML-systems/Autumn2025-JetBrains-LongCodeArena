@@ -1,0 +1,195 @@
+# An asynchronous producer / consumer pattern for coroutines
+
+This module provides asynchronous queues for coroutine-based code. The queues coordinate producers and consumers in an event-driven environment (e.g., Tornado coroutines and IOLoops). They are designed to be used within a single event loop and are not thread-safe. To interact with queues from other threads, transfer control to the IOLoop thread (e.g., via IOLoop.add_callback) before calling queue methods.
+
+## Overview
+
+- Purpose: Facilitate producer/consumer workflows by allowing coroutines to push items into a queue and other coroutines to retrieve them in a controlled, asynchronous manner.
+- Core idea: When a producer or consumer would block (queue full or empty, respectively), the operation yields a Future and resumes when the condition changes.
+- Ordered variants:
+  - `Queue`: First-in, first-out (FIFO) behavior.
+  - `PriorityQueue`: Items retrieved in order of their priority (lowest value first).
+  - `LifoQueue`: Last-in, first-out behavior.
+- Lifecycle and semantics:
+  - Unbounded vs bounded queues determined by `maxsize` (0 means unbounded).
+  - Backpressure is handled by waiting producers when the queue is full and waiting consumers when the queue is empty.
+  - `join()` / `task_done()` support lets you wait for all enqueued tasks to be processed.
+
+## API surface
+
+### Exceptions
+
+- `QueueFull`: Raised by `Queue.put_nowait` when the queue is full.
+- `QueueEmpty`: Raised by `Queue.get_nowait` (and related behavior) when the queue is empty.
+
+### Core class: `Queue`
+
+- Purpose: Coordinate producer and consumer coroutines.
+- Constructor:
+  - `Queue(maxsize: int = 0) -> Queue`
+    - `maxsize` of 0 means an unbounded queue.
+- Key properties:
+  - `maxsize` – Maximum number of items allowed in the queue.
+  - `qsize()` – Current number of items in the queue.
+  - `empty()` – True if the queue has no items.
+  - `full()` – True if the queue has reached its maximum size (for bounded queues).
+- Core methods:
+  - `put(item, timeout=None) -> Future[None]`
+    - Asynchronously put an item into the queue.
+    - If the queue is full, waits until a slot becomes available or the timeout expires.
+    - Timeout handling raises `gen.TimeoutError` on expiration.
+  - `put_nowait(item) -> None`
+    - Put an item into the queue without blocking.
+    - Raises `QueueFull` if no free slot is immediately available.
+  - `get(timeout=None) -> Awaitable[_T]`
+    - Asynchronously remove and return an item from the queue.
+    - If empty, waits until an item is available or the timeout expires.
+  - `get_nowait() -> _T`
+    - Retrieve an item without blocking (not shown in the excerpt but commonly available in similar queues).
+  - `join() -> Future[None]` (or blocking equivalent in your usage)
+    - Block until all items enqueued since the last `task_done()` call have been processed.
+  - `task_done() -> None`
+    - Indicate that a formerly enqueued task is complete.
+    - Used in conjunction with `join()` to wait for all tasks to be processed.
+- Iteration support:
+  - Async iteration via `async for` is supported. The queue can be consumed item-by-item by awaiting `get()` for each iteration.
+
+- Internal behavior:
+  - The queue uses internal structures to manage waiting getters and putters:
+    - `_queue` stores the items.
+    - `_getters` is a deque of Futures representing coroutines waiting to `get` an item.
+    - `_putters` is a deque of (item, Future) pairs representing coroutines waiting to `put` an item.
+  - Timeout logic is implemented via `_set_timeout`, which schedules a timeout on the current IOLoop and raises `gen.TimeoutError` if the Future is not completed in time.
+
+### Core class: `PriorityQueue`
+
+- Similar to `Queue`, but items are retrieved in order of their priority (lowest value first).
+- Uses a heap-based internal structure to maintain ordering by priority.
+- Behavior with `put`/`get` mirrors `Queue`, including timeouts and joining semantics.
+
+### Core class: `LifoQueue`
+
+- Similar to `Queue`, but items are retrieved in a last-in, first-out order.
+- Useful for certain depth-first or reverse-order processing scenarios.
+- Supports the same timeout and join semantics as `Queue`.
+
+## Usage patterns
+
+### Basic producer / consumer with backpressure
+
+- Producer enqueues items, waiting if the queue is full (bounded queues).
+- Consumer retrieves items as they become available.
+
+```python
+import asyncio
+from tornado.ioloop import IOLoop
+from tornado import gen
+from tornado.queues import Queue
+
+q = Queue(maxsize=2)
+
+async def consumer():
+    while True:
+        item = await q.get()
+        try:
+            print(f"Doing work on {item}")
+            await asyncio.sleep(0.01)
+        finally:
+            q.task_done()
+
+async def producer():
+    for item in range(5):
+        await q.put(item)
+        print(f"Put {item}")
+
+async def main():
+    IOLoop.current().spawn_callback(consumer)  # Start consumer without awaiting
+    await producer()
+    await q.join()  # Wait until all tasks have been processed
+    print("Done")
+
+asyncio.run(main())
+```
+
+### Async for consumption
+
+- Use async for to process items as they arrive in the queue.
+
+```python
+import asyncio
+from tornado.ioloop import IOLoop
+from tornado import gen
+from tornado.queues import Queue
+
+q = Queue()
+
+async def consumer():
+    async for item in q:
+        try:
+            print(f"Processing {item}")
+            await asyncio.sleep(0.01)
+        finally:
+            q.task_done()
+```
+
+Note: The exact termination behavior of an `async for` loop over a `Queue` depends on how the producer signals completion. The example above relies on the consumer loop being terminated by external factors (e.g., cancelation or a sentinel value in some designs). In practice, you typically use `join()` and a sentinel or a controlled shutdown pattern.
+
+### Timeouts and cancellation
+
+- You can specify timeouts for `put` and `get` to avoid waiting indefinitely.
+
+```python
+import asyncio
+from tornado.ioloop import IOLoop
+from tornado import gen
+from tornado.queues import Queue
+import time
+
+q = Queue(maxsize=1)
+
+async def timed_put():
+    try:
+        await q.put("item", timeout=1.0)  # waits up to 1 second
+        print("Put completed")
+    except gen.TimeoutError:
+        print("Put timed out")
+
+async def timed_get():
+    try:
+        item = await q.get(timeout=1.0)
+        print(f"Got {item}")
+    except gen.TimeoutError:
+        print("Get timed out")
+
+async def main():
+    # Schedule a get first to demonstrate timeout
+    asyncio.create_task(timed_get())
+    await asyncio.sleep(0.5)
+    asyncio.create_task(timed_put())
+
+asyncio.run(main())
+```
+
+## Important considerations and edge cases
+
+- Thread-safety: These queues are not thread-safe. To use from other threads, transfer control to the IOLoop thread before interacting with the queue.
+- Interoperability: The design mirrors asyncio.Queue concepts but is implemented for Tornado coroutines. You can compose with asyncio code, but maintain a single event loop for queue interactions when possible.
+- Timeout handling: Timeouts raise `gen.TimeoutError`. Ensure callers handle this appropriately.
+- Async for compatibility: If you rely on `async for` over a queue, ensure the producer side can terminate the iteration (e.g., via a sentinel value or explicit shutdown) to avoid hanging consumers.
+- Unbounded vs bounded: A `maxsize` of 0 yields an unbounded queue. Use bounded queues to apply backpressure and avoid unbounded memory growth.
+- Joining: Use `join()` to wait for all enqueued tasks to be processed; match with `task_done()` calls in your consumer logic.
+
+## Relationship and differences
+
+- Similar to Python’s standard library queues and to asyncio.Queue, but designed for Tornado coroutines and the IOLoop ecosystem.
+- Provides additional coroutine-centric features such as `async for` iteration support and Tornado's `Future`/timeout semantics.
+
+## Example recap
+
+The documentation intentionally demonstrates:
+- A simple producer that enqueues items and a consumer that processes them.
+- The use of `join()` to wait for all tasks to complete.
+- The integration of timeouts to prevent indefinite blocking.
+- Async iteration over a queue to drive continuous processing.
+
+For more detailed usage patterns, refer to the examples in the codebase and adapt the patterns to your coroutine-driven workflows.

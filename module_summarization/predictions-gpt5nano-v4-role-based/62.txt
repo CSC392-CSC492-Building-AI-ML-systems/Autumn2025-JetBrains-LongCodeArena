@@ -1,0 +1,185 @@
+Visitors and Traversal (visitors.rst)
+--------------------------------------
+
+Summary
+-------
+
+This module provides the core visitor/traversal interface used by SQLAlchemy for compiling and traversing
+SQL expression trees and related objects. It defines a generic dispatch mechanism that delegates
+to a visitor object by calling a method named visit_<visit_name> on the visitor, where <visit_name>
+is defined by the Visitable subclass. It also defines internal traversal symbols used by HasTraverseInternals
+to implement traversal of complex structures while keeping a robust separation between the traversal
+logic and the data being traversed.
+
+Public API
+----------
+
+The module exports the following symbols (as listed in __all__):
+
+- iterate
+- traverse_using
+- traverse
+- cloned_traverse
+- replacement_traverse
+- Visitable
+- ExternalTraversal
+- InternalTraversal
+- anon_map
+
+Key concepts are described below.
+
+Internal concepts
+-----------------
+
+Visitable
+---------
+
+Visitable is the base class for all objects that participate in the SQLAlchemy traversal and
+dispatch system used during compilation and other traversals.
+
+- Purpose
+  - Implements the compiler-dispatch mechanism used by the SQL compiler to render objects.
+  - Serves as a common base for other kinds of traversals (e.g., for cache keys) via a separate interface
+    (HasTraverseInternals) that operates on the internal traversal data.
+
+- Dispatch mechanism
+  - Subclasses may define a class attribute __visit_name__. When present, the class automatically generates
+    a compiler dispatch method named _compiler_dispatch for the instance.
+  - If a subclass defines __visit_name__ as a string, a dynamic visitor dispatch is created:
+    the visitor is expected to implement a method named visit_<visit_name>.
+  - The generated dispatch looks up visit_<visit_name> on the visitor and calls it with the same keyword
+    arguments that were supplied to the dispatch.
+  - If the visitor does not define visit_<visit_name>, a fallback path is taken by calling
+    visitor.visit_unsupported_compilation(self, err, **kw).
+
+- Implementation details
+  - The logic is wired in __init_subclass__ so any subclass that defines __visit_name__ automatically
+    receives a corresponding _compiler_dispatch implementation.
+  - If a subclass already provides a fixed _compiler_dispatch method, that method is preserved in
+    _original_compiler_dispatch so it can be restored or overridden if needed (e.g., by extensions).
+
+- Generic classes
+  - The class also implements __class_getitem__ to support generic-style usage in Python 3.9+.
+
+Example
+-------
+
+The following illustrates how a Visitable subclass and a visitor might interact:
+
+- Define a visitable node
+  class MyNode(Visitable):
+      __visit_name__ = "my_node"
+
+- Define a visitor that handles the node
+  class MyVisitor:
+      def visit_my_node(self, node, **kw):
+          # perform some operation and return a result
+          return f"visited {node}"
+
+- The SQLAlchemy compiler/internals will call the generated dispatcher
+  which will, in turn, call visitor.visit_my_node(self, **kw)
+
+- If the visitor lacks visit_my_node, the fallback visit_unsupported_compilation path is invoked.
+
+InternalTraversal
+-----------------
+
+InternalTraversal is an Enum that defines symbolic tokens used by internal traversal machinery
+(on HasTraverseInternals and related helpers). These symbols describe how to traverse and process
+internal structures of composite objects, such as:
+
+- dp_has_cache_key: Visit a HasCacheKey object.
+- dp_has_cache_key_list: Visit a list of HasCacheKey objects.
+- dp_clauseelement: Visit a ClauseElement object.
+- dp_fromclause_canonical_column_collection: Visit a FromClause object in the context of its canonical
+  column collection (generally the TableClause/Table objects in SQL expressions).
+- dp_clauseelement_tuples: Visit a list (tuples) of ClauseElements.
+
+The InternalTraversal symbols are used by components that implement HasTraverseInternals to
+expose their internal structure in a uniform way. This mechanism enables:
+- get_children: obtain child traversable elements
+- _copy_internals: copy internal state for traversal cloning
+- _gen_cache_key: generate a stable cache key representing the internal state
+
+Notes
+-----
+
+- Versioning remark: In 2.0, Visitable superseded Traversible (from 1.4) as the canonical name for the
+  base class. The names are kept importable for backward compatibility.
+
+- Conditional imports and cython optimizations:
+  The module uses conditional imports for certain helpers (anon_map, prefix_anon_map) depending on
+  whether the C-extension is available. This affects performance of certain traversal-related maps.
+
+Usage patterns
+--------------
+
+- Implementing new Visitable types
+  - Create a subclass of Visitable with a string __visit_name__.
+  - Implement corresponding visit_<visit_name> methods on visitor classes used by the compiler.
+  - If a subclass defines its own _compiler_dispatch, SQLAlchemy preserves the original in
+    _original_compiler_dispatch to allow extension behavior.
+
+- Internal traversal customization
+  - If you need a custom internal traversal, declare a _traverse_internals attribute on a subclass of
+    HasTraverseInternals that maps internal attribute names to InternalTraversal symbols, for example:
+
+    _traverse_internals = [
+        ("value", InternalTraversal.dp_clauseelement),
+        ("whens", InternalTraversal.dp_clauseelement_tuples),
+        ("else_", InternalTraversal.dp_clauseelement),
+    ]
+
+  - This enables tooling to walk, clone, and cache internal state in a structured way.
+
+Examples
+--------
+
+- Basic Visitable subclass with a custom visitor:
+
+  class MyVisitable(Visitable):
+      __visit_name__ = "my_node"
+
+  class MyVisitor:
+      def visit_my_node(self, node, **kw):
+          return f"processed {node}"
+
+  node = MyVisitable()
+  visitor = MyVisitor()
+  # The dispatch is invoked by the compiler; the following shows the intended interaction
+  # Usually called internally by the SQLAlchemy compiler:
+  result = node._compiler_dispatch(visitor)
+
+- Internal traversal example (pseudo-structure):
+
+  class Case(HASTraverseInternals):
+      _traverse_internals = [
+          ("value", InternalTraversal.dp_clauseelement),
+          ("whens", InternalTraversal.dp_clauseelement_tuples),
+          ("else_", InternalTraversal.dp_clauseelement),
+      ]
+
+دمون
+Notes on compatibility and extensibility
+----------------------------------------
+
+- The Visitable class provides a stable, dynamic, visitor-based dispatch mechanism that is central to
+  the SQL compiler architecture. It allows decoupled visitor implementations to define behavior for
+  various visitable types without requiring a rigid virtual method hierarchy on the visitable types.
+
+- The internal traversal symbols defined by InternalTraversal enable consistent traversal of
+  composite structures across different parts of SQLAlchemy, supporting features such as:
+  - caching
+  - clone/copy semantics
+  - consistent key generation for cache hits
+
+References
+----------
+
+- SQLAlchemy compiler architecture: visitables and visitor dispatch
+- HasTraverseInternals and internal traversal helpers
+- anon_map and prefix_anon_map helpers for anonymous name handling in traversal keys (implementation details)
+
+If you need concrete, real-world examples from the codebase (e.g., exact node types that subclass Visitable
+or concrete visitors used during compilation), you can consult the surrounding traversal utilities in the
+sql/ directory and the compiler implementation.

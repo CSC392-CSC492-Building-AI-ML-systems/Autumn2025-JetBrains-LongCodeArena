@@ -1,0 +1,106 @@
+Feature Extraction: Generate documentation and example for this module
+==============================================================
+
+Overview
+--------
+This module provides utilities for feature extraction using PyTorch FX tracing. It includes tracer classes that record the execution path (node names) of a model as it is traced, with support for designating certain submodules as leaves (i.e., not traced through). It also includes helpers to compare tracing results from training and evaluation graphs and to warn about differences that may affect feature extraction.
+
+Key Components
+--------------
+- LeafModuleAwareTracer
+  - A subclass of fx.Tracer that allows specifying a set of leaf modules (modules that should not be traced through).
+  - Behavior: nodes corresponding to leaf modules are represented as single proxy calls to the leaf module’s forward method.
+  - Important attribute: leaf_modules (dictionary of modules to treat as leaves).
+
+- NodePathTracer
+  - A specialized tracer that, in addition to tracing, records the name of the origin node for each operation.
+  - Names of nodes are dot-separated paths from the top-level module down to the leaf operation or leaf module. The top-level module name itself is not included.
+  - Key data:
+    - current_module_qualname: the qualified name of the module currently being traced.
+    - node_to_qualname: an OrderedDict mapping FX Node objects to their node names.
+  - Core methods:
+    - call_module: overrides fx.Tracer.call_module to track the module qualification name and respect leaf modules.
+    - create_proxy: overrides Tracer.create_proxy to store node qualification names in node_to_qualname.
+    - _get_node_qualname: constructs the final node name, handling duplicates by appending a suffix like _1, _2, etc.
+  - Naming behavior details:
+    - If the node is not a call_module, the node name is appended to the current module qualname to form a full path.
+    - Duplicate names are disambiguated locally by adding an increasing numeric suffix.
+
+- _is_subseq(x, y)
+  - Utility function to check if y is a subsequence of x.
+  - Used to compare train vs. eval graph node sequences.
+
+- _warn_graph_differences(train_tracer, eval_tracer)
+  - Utility to warn users when the train and eval traced graphs differ in node ordering or naming.
+  - Suggests that output node selections for feature extraction may need to be mode-specific (train vs. eval).
+
+- Exposed API
+  - __all__ = ["create_feature_extractor", "get_graph_node_names"]
+  - The module exports create_feature_extractor and get_graph_node_names, which provide higher-level helpers for building feature extractors and listing graph nodes (as indicated by the exports).
+
+Usage
+-----
+- Basic tracing with controlled leaf modules
+  - Purpose: capture a stable set of node names for feature extraction by not tracing through designated leaf modules.
+
+  Example:
+  import torch
+  import torch.nn as nn
+  from torchvision.feature_extraction import NodePathTracer
+
+  class SimpleModel(nn.Module):
+      def __init__(self):
+          super().__init__()
+          self.conv = nn.Conv2d(1, 4, 3)
+          self.relu = nn.ReLU()
+          self.fc = nn.Linear(4 * 26 * 26, 10)  # example dimensions
+
+      def forward(self, x):
+          x = self.conv(x)
+          x = self.relu(x)
+          x = x.view(x.size(0), -1)
+          x = self.fc(x)
+          return x
+
+  model = SimpleModel()
+  tracer = NodePathTracer(leaf_modules=[nn.ReLU])
+  graph_module = tracer.trace(model)
+
+  # The mapping from FX nodes to their node names
+  for node, qualname in tracer.node_to_qualname.items():
+      print(f"Node: {node}, Qualname: {qualname}")
+
+- Creating a feature extractor (conceptual)
+  - The module exports create_feature_extractor and get_graph_node_names. Use them to assemble a feature extractor that selects specific node outputs by their names.
+  - Example usage (conceptual; exact API may vary based on implementation in the module):
+    # Pseudo-code illustrating intended usage
+    from torchvision.feature_extraction import create_feature_extractor, get_graph_node_names
+    names = get_graph_node_names(graph_module)
+    extractor = create_feature_extractor(graph_module, {name: module for name in names})
+
+- Comparing train vs. eval graphs
+  - Use _warn_graph_differences to warn about mismatches between trained and evaluated graphs.
+  - Example:
+    train_tracer = NodePathTracer(...)
+    eval_tracer = NodePathTracer(...)
+    # Trace models in train and eval modes
+    _warn_graph_differences(train_tracer, eval_tracer)
+
+Details
+-------
+- Node naming
+  - NodePathTracer records the node path using a dot-separated hierarchy that excludes the top-level module name.
+  - For non-call_module nodes, the node’s own identifier is appended to the current path to form the full qualified name.
+  - Duplicates are disambiguated by appending an index suffix (_1, _2, …) based on previously seen names in node_to_qualname.
+
+- Leaf module handling
+  - By declaring certain modules as leaves via leaf_modules, tracing stops at those modules, and their forward calls appear as single proxy nodes rather than expanding into their internal graph.
+
+- Graph differences warning
+  - The _warn_graph_differences function compares the sequences of node names traced during training and evaluation.
+  - If the sequences are not identical, a warning and guidance are provided to adjust feature extraction node selections per mode.
+
+Notes
+-----
+- The documentation reflects the public API exposed by this module, including create_feature_extractor and get_graph_node_names as indicated by __all__.
+- The exact signatures and usage of create_feature_extractor and get_graph_node_names are not shown in the provided source snippet; refer to the full module for complete API details and examples.

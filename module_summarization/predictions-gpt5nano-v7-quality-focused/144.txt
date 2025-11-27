@@ -1,0 +1,125 @@
+Scheduling Policies
+===================
+
+This document describes the policies used by Dask’s distributed scheduler to decide
+which tasks to run next (task selection) and which workers should execute a given
+task (worker selection). The scheduler relies on a combination of built‑in
+priorities, data locality, memory considerations, and a collection of extensions
+that implement or augment scheduling strategies.
+
+Key concepts
+------------
+
+- Task priority and readiness
+  - Tasks flow through states such as released, waiting, no-worker, queued, processing, memory, erred, and forgotten.
+  - A task becomes ready when its dependencies are satisfied. The scheduler maintains a ready
+    set and assigns ready tasks to workers according to the policy in effect.
+  - Each task has a numeric priority that influences its position in the scheduling order:
+    lower-priority values (higher importance) are typically scheduled earlier.
+
+- Data locality
+  - The scheduler attempts to place tasks on workers that already hold the required input
+    data or on workers with favorable data locality characteristics.
+  - Data locality reduces data transfer costs and improves overall throughput.
+
+- Memory and resource awareness
+  - The scheduler considers memory pressure and per-task resource requirements.
+  - Extensions may evict or delay tasks to maintain memory budgets, or constrain
+    task execution based on available resources (e.g., CPU, GPUs, custom resources).
+
+- Worker capabilities and hints
+  - Tasks can be constrained to run on specific workers or on workers with certain resources
+    using hints (e.g., the workers parameter, or resources metadata).
+  - The scheduler uses these hints to select preferred workers for a given task.
+
+Policy implementors and extensions
+-------------------------------
+
+Dask ships with a set of extensions that influence scheduling behavior. These are loaded by default and can be customized.
+
+- WorkStealing (stealing)
+  - Enables cross-worker work stealing to balance load. Idle workers can “steal” tasks from busy workers.
+
+- ActiveMemoryManagerExtension (amm)
+  - Monitors and manages memory usage to keep the cluster within memory budgets. Influences eviction and task scheduling under memory pressure.
+
+- SpansSchedulerExtension (spans)
+  - Adds scheduling behavior related to spans (granular scheduling concerns) to improve locality and fairness.
+
+- ShuffleSchedulerPlugin (shuffle)
+  - Introduces a shuffling strategy to distribute work more evenly and improve global balance.
+
+- Memory sampler, queues, and other extensions
+  - Additional scheduling behaviors and observability hooks are provided by:
+    - MemorySamplerExtension
+    - QueueExtension
+    - PublishExtension
+    - Semaphores, Locks, MultiLocks
+    - PubSub and Variables
+    - ReplayTaskScheduler and related components
+
+Practical usage and examples
+-----------------------------
+
+1) Prioritize a task
+
+- Submit a task with a specific priority. Tasks with higher priority (lower numeric value) are scheduled sooner.
+
+.. code-block:: python
+
+  from distributed import Client
+  client = Client(...)
+
+  # Higher priority (lower value)
+  fut = client.submit(my_func, arg1, arg2, priority=-10)
+
+  # Normal priority (default)
+  fut2 = client.submit(other_func, argA, argB)
+
+2) Constrain a task to specific workers
+
+- Hint the scheduler to run a task only on certain workers.
+
+.. code-block:: python
+
+  # Run on a specific set of workers
+  fut = client.submit(my_func, data, workers=["tcp://127.0.0.1:8786",
+                                              "tcp://10.0.0.5:8786"])
+
+3) Constrain resources
+
+- Require certain resources for a task (e.g., GPUs, special hardware).
+
+.. code-block:: python
+
+  fut = client.submit(my_gpu_func, gpu_data, resources={"GPU": 1})
+
+4) Data locality and memory considerations
+
+- The scheduler naturally prefers workers with relevant data and respects memory pressure via the ActiveMemoryManagerExtension. When memory pressure is high, memory-aware scheduling may delay or evict tasks to maintain budget.
+
+5) Extend or customize policies
+
+- You can influence scheduling by implementing or configuring SchedulerPlugin-based extensions. The built-in extensions listed in DEFAULT_EXTENSIONS (stealing, spans, shuffle, amm, memory_sampler, queues, etc.) demonstrate common strategies you can rely on or override for specialized workloads.
+
+Notes
+-----
+
+- Task and worker selection decisions are driven by the current state, readiness, and policy in effect, which may be augmented by extensions.
+- The primary mechanism for task ordering is a priority-driven, ready-queue approach, guided by data locality and resource/memory constraints.
+- For deeper customization, you can implement your own SchedulerPlugin or adjust how extensions are wired into the scheduler.
+
+References to code-level concepts
+------------------------------
+
+- The scheduler defines task states (released, waiting, no-worker, queued, processing, memory, erred, forgotten) and maintains per-task and per-client data structures to support scheduling decisions.
+- DEFAULT_EXTENSIONS enumerates the scheduling- and resource-management components that influence policy:
+  - "stealing": WorkStealing
+  - "amm": ActiveMemoryManagerExtension
+  - "spans": SpansSchedulerExtension
+  - "shuffle": ShuffleSchedulerPlugin
+  - "memory_sampler": MemorySamplerExtension
+  - "queues": QueueExtension
+  - plus additional extensions for synchronization, publish/subscribe, and resource control
+
+This documentation reflects the policies and components evident in the scheduler’s public interfaces and configuration as implemented in the distributed scheduler code.

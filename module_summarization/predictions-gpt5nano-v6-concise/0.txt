@@ -1,0 +1,194 @@
+Working with assignments and allocations
+========================================
+
+This section documents how to work with assignments and allocations in the ftrack API. It covers what assignments and allocations represent, how to query them, how to create or modify them, and best practices for common workflows. The examples use the high‑level API concepts; consult your server schema for exact field names and available attributes in your environment.
+
+Overview
+--------
+
+- Assignments describe who is responsible for work on a given entity (for example, an asset, task, or shot). An assignment connects a user (the assignee) to an object (the assigned entity) and can carry additional metadata such as role or priority.
+- Allocations describe time-based commitments of a user to work on a given object or within a project. An allocation defines a time window (start/end) and a quantity of work (e.g., hours) allocated to the user for the object.
+
+Typical workflows
+-----------------
+
+- Inspect current workload by listing assignments and allocations for a user or an entity.
+- Schedule work by creating new assignments and allocations.
+- Reassign or adjust scope by updating existing assignments and allocations.
+- Remove completed or obsolete work by deleting assignments or allocations.
+- Track changes via the session’s operation bookkeeping (recorded_operations) for auditing or undo/redo scenarios.
+
+Prerequisites
+-------------
+
+- A running ftrack API session (Session) with appropriate credentials.
+- Access to the server’s schema to determine the exact fields available on Assignment and Allocation entities.
+- Knowledge of the target entity (e.g., Task/Shot/Asset) and the user to whom work is assigned.
+
+Working with assignments
+------------------------
+
+1) List assignments for an entity
+
+- Purpose: see who is assigned to a specific object and with what role.
+- Approach: query the Assignment entity filtered by the target entity.
+
+Example (pseudo-code; adapt to your API surface):
+
+.. code-block:: python
+
+    # Obtain an entity (for example a Task) by its id
+    task_id = 'TASK-123'
+    task = session.find_one('Task', {'id': task_id})
+
+    # Query assignments for the task
+    assignments = session.query('Assignment').where('entity_id = {}'.format(task.id)).all()
+
+    for a in assignments:
+        print('Assignment', a.id, 'assignee', getattr(a, 'owner', None), 'role', getattr(a, 'role', None))
+
+Notes:
+- Field names such as entity_id, owner, and role depend on your server schema. Use the schema or introspection to confirm exact names.
+
+2) Create a new assignment
+
+- Purpose: assign a user to work on an entity.
+- Required information: target entity, assignee, and (optionally) role or other metadata.
+
+Example (pseudo-code):
+
+.. code-block:: python
+
+    task_id = 'TASK-123'
+    user_id = 'user_42'
+    # Build the assignment payload according to your schema
+    payload = {
+        'entity_id': task_id,
+        'owner_id': user_id,
+        'role': 'Lead'            # optional, depends on schema
+        # include any other required fields
+    }
+    assignment = session.create('Assignment', payload)
+
+3) Update an assignment
+
+- Purpose: change assignee, role, or other metadata.
+- Approach: fetch the assignment and modify fields, then save.
+
+Example:
+
+.. code-block:: python
+
+    assignment = session.find_one('Assignment', {'id': 'ASSIGN-789'})
+    assignment.owner_id = 'user_99'  # change assignee
+    assignment.role = 'Reviewer'     # optional
+    assignment.save()
+
+4) Delete an assignment
+
+- Purpose: remove an assignment when it is no longer needed.
+
+Example:
+
+.. code-block:: python
+
+    assignment = session.find_one('Assignment', {'id': 'ASSIGN-789'})
+    assignment.delete()
+
+Working with allocations
+------------------------
+
+1) List allocations for a user or entity
+
+- Purpose: understand time commitments and capacity.
+- Approach: query the Allocation entity filtered by owner and/or target.
+
+Example (pseudo-code):
+
+.. code-block:: python
+
+    user_id = 'user_42'
+    entity_id = 'TASK-123'
+
+    # Allocations for a specific user (and optionally a target)
+    allocations = session.query('Allocation').where('owner_id = {}'.format(user_id)).all()
+    # If you need allocations for a specific entity
+    allocations_for_entity = session.query('Allocation').where('entity_id = {}'.format(entity_id)).all()
+
+    for al in allocations:
+        print('Allocation', al.id, 'owner', al.owner_id, 'start', al.start, 'end', al.end, 'hours', al.hours)
+
+2) Create a new allocation
+
+- Purpose: reserve time for a user on an object.
+- Required information: owner (user), target entity, start/end dates, and hours (or other quantity) allocated.
+
+Example:
+
+.. code-block:: python
+
+    payload = {
+        'entity_id': 'TASK-123',
+        'owner_id': 'user_42',
+        'start': '2025-01-01',
+        'end': '2025-01-01',
+        'hours': 4
+    }
+    allocation = session.create('Allocation', payload)
+
+3) Update an allocation
+
+- Purpose: extend, shorten, or adjust the allocated hours or time window.
+
+Example:
+
+.. code-block:: python
+
+    allocation = session.find_one('Allocation', {'id': 'ALLOC-456'})
+    allocation.start = '2025-01-02'
+    allocation.hours = 6
+    allocation.save()
+
+4) Delete an allocation
+
+- Purpose: remove a time commitment.
+
+Example:
+
+.. code-block:: python
+
+    allocation = session.find_one('Allocation', {'id': 'ALLOC-456'})
+    allocation.delete()
+
+Working patterns and considerations
+-----------------------------------
+
+- Data integrity: ensure that assignments and allocations do not conflict in ways that exceed a user’s availability. Consider validating overlapping allocations or double assignments before persisting.
+- Time zones: store and compare time values in a consistent time zone (UTC is common) to avoid misalignment across systems.
+- Auditing: use the session’s operation tracking to capture changes to assignments and allocations. This can help with undo/redo flows or auditing.
+  - The Session object in this codebase maintains recorded_operations and record_operations flags to track state changes across operations.
+- Performance: for large numbers of assignments or allocations, fetch in batches and apply server-side filtering to minimize data transfer.
+- Schema awareness: exact field names (e.g., entity_id, owner_id, start, end, hours, role) vary by server configuration. Use server-side schema introspection or documentation to map the correct attribute names in your environment.
+
+Common patterns
+--------------
+
+- Retrieve, then modify: fetch an entity, update fields, then save. This follows a standard fetch-modify-save cycle.
+- Use batch operations where possible: for bulk updates, prefer server-side bulk operations or iterative updates with minimal round-trips.
+- Leverage event hub or operation logging: when working in collaborative environments, emit events and capture operation logs to maintain a consistent history of changes.
+
+Best practices
+--------------
+
+- Validate allocations against business rules (e.g., maximum daily hours, non-overlapping allocations for the same user on the same entity).
+- Use clear roles and metadata on assignments to keep work ownership unambiguous.
+- Document the lifecycle of assignments and allocations in your project’s process documentation to ensure consistent usage across teams.
+- Regularly refresh cached schema information when the server schema updates to avoid stale field names.
+
+Notes
+-----
+
+- The exact API surface for Assignment and Allocation (names, field identifiers, and available attributes) depends on your server’s schema. Always consult your environment’s schema or use introspection to determine the correct properties to read or write.
+- The documentation above uses generic Pythonic patterns. Adapt the method names (query, get, create, save, delete) to the specific API surface exposed by your ftrack server version.
+
+If you need concrete, environment-specific examples, provide the exact field names from your server schema or a small snippet of the schema for Assignment and Allocation, and I can tailor the examples precisely.

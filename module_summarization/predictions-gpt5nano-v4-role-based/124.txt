@@ -1,0 +1,170 @@
+Header Interface Transition Guide
+===============================
+
+This guide documents the transition of the header interface by describing the centralized verification framework used to validate, fix, and report header values. It focuses on the verification mechanism exposed by the code in header_transition.rst, including the core options, reporting behavior, and how to reason about transition-related changes when migrating existing header-handling code.
+
+Overview
+--------
+The header verification mechanism provides a unified way to:
+- Validate header values via a defined verification routine (_verify).
+- Report verification issues in a structured, hierarchical manner (_ErrList).
+- Optionally fix fixable issues and control how fixes are reported or raised.
+
+Key concepts:
+- VERIFY_OPTIONS: Set of top-level verification behavior options.
+- _Verify: Base class encapsulating the verification workflow (run_option and verify).
+- _ErrList: Nested error list structure used to accumulate and format verification messages.
+
+Core components
+--------------
+VERIFY_OPTIONS
+- A list of strings that enumerate valid verification flags and combinations used to control both fixing and reporting behavior.
+- Common options include:
+  - ignore: perform no verification or reporting.
+  - warn: emit warnings for issues.
+  - exception: raise an exception on issues.
+  - fix: attempt to fix issues where possible, and report results.
+  - silentfix: fixable issues are fixed, but no immediate reporting is done.
+  - fix+ignore, fix+warn, fix+exception: combinations that separate the fixing behavior from the reporting behavior (the part after the “+” governs reporting).
+  - silentfix+ignore, silentfix+warn, silentfix+exception: similar to the above but with silent-fix semantics for reporting.
+
+_Verify.run_option(...)
+- Purpose: Execute a single verification action for a particular issue.
+- Signature: run_option(self, option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+- Behavior:
+  - If option is "warn" or "exception", the issue is not considered fixable.
+  - If an issue is not fixable, the returned text is prefixed with "Unfixable error: ".
+  - If fixable and a fix function is provided, the function is invoked and the text is appended with the fix_text (default "Fixed.").
+  - Returns a tuple (fixable, text) indicating whether the issue was fixable and a message describing the outcome.
+
+_Verify.verify(...)
+- Purpose: Validate all values in the instance using a specified option.
+- Signature: verify(self, option="warn")
+- Behavior overview:
+  - Option normalization and validation: option must be one of VERIFY_OPTIONS.
+  - If opt == "ignore": nothing happens.
+  - The method defers the actual per-header checks to a subclass-provided _verify(option) method and collects its results as errs.
+  - Option splitting:
+    - If "+" appears, split into fix_opt and report_opt (e.g., "fix+warn" -> fixable vs reportable behavior).
+    - If opt is "fix" or "silentfix", fix_opt and report_opt are derived to ensure backward compatibility (the code historically raised on unfixable errors by default).
+  - Special handling:
+    - "silentfix" with "ignore" yields no output.
+    - When fixable issues are present, the reporting behavior is controlled by the report_opt (e.g., "warn" or "exception").
+  - Filtering and reporting:
+    - A line_filter is chosen to control which messages are included in the report:
+      - "silentfix": filter out fixable issues in the report.
+      - "fix" with "ignore": filter out unfixable issues (only fixed ones reported).
+      - Otherwise, report all messages.
+    - The verification results are gathered via errs.iter_lines(filter=line_filter).
+    - If messages exist:
+      - They’re prefixed with "Verification reported errors:" and followed by a note about zero-based indexing.
+      - If fix_opt == "silentfix" and there are no unfixable issues, return (no report).
+      - If report_opt == "warn" or (fix_opt == "fix" and there are no unfixable issues), emit warnings for each line in messages using VerifyWarning.
+      - Otherwise, raise VerifyError with the combined messages.
+- Notes:
+  - The exact format and content of messages come from the implementation of _verify in subclasses and from _ErrList.iter_lines.
+  - This mechanism supports rich, hierarchical error reporting for header structures.
+
+_ErrList
+--------
+_ErrList is a specialized list structure designed to hold verification error messages in a nested form.
+
+- Constructor: _ErrList(val=(), unit="Element")
+  - Creates a list of error items with an associated unit label for nested levels.
+- __str__(self)
+  - Returns all top-level error messages as a single string, one per line.
+- iter_lines(self, filter=None, shift=0)
+  - Generator that yields (prefix, line) tuples representing each line of the hierarchical error report.
+  - Top-level items that are not _ErrList are yielded with their formatted message.
+  - Nested _ErrList items are traversed recursively, producing headers like "<unit> X:" for subsequent levels when appropriate.
+  - The shift parameter controls indentation in the output (used for pretty printing).
+
+Practical usage and migration guidance
+--------------------------------------
+
+1) Implementing header verification in a transition
+- Create a subclass that implements _verify(self, option) and uses _ErrList to accumulate issues.
+- Example skeleton:
+
+  class MyHeaderVerifier(_Verify):
+      def __init__(self, header):
+          self.header = header
+
+      def _verify(self, option):
+          errs = _ErrList(unit="Header")
+          if self.header.get("NAXIS", 0) <= 0:
+              errs.append((True, "NAXIS must be positive"))
+          if "BITPIX" not in self.header:
+              errs.append((True, "Missing required BITPIX header"))
+          return errs
+
+- Use the verification API:
+
+  verifier = MyHeaderVerifier(header)
+  verifier.verify("warn")          # emits warnings for issues
+  verifier.verify("fix+warn")      # attempt fixes where possible, then warn
+  verifier.verify("silentfix+ignore")  # fixable issues fixed, no report
+
+2) Fixing strategy
+- Use run_option to fix a single issue and return a descriptive text:
+
+  fixable, message = verifier.run_option(
+      option="fix",
+      err_text="NAXIS out of range",
+      fix_text="Adjusted NAXIS to 2.",
+      fix=lambda: self.header.__setitem__("NAXIS", 2),
+      fixable=True,
+  )
+
+- The returned fixable flag indicates whether the issue was fixable and the message documents the outcome.
+
+3) Error reporting shape
+- Errors are accumulated in _ErrList and surfaced through:
+  - __str__ for a human-readable block
+  - iter_lines() for programmatic consumption or formatting
+- The hierarchical structure is designed to clearly separate top-level issues from nested ones, which is useful for complex header structures.
+
+4) Behavior with combined options
+- Understand how "fix" and "warn" interact:
+  - "fix+warn": fixable issues are fixed, and non-fixable issues are warned.
+  - "silentfix+ignore": fixable issues are fixed, but no output is emitted.
+  - "fix+exception": fixed and then raise if any unfixable issues remain.
+- The default behavior when no explicit fix or ignore is provided follows the pattern encoded in _Verify.verify.
+
+5) Backward compatibility and transition notes
+- The verification framework is designed to be incrementally adoptable:
+  - You can implement _verify for a subset of header checks and gradually expand coverage.
+  - Adjustments to reporting behavior can be done by changing the option string, without modifying the underlying verification logic.
+- The nested error reporting provides a clear, actionable report that can be surfaced to users or logs while enabling automated fixes when appropriate.
+
+Examples
+--------
+- Example 1: Basic warning
+  - verifier.verify("warn")
+  - All detected issues are reported as warnings via VerifyWarning.
+
+- Example 2: Raising on errors
+  - verifier.verify("exception")
+  - All issues cause a VerifyError to be raised.
+
+- Example 3: Fixing with reporting
+  - verifier.verify("fix+warn")
+  - Attempt to fix fixable issues; non-fixable issues produce warnings.
+
+- Example 4: Silent fixing
+  - verifier.verify("silentfix+ignore")
+  - Fixable issues are fixed, but no messages are emitted.
+
+Notes
+-----
+- The actual header access and manipulation must be implemented in the subclass (e.g., _verify should inspect self.header and apply fixes via provided callables).
+- The error reporting format and exact messages depend on the specific header checks implemented in _verify.
+
+See also
+--------
+- _Verify: Core verification engine for header values
+- _ErrList: Hierarchical error reporting data structure
+- VERIFY_OPTIONS: Supported verification modes
+- Astropy warnings: VerifyWarning and VerifyError for reporting and error signaling
+
+This header interface transition guide should help developers migrate existing header validation logic to the new unified verification framework, with clear semantics around fixing, reporting, and error formatting.

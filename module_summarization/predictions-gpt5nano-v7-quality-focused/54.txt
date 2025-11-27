@@ -1,0 +1,207 @@
+Working with Large Data Sets
+============================
+
+This section documents the distributed estimation routines used to work with large data sets in a scalable way. It covers sequential and parallel execution, backends supported by joblib, and the default debiased regularized estimation approach. The material reflects the implementation found in the distributed estimation utilities, including the role of node-wise regression and the approximate inverse covariance matrix used for debiasing.
+
+Overview
+--------
+
+- Distributed estimation supports several strategies:
+  - sequential: no extra dependencies
+  - parallel: executes across partitions
+- Parallel execution with joblib backends enables clusters beyond a local machine, including:
+  - dask.distributed
+  - yarn
+  - ipyparallel
+- The framework is generic and supports multiple estimation methods:
+  - debiased regularized estimation (default)
+  - simple coefficient averaging (naive), both regularized and unregularized
+- The default follows the debiasing approach described in
+  Jason D. Lee, Qiang Liu, Yuekai Sun and Jonathan E. Taylor,
+  “Communication-Efficient Sparse Regression: A One-Shot Approach,” arXiv:1503.04337 (2015).
+
+Key variables (as used in the debiasing workflow)
+-----------------------------------------------
+
+- wexog
+  - A weighted design matrix used to perform the node-wise regression procedure.
+- nodewise_row
+  - Produced by the node-wise regression procedure; one per variable using LASSO.
+- nodewise_weight
+  - Derived from gamma_hat values; weights used to reweight gamma_hat values when forming the approximate inverse covariance.
+- approx_inv_cov
+  - The estimate of the approximate inverse covariance matrix, used to debias the coefficient average along with the average gradient. For OLS, approx_inv_cov approximates n * (X^T X)^{-1}, formed by node-wise regression.
+
+API and Core Components
+------------------------
+
+The following internal functions implement the core of the distributed estimation workflow. They are documented here for reference and usage in advanced scenarios.
+
+- _est_regularized_naive(mod, pnum, partitions, fit_kwds=None)
+  - Estimates regularized fitted parameters for a partition using fit_kwds passed to fit_regularized.
+  - Returns the parameter vector for the current partition.
+  - Notes:
+    - fit_kwds must not be None.
+
+- _est_unregularized_naive(mod, pnum, partitions, fit_kwds=None)
+  - Estimates unregularized fitted parameters for a partition using fit_kwds passed to fit.
+  - Returns the parameter vector for the current partition.
+  - Notes:
+    - fit_kwds must not be None.
+
+- _join_naive(params_l, threshold=0)
+  - Joins results from multiple naive naive runs and returns the mean coefficient vector.
+  - Parameters:
+    - params_l: list of parameter arrays (one per partition)
+    - threshold: coefficients with absolute value below this threshold are set to zero
+  - Returns:
+    - The averaged parameter vector after thresholding
+
+- _calc_grad(mod, params, alpha, L1_wt, score_kwds)
+  - Calculates the log-likelihood gradient used for debiasing.
+  - Returns:
+    - Gradient vector matching the parameter dimension
+  - Notes:
+    - For OLS, involves the score function and the penalty terms.
+
+- _calc_wdesign_mat(mod, params, hess_kwds)
+  - Computes the weighted design matrix needed to generate the approximate inverse covariance matrix.
+  - Returns:
+    - An updated design matrix with the same shape as mod.exog, scaled by the Hessian factor
+
+- _est_regularized_debiased(mod, mnum, partitions, fit_kwds=None, score_kwds=None, hess_kwds=None)
+  - Estimates the regularized fitted parameters with debiasing.
+  - Parameters:
+    - mod: Statsmodels model instance for the current partition
+    - mnum: index of the current partition
+    - partitions: total number of partitions
+    - fit_kwds: arguments to fit_regularized
+    - score_kwds: arguments for the score function
+    - hess_kwds: arguments for the Hessian function
+  - Returns:
+    - A tuple of parameters for the regularized fit, including data needed for debiasing
+
+Usage Patterns
+--------------
+
+This section demonstrates typical usage patterns for working with large data sets using the distributed utilities.
+
+Naive regularized averaging (distributed)
+- Partition the data into P parts.
+- For each partition p (0 <= p < P), construct a Statsmodels model (mod) for that partition.
+- Define fit_kwds appropriate for fit_regularized (e.g., penalty type, alpha, L1_wt).
+- Run _est_regularized_naive(mod, p, P, fit_kwds=fit_kwds) on each partition.
+- Collect results and combine with _join_naive.
+
+Example:
+.. code-block:: python
+
+    # Pseudo-code illustrating naive distributed averaging
+    # Partition data into P parts
+    partitions = range(P)
+
+    # Prepare per-partition models (mod_p) with respective data
+    # fit_kwds contains arguments suitable for fit_regularized
+    fit_kwds = {'alpha': 0.1, 'L1_wt': 0.5, 'tol': 1e-6, 'maxiter': 1000}
+
+    params_per_partition = []
+    for p in partitions:
+        mod_p = ...  # construct Statsmodels model for partition p
+        params_p = _est_regularized_naive(mod_p, p, P, fit_kwds=fit_kwds)
+        params_per_partition.append(params_p)
+
+    # Join results by averaging
+    params_mean = _join_naive(params_per_partition, threshold=0.0)
+    print("Distributed regularized mean parameters:", params_mean)
+
+Naive unregularized averaging (distributed)
+- Similar to the regularized case, but use _est_unregularized_naive with fit_kwds suitable for fit.
+
+Example:
+.. code-block:: python
+
+    fit_kwds = {'method': 'qr', 'tol': 1e-6}
+    params_per_partition = []
+    for p in partitions:
+        mod_p = ...  # partitioned data
+        params_p = _est_unregularized_naive(mod_p, p, P, fit_kwds=fit_kwds)
+        params_per_partition.append(params_p)
+
+    params_mean = _join_naive(params_per_partition, threshold=0.0)
+    print("Distributed unregularized mean parameters:", params_mean)
+
+Debiased regularized estimation (distributed)
+- The debiased estimator forms the debiased coefficients by:
+  - Computing the gradient via _calc_grad
+  - Building the weighted design matrix via _calc_wdesign_mat
+  - Running _est_regularized_debiased across partitions
+- This approach ultimately yields debiased coefficient estimates along with the regularized fit.
+
+Example (high-level outline):
+.. code-block:: python
+
+    # Per-partition computations
+    for p in partitions:
+        mod_p = ...  # partition p
+        params_p = _est_regularized_debiased(mod_p, p, P,
+                                             fit_kwds=fit_kwds,
+                                             score_kwds=score_kwds,
+                                             hess_kwds=hess_kwds)
+
+    # Combine debiased estimates as appropriate (may require extra aggregation)
+    # The exact aggregation depends on the implementation details of the debiasing workflow.
+
+Backends and Execution
+----------------------
+
+- Sequential (no extra dependencies) runs on a single process.
+- Parallel execution leverages joblib backends to distribute work across processes or cluster nodes.
+- Supported backends include:
+  - dask.distributed
+  - yarn
+  - ipyparallel
+- When using distributed execution, partition data so that each mod operates on a manageable data slice.
+- Ensure consistent model specification and identical feature columns across partitions to enable correct aggregation.
+
+Data Partitioning and Memory Considerations
+------------------------------------------
+
+- Partition size affects memory usage and wall-clock time. Balance:
+  - Each partition must fit into memory with its design matrix X and response y.
+  - The total number of partitions P should align with available workers or cores.
+- Node-wise regression requires computing, storing, and reweighting intermediate quantities (wexog, nodewise_row, nodewise_weight, approx_inv_cov). Plan memory accordingly.
+- When using debiasing, the approximate inverse covariance (approx_inv_cov) is formed across node-wise regressions and is used to adjust the naive estimates.
+
+Implementation Notes
+--------------------
+
+- The default method is regularized estimation with debiasing, following the approach described in the cited paper.
+- Private functions (prefixed with an underscore) provide building blocks for:
+  - Naive averaging (regularized or unregularized)
+  - Debiasing (gradient computation and weighted design matrices)
+  - Debiased regularized estimation
+- The interface expects:
+  - A Statsmodels model instance for each partition (mod)
+  - The partition index and total partition count
+  - Keyword arguments for model fitting, gradient scoring, and Hessian calculations
+- Parameter vectors returned by the naive estimators have length equal to the number of model coefficients.
+
+Notes and References
+--------------------
+
+- The approach draws on literature describing communication-efficient sparse regression with one-shot debiasing.
+- For further reading, consult:
+  Jason D. Lee, Qiang Liu, Yuekai Sun and Jonathan E. Taylor.
+  "Communication-Efficient Sparse Regression: A One-Shot Approach."
+  arXiv:1503.04337 (2015).
+
+Practical Tips
+--------------
+
+- Start with a small number of partitions to validate the workflow before scaling up.
+- Verify that the same set of features is used across all partitions to avoid misalignment during aggregation.
+- Use a moderate alpha (regularization strength) and L1_wt to control sparsity and numerical stability.
+- When debugging, run in sequential mode to simplify troubleshooting before enabling parallel backends.
+- Monitor memory usage at each step; the node-wise and weighted design matrices can be sizable for high-dimensional data.
+
+This documentation provides a practical guide to implementing and using the large-data distributed estimation routines visible in large_data.rst, including the roles of the core functions, data structures, and typical workflows for naive and debiased estimation.

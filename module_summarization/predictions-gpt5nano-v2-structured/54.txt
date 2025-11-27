@@ -1,0 +1,176 @@
+Working with Large Data Sets
+============================
+
+This documentation describes how to work with large data sets using distributed estimation routines. The approach partitions data across workers and combines per-partition estimates to produce a global parameter estimate. Supported modes include sequential execution (no extra dependencies) and parallel execution via joblib with various backends (e.g., dask.distributed, yarn, ipyparallel).
+
+Overview
+--------
+
+- Purpose: Enable scalable estimation for large data sets by distributing work across multiple processors or machines.
+- Methods:
+  - Sequential: straightforward single-process execution.
+  - Parallel (joblib backends): to leverage clusters and backends supported by joblib (e.g., dask.distributed, yarn, ipyparallel).
+- Estimation options:
+  - Debiased regularized estimation: produces debiased coefficients using an approximate inverse covariance constructed via node-wise regression.
+  - Naive coefficient averaging (two variants):
+    - Regularized naive averaging
+    - Unregularized naive averaging
+- Default: regularized estimation with debiasing, following the methodology described in the referenced paper:
+  Jason D. Lee, Qiang Liu, Yuekai Sun, and Jonathan E. Taylor. "Communication-Efficient Sparse Regression: A One-Shot Approach." arXiv:1503.04337 (2015).
+
+Key Concepts
+------------
+
+- Partitioned data and distributed estimation
+  - The data matrix X and response y are split into partitions. Each partition is fitted independently, then results are combined.
+- Debiasing via approximate inverse covariance
+  - Regularized regression introduces bias. Debiasing uses an approximate inverse covariance matrix (approx_inv_cov) to adjust the naive averages and recover near-unbiased estimates.
+- Wexog, nodewise regression, and related quantities
+  - wexog: a weighted design matrix used for node-wise regression in the construction of the approximate inverse covariance.
+  - nodewise_row: row from node-wise regression for each variable (used to form the inverse covariances via LASSO).
+  - nodewise_weight: weights derived from gamma_hat values to reweight nodewise gamma_hat values.
+  - approx_inv_cov: the estimated approximate inverse covariance matrix; for OLS this approximates n*(X^T X)^{-1} up to scaling.
+- Estimation helpers (internal)
+  - _est_regularized_naive: estimates regularized parameters on a partition.
+  - _est_unregularized_naive: estimates unregularized parameters on a partition.
+  - _join_naive: combines per-partition estimates by taking their mean and applying a threshold to shrink small coefficients to zero.
+  - _calc_grad: computes the log-likelihood gradient for debiasing.
+  - _calc_wdesign_mat: builds a weighted design matrix used in debiasing.
+  - _est_regularized_debiased: debiased regularized estimation for a partition (part of the default pipeline).
+
+Usage
+-----
+
+Prerequisites
+
+- Python and StatsModels installed.
+- Optional: joblib and a compatible backend for parallel execution (e.g., dask, ipyparallel).
+
+Typical workflow
+
+1) Partition the data
+- Split your large dataset (X, y) into P partitions.
+
+2) Fit per-partition models
+- For each partition, create a statsmodels model (e.g., OLS) and fit either:
+  - Regularized naive: with fit_kwds suitable for fit_regularized (e.g., elastic net).
+  - Unregularized naive: standard fit (fit).
+
+3) Combine per-partition estimates
+- Use _join_naive to compute the mean coefficient vector across partitions and optionally apply a threshold to zero out small coefficients.
+
+4) Optional: Debiasing
+- If using the debiased approach, compute gradients, weighted design matrices, and the debiased estimates using _est_regularized_debiased (and related helpers) for each partition.
+
+Code examples
+-------------
+
+Example 1: Naive averaging (regularized)
+
+- Partition data into K parts, fit each partition with regularization, and join results.
+
+```python
+from statsmodels.regression.linear_model import OLS
+import numpy as np
+
+# y, X are your large dataset (N x p)
+# partitions: list of (y_i, X_i) for i in range(K)
+partitions = [(y_i, X_i) for y_i, X_i in zip(y_partitions, X_partitions)]
+K = len(partitions)
+
+params_list = []
+fit_kwds = dict(method='elastic_net', alpha=0.1, L1_wt=0.5)
+
+for pnum, (y_i, X_i) in enumerate(partitions):
+    mod_i = OLS(y_i, X_i)
+    p_i = _est_regularized_naive(mod_i, pnum, K, fit_kwds=fit_kwds)
+    params_list.append(p_i)
+
+params_joined = _join_naive(params_list, threshold=0.0)
+print("Joined parameters:", params_joined)
+```
+
+Example 2: Naive averaging (unregularized)
+
+```python
+# Similar setup as Example 1, but use unregularized fit
+params_list = []
+fit_kwds = dict()  # provide appropriate options for the unregularized fit
+
+for pnum, (y_i, X_i) in enumerate(partitions):
+    mod_i = OLS(y_i, X_i)
+    p_i = _est_unregularized_naive(mod_i, pnum, K, fit_kwds=fit_kwds)
+    params_list.append(p_i)
+
+params_joined = _join_naive(params_list, threshold=0.0)
+print("Joined unregularized parameters:", params_joined)
+```
+
+Example 3: Parallel execution with joblib
+
+```python
+from joblib import Parallel, delayed
+
+# Prepare per-partition model objects and fit_kwds as in Example 1
+models = [OLS(y_i, X_i) for (y_i, X_i) in partitions]
+fit_kwds = dict(method='elastic_net', alpha=0.1, L1_wt=0.5)
+
+def fit_partition(i, mod):
+    return _est_regularized_naive(mod, i, K, fit_kwds=fit_kwds)
+
+params_list = Parallel(n_jobs=4)(delayed(fit_partition)(i, mod) for i, mod in enumerate(models))
+params_joined = _join_naive(params_list, threshold=0.0)
+print("Joined parameters (parallel):", params_joined)
+```
+
+Example 4: Debiased regularized estimation (per-partition)
+
+```python
+# For each partition, supply score and Hessian keywords as needed
+score_kwds = dict()  # define as appropriate for your model
+hess_kwds = dict()   # define as appropriate for your model
+
+params_debiased = []
+for mnum, (y_i, X_i) in enumerate(partitions):
+    mod_i = OLS(y_i, X_i)
+    p_debiased = _est_regularized_debiased(
+        mod_i, mnum, K,
+        fit_kwds=dict(method='elastic_net', alpha=0.1, L1_wt=0.5),
+        score_kwds=score_kwds,
+        hess_kwds=hess_kwds
+    )
+    params_debiased.append(p_debiased)
+
+# Combine or further process params_debiased as needed (not shown here)
+```
+
+Notes
+-----
+
+- The exact fit_kwds, score_kwds, and hess_kwds depend on your model and the underlying statistics. Use appropriate options for the statsmodels fit and the debiasing routine.
+- The debiasing workflow relies on the weighted design matrix and the approximate inverse covariance (approx_inv_cov) generated from node-wise regression. See the source for details on wexog, nodewise_row, nodewise_weight, and approx_inv_cov.
+- The default configuration aims to balance accuracy and communication efficiency, suitable for large-scale data.
+
+API Reference (summary)
+-----------------------
+
+- _est_regularized_naive(mod, pnum, partitions, fit_kwds=None)
+  - Fit a regularized model on a single partition and return the coefficient vector.
+- _est_unregularized_naive(mod, pnum, partitions, fit_kwds=None)
+  - Fit an unregularized model on a single partition and return the coefficient vector.
+- _join_naive(params_l, threshold=0)
+  - Join per-partition parameter estimates by averaging; apply a coefficient threshold.
+- _calc_grad(mod, params, alpha, L1_wt, score_kwds)
+  - Compute the gradient for the debiasing step.
+- _calc_wdesign_mat(mod, params, hess_kwds)
+  - Compute the weighted design matrix for debiasing.
+- _est_regularized_debiased(mod, mnum, partitions, fit_kwds=None, score_kwds=None, hess_kwds=None)
+  - Debiased estimation for a partition (part of the default pipeline).
+
+See Also
+--------
+
+- The debiasing approach follows the framework described in:
+  Jason D. Lee, Qiang Liu, Yuekai Sun, and Jonathan E. Taylor. "Communication-Efficient Sparse Regression: A One-Shot Approach." arXiv:1503.04337 (2015).
+
+This documentation provides guidance for using the distributed estimation routines to handle large data sets efficiently, with practical examples and references to the internal helpers used in the implementation.

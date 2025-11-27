@@ -1,0 +1,118 @@
+# Data component in an image HDU
+
+## Overview
+In a FITS file, an ImageHDU contains a Data component that represents the pixel data of the image as a NumPy array. This data is the primary numeric payload of the image and is typically accessed via the ImageHDU's data attribute. The implementation integrates with memory-mapped IO for large datasets, a verification framework to report or fix issues, and an internal notifier system to propagate changes to interested listeners.
+
+Key supporting utilities in this module include a lightweight verification system and a nested verification error structure, which help validate and report on data-related conditions for image extensions.
+
+## Key Components
+- _ErrList
+  - A specialized list structure used to accumulate verification error messages in a nested, hierarchical form.
+  - Important methods:
+    - __str__ to render error messages
+    - iter_lines to traverse the nested error structure with indentation
+  - Example (simplified):
+    - _ErrList(…)
+      - iter_lines(filter=None, shift=0)
+
+- _Verify
+  - Shared verification utilities used to validate values within an instance (such as an ImageHDU’s Data component).
+  - Core methods:
+    - run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+      - Executes verification with a chosen option and optionally applies a fix.
+      - Example return: (fixable, text)
+    - verify(option="warn")
+      - Performs verification across all relevant values.
+      - Supports options like "ignore", "warn", "exception", "fix", "silentfix" and combinations such as "fix+warn".
+  - VERIFY_OPTIONS
+    - List of supported verification modes, e.g.:
+      - "ignore", "warn", "exception", "fix", "silentfix", "fix+ignore", "fix+warn", "fix+exception", "silentfix+ignore", "silentfix+warn", "silentfix+exception"
+
+- NotifierMixin
+  - Mixin class that enables objects to register listeners and notify them about changes.
+  - Important concepts:
+    - _add_listener: register a listener with a weak reference
+    - _notify: broadcast change events to listeners via listener._update_change_type(...)
+  - Intended for internal use to communicate changes between components (e.g., when the Data component changes).
+
+- Supporting utilities
+  - The module relies on standard data handling and IO tooling (e.g., gzip, mmap, numpy) to efficiently manage image data, including memory mapping for large arrays.
+
+## Usage
+- Accessing the image data
+  - Typical usage involves opening a FITS file and inspecting the image data via the ImageHDU, for example:
+    - with fits.open('image.fits') as hdul:
+        data = hdul[0].data
+    - To modify and write back (where applicable), use update modes and flush:
+        - with fits.open('image.fits', mode='update') as hdul:
+            hdul[0].data[...] = new_values
+            hdul.flush()
+
+- Verifying the image data
+  - The verification framework can be used to check and optionally fix issues related to the Data component:
+    - v = _Verify()
+    - fixable, text = v.run_option(option="warn", err_text="Data type mismatch")
+    - v.verify(option="fix+warn")
+  - Available options are defined in VERIFY_OPTIONS:
+    - ignore, warn, exception, fix, silentfix, fix+ignore, fix+warn, fix+exception, silentfix+ignore, silentfix+warn, silentfix+exception
+
+- Observing changes to the Data component
+  - If your workflow requires reacting to changes in the Data component, the NotifierMixin utilities provide a mechanism to register listeners and receive change notifications.
+
+## Details
+- Data handling
+  - The Data component is backed by NumPy arrays and may be large enough to warrant memory-mapped IO via mmap, enabling efficient access without loading the entire dataset into memory.
+  - Import dependencies indicating this capability include mmap, numpy, and related IO tooling.
+
+- Verification workflow
+  - The verification system is designed to separate reporting from fixing:
+    - Options can combine fix behavior with reporting (e.g., "fix+warn").
+    - Certain combinations suppress output (e.g., "silentfix") when no issues remain or when reporting is not desired.
+  - The _ErrList structure provides a hierarchical representation of errors, enabling clear, indented reporting of nested issues.
+
+- Internal-notification system
+  - NotifierMixin is provided for internal communication between components that monitor or depend on the Data component. It enables registering listeners and dispatching change notifications in a controlled, weak-referenced manner to avoid memory leaks.
+
+Code excerpts (for reference)
+- Verification options and workflow
+  - VERIFY_OPTIONS = [
+      "ignore",
+      "warn",
+      "exception",
+      "fix",
+      "silentfix",
+      "fix+ignore",
+      "fix+warn",
+      "fix+exception",
+      "silentfix+ignore",
+      "silentfix+warn",
+      "silentfix+exception",
+    ]
+
+  - class _Verify:
+      def run_option(self, option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True):
+          text = err_text
+          if option in ["warn", "exception"]:
+              fixable = False
+          elif not fixable:
+              text = f"Unfixable error: {text}"
+          else:
+              if fix:
+                  fix()
+              text += "  " + fix_text
+          return (fixable, text)
+
+  - class _ErrList(list):
+      def __init__(self, val=(), unit="Element"):
+          super().__init__(val)
+          self.unit = unit
+
+      def __str__(self):
+          return "\n".join(item[1] for item in self.iter_lines())
+
+- NotifierMixin description (docstring excerpt)
+  - Mixin class that provides services by which objects can register listeners to changes on that object.
+  - All methods underscored for internal use; use _add_listener to register, _notify to notify listeners.
+  - When notifying: listener._update_change_type(*args, **kwargs) is called if the method exists.
+
+Note: This documentation focuses on the Data component in an image HDU as reflected by the provided source, including the verification and notification utilities that relate to data integrity and change tracking. For concrete API details and examples, refer to the full implementation in the actual codebase.

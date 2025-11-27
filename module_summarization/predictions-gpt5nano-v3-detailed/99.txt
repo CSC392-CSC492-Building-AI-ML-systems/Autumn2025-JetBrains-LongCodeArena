@@ -1,0 +1,184 @@
+Introduction
+------------
+This module provides a set of utilities and asynchronous filter classes for working with Ethereum-like event logs, blocks, transactions, and Whisper (Shh) messages. It uses gevent-based Greenlets to watch for changes and dispatch callbacks, with support for event parameter filtering, data payload filtering, and past-log retrieval.
+
+Overview of API
+---------------
+Key functions
+- construct_event_filter_params(event_abi, contract_address=None, argument_filters=None, topics=None, fromBlock=None, toBlock=None, address=None)
+  - Builds filter parameters suitable for web3.eth.filter and returns a tuple:
+    - data_filters_set: a structure describing per-parameter filters derived from the event ABI and argument_filters
+    - filter_params: a dict of filter criteria (e.g., topics, address, fromBlock, toBlock) ready for use with web3
+  - Supports flexible topic construction and address handling (address, contract_address, or both)
+
+- construct_data_filter_regex(data_filter_set)
+  - Produces a compiled regular expression used to validate log data payloads against a set of data filters
+  - Used by LogFilter to efficiently filter log entries by their data field
+
+Key classes
+- Filter (base class)
+  - Async filter loop implemented as a Greenlet
+  - Core behavior:
+    - Watches for changes via the underlying provider (web3.eth.getFilterChanges or web3.shh.getFilterChanges)
+    - Dispatches callbacks for entries that pass is_valid_entry
+  - Important methods:
+    - watch(*callbacks): register callback(s) and start watching if not already running
+    - stop_watching(timeout=0) / stopWatching: stop watching and uninstall the filter
+    - format_entry(entry): hook to transform an entry before callbacks (default: identity)
+    - is_valid_entry(entry): hook for additional filtering (default: always True)
+
+- BlockFilter(Filter)
+  - Specialized Filter placeholder for block-related events
+
+- TransactionFilter(Filter)
+  - Specialized Filter placeholder for transaction-related events
+
+- LogFilter(Filter)
+  - Watches for log entries (Ethereum logs)
+  - Data filtering via data_filter_set and data_filter_set_regex
+  - get(only_changes=True): fetches logs either as changes or full logs
+  - set_data_filters(data_filter_set): set and compile data filters for validation
+  - is_valid_entry(entry): validates against compiled data filter regex
+
+- PastLogFilter(LogFilter)
+  - Fetches past logs once (via getFilterLogs) and fires callbacks, then stops
+  - Useful for bootstrapping listeners with historical data
+
+- ShhFilter(Filter)
+  - Watches Whisper (Shh) messages
+  - Similar behavior to Filter but uses web3.shh APIs
+
+- ZERO_32BYTES
+  - Regex fragment representing a 32-byte hex value: '[a-f0-9]{64}'
+
+Usage Scenarios
+---------------
+1) Build event filter parameters for a contract event
+- Use construct_event_filter_params to derive both data and filter criteria.
+
+```python
+# Example: construct event filter parameters
+event_abi = ...  # ABI for the event
+contract_address = "0x0123456789abcdef0123456789abcdef01234567"
+argument_filters = {"sender": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+
+data_filters_set, filter_params = construct_event_filter_params(
+    event_abi,
+    contract_address=contract_address,
+    argument_filters=argument_filters,
+    topics=None,
+    fromBlock=None,
+    toBlock=None,
+    address=None
+)
+
+# data_filters_set can be used with a web3 filter constructor as needed
+# filter_params can be supplied to web3.eth.filter(filter_params)
+```
+
+2) Create and run a LogFilter with data payload filtering
+```python
+# web3 is a connected Web3 instance
+log_filter = LogFilter(
+    web3,
+    filter_id=1234,
+    data_filter_set=[
+        # Example: filter on first parameter equal to a specific value, second param ignored
+        ['0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef', None]
+    ],
+    log_entry_formatter=lambda e: {
+        "blockNumber": e.get("blockNumber"),
+        "data": e.get("data"),
+        "logIndex": e.get("logIndex"),
+        "topics": e.get("topics"),
+    }
+)
+
+def on_log(entry):
+    print("Filtered log:", entry)
+
+log_filter.watch(on_log)
+# Logs arriving via web3 will be passed to on_log if they match the data filters
+```
+
+3) Retrieve past logs for bootstrapping
+```python
+past_filter = PastLogFilter(
+    web3,
+    filter_id=5678,
+    data_filter_set=[['0xabcdef...', None]]
+)
+
+def on_past_log(entry):
+    print("Past log:", entry)
+
+past_filter.watch(on_past_log)
+# PastLogFilter will fetch and emit matching logs once, then stop
+```
+
+4) Whisper filter example
+```python
+shh_filter = ShhFilter(web3, filter_id=42)
+
+def on_message(msg):
+    print("Incoming Whisper:", msg)
+
+shh_filter.watch(on_message)
+```
+
+Important parameters and return values
+--------------------------------------
+- construct_event_filter_params(...)
+  - Returns: (data_filters_set, filter_params)
+  - data_filters_set: structure describing per-parameter event filters (as produced by construct_event_data_set)
+  - filter_params: dict with keys such as topics, address, fromBlock, toBlock, suitable for web3.eth.filter
+
+- construct_data_filter_regex(data_filter_set)
+  - Returns: compiled regular expression (re.Pattern)
+  - Used to validate log entry data payloads against the provided data_filter_set
+
+- Filter.watch(*callbacks)
+  - Registers one or more callbacks to receive formatted entries
+  - Starts the filter in the background if not already running
+
+- Filter.stop_watching(timeout=0)
+  - Stops the background filter, uninstalls the filter in the provider, and waits for the Greenlet to exit
+
+- LogFilter.get(only_changes=True)
+  - Returns a list of formatted log entries
+  - If only_changes is True, fetches new logs since the last poll; otherwise fetches all matching logs
+
+- PastLogFilter: behavior
+  - _run fetches past logs once via getFilterLogs, invokes callbacks for matching entries, and then stops
+
+- ShhFilter._run and stop_watching
+  - Mirrors Filter behavior but for Whisper (Shh) filters
+
+Edge cases and considerations
+-----------------------------
+- Address filtering
+  - When both address and contract_address are provided:
+    - If address is a list, it's extended with contract_address
+    - If address is a string, it becomes a two-element list [address, contract_address]
+    - If address is neither string nor array, a ValueError is raised
+  - If only address or only contract_address is provided, it is used directly
+- Data filter semantics
+  - data_filter_set is interpreted by construct_data_filter_regex; None values result in 32-byte wildcard matches
+  - If data_filter_set is empty or all None, is_valid_entry will allow all entries
+- Live watching vs past retrieval
+  - get() cannot be called while a filter is actively watching (raises ValueError)
+  - PastLogFilter is designed for one-shot historical delivery and then stops
+- Restart behavior
+  - Attempting to restart a running Filter raises a ValueError
+  - Subclasses rely on the base class semantics for lifecycle management
+- Performance considerations
+  - The data payload filtering uses a compiled regex; complex filters may impact performance on high-throughput environments
+- Compatibility
+  - This module assumes a Web3-compatible provider with methods like getFilterChanges, getFilterLogs, getFilter, uninstallFilter, and Whisper (Shh) equivalents
+
+Notes
+-----
+- The module relies on external helpers (construct_event_topic_set, construct_event_data_set) to derive event-specific filtering criteria from an event ABI and argument filters.
+- Callbacks receive entries after format_entry(entry) is applied; format_entry can be overridden via log_entry_formatter or subclass overrides.
+
+End of Documentation

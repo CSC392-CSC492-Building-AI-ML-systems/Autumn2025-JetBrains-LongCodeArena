@@ -1,0 +1,147 @@
+Quantile Regression (QuantReg)
+==============================
+
+Overview
+--------
+
+This module implements a Quantile Regression model using Iteratively Reweighted Least Squares (IRLS). The model estimates conditional quantiles of the response variable and uses kernel density estimation to obtain an asymptotic covariance matrix for the parameter estimates.
+
+Key features
+- Supports arbitrary quantiles q in [0, 1], with the special case q = 0.5 corresponding to the Least Absolute Deviations (LAD) estimator.
+- Parameter covariance can be estimated with different variance-covariance (vcov) options:
+  - robust: heteroskedasticity-robust standard errors (default)
+  - iid: iid errors (as in Stata 12)
+- Kernel density estimation for the asymptotic covariance with selectable kernels:
+  - biweight (biw)
+  - cosine (cos)
+  - Epanechnikov (epa)
+  - Gaussian (gau)
+  - Parzen (par)
+- Bandwidth selection methods for the kernel density estimation:
+  - hsheather (Hall-Sheather, 1988)
+  - bofinger (Bofinger, 1975)
+  - chamberlain (Chamberlain, 1994)
+
+API
+---
+
+Classes
+- QuantReg(endog, exog, **kwargs)
+  - Inherits from RegressionModel.
+  - endog: array-like, endogenous/response variable.
+  - exog: array-like, exogenous/regressor variables (including a constant if desired).
+  - kwargs: forwarded to the base class (e.g., start_params, etc.).
+
+Methods
+- whiten(self, data)
+  - Returns data unchanged (no whitening performed in this implementation).
+- fit(self, q=.5, vcov='robust', kernel='epa', bandwidth='hsheather',
+       max_iter=1000, p_tol=1e-6, **kwargs)
+  - Solve the quantile regression by Iterative Weighted Least Squares.
+  - Parameters:
+    - q: float in [0, 1], the target quantile to estimate.
+    - vcov: str, variance-covariance estimation method ('robust' or 'iid').
+    - kernel: str, kernel used in the asymptotic covariance estimation. Options: biw, cos, epa, gau, par.
+    - bandwidth: str, bandwidth selection method. Options: hsheather, bofinger, chamberlain.
+    - max_iter: int, maximum number of IRLS iterations.
+    - p_tol: float, convergence tolerance.
+    - kwargs: additional keyword arguments passed to the underlying regression machinery.
+  - Returns: typically a fitted results object (e.g., RegressionResultsWrapper) containing parameter estimates and associated statistics.
+
+Notes
+-----
+
+- The Least Absolute Deviation (LAD) estimator is obtained when q = 0.5.
+- The asymptotic covariance matrix follows the approach described in Greene (2008), using kernel density estimation with the selected kernel and bandwidth method.
+- The implementation validates input:
+  - q must be within [0, 1].
+  - kernel must be one of the supported kernel names.
+  - bandwidth must be one of the supported methods.
+- The algorithm starts from an initial beta (vector of ones with length equal to the rank of exog) and iteratively updates using an OLS-like step with reweighting based on the current residuals.
+- Warnings for convergence or iteration limits are available via the Statsmodels warnings system (ConvergenceWarning, IterationLimitWarning).
+
+Algorithmic details
+--------------------
+
+- Initialization:
+  - Compute the rank of the exogenous design matrix to determine model degrees of freedom.
+  - Initialize beta as a vector of ones.
+  - Compute initial OLS-like update to obtain a starting beta.
+- Iterative loop (until convergence or max_iter):
+  - Compute residuals: resid = endog - exog @ beta.
+  - Apply a piecewise-linear transform to residuals based on q to implement the tilted loss function.
+  - Normalize residuals and update a reweighted design matrix xstar = exog / resid.
+  - Update beta by solving a weighted least squares system: beta = (xstar' xexog)^{-1} xstar' endog.
+  - Check convergence via the maximum absolute change in beta (diff).
+- Convergence criteria:
+  - Converged when diff <= p_tol or when max_iter is reached.
+
+Examples
+--------
+
+Basic usage (default settings, 0.5 quantile)
+- This example fits the median (q = 0.5) quantile regression with robust standard errors and Epanechnikov kernel for covariance estimation.
+
+.. code-block:: python
+
+  import numpy as np
+  import statsmodels.api as sm
+  from statsmodels.regression.quant_regression import QuantReg
+
+  # Example data
+  n = 200
+  X = sm.add_constant(np.random.randn(n, 2))
+  beta_true = np.array([1.0, -2.0, 0.5])
+  y = X @ beta_true + np.random.randn(n)
+
+  # Fit quantile regression model
+  model = QuantReg(y, X)
+  res = model.fit(q=0.5, vcov='robust', kernel='epa', bandwidth='hsheather')
+  print(res.summary())
+
+Quantile with custom kernel and bandwidth
+- Demonstrates usage of non-default covariance estimation settings.
+
+.. code-block:: python
+
+  res = model.fit(q=0.25, vcov='robust', kernel='gau', bandwidth='hsheather')
+  print(res.summary())
+
+Notes for developers
+--------------------
+
+- The available kernel functions and bandwidth estimators are defined elsewhere in the module; the fit method maps user-friendly names to internal functional objects.
+- This implementation uses a straightforward IRLS scheme; for large datasets consider numerical stability and potential degenerate fits.
+- The results object is typically a RegressionResultsWrapper, populated by the framework after fitting.
+
+References
+----------
+
+- Greene, W. H. Econometric Analysis. Sixth Edition, International Student Edition.
+- Koenker, R. Quantile Regression. Cambridge University Press.
+- LeSage, J. P. Applied Econometrics Using MATLAB.
+- Hall, P., and S. Sheather. On the distribution of the Studentized quantile (1988).
+- Bofinger, E. (1975). Estimation of a density function using order statistics.
+- Chamberlain, G. (1994). Quantile regression, censoring, and the structure of wages.
+
+Dependencies
+------------
+
+- NumPy
+- SciPy
+- Statsmodels utilities (for regression framework and exceptions)
+
+Implementation notes
+--------------------
+
+- The fit method performs input validation for q, kernel, and bandwidth.
+- The initial beta is set to ones, with convergence guided by p_tol and max_iter.
+- The whitening step is a no-op in this implementation.
+- The covariance estimation relies on the chosen kernel and bandwidth methods, which are implemented elsewhere in the codebase.
+
+Authors and license
+--------------------
+
+- Author: Vincent Arel-Bundock
+- License: BSD-3
+- Original IRLS implementation contributed by Shapour Mohammadi ( Matlab ), with later port by Christian Prinoth.

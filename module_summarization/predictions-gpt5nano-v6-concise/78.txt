@@ -1,0 +1,214 @@
+# filenode.rst — Generate documentation for the FileNode IO module
+
+This document provides developer-focused documentation for the FileNode IO module used to expose PyTables file nodes as Python IO streams. It covers the public API, core behaviors, usage patterns, and practical examples. The module is designed to let you treat PyTables file nodes as ordinary binary files, with a consistent io-based interface.
+
+---
+
+## Overview
+
+The FileNode module provides a binary file-like interface for use inside PyTables database files. It enables:
+
+- Creating brand-new file nodes that can be read and written like normal Python files.
+- Opening existing file nodes for read-only or read-write access.
+- Read access is always available; write access is governed by the mode (append-only for new files or existing files opened with append mode).
+
+Key features:
+
+- Fully compliant with Python’s `io` interfaces (as of version 3.0).
+- Only binary I/O is supported.
+- Works with NumPy-backed data when reading and writing.
+- Internal validations guard node type, version, and mode consistency.
+
+Public constants and core class:
+
+- `NodeType = 'file'` — Node type system attribute value for file nodes.
+- `NodeTypeVersions = [1, 2]` — Supported NODE_TYPE_VERSION values.
+- `RawPyTablesIO` — Base class implementing a binary, file-like IO interface for PyTables file nodes.
+
+Versioning note:
+
+- Version changed in 3.0: the module was rewritten to be fully compliant with Python’s `io` interfaces.
+
+---
+
+## Public API
+
+### NodeType
+- Type: string
+- Value: `'file'`
+- Purpose: Identifies the node system attribute used to denote the kind of node (a file-like node in PyTables).
+
+### NodeTypeVersions
+- Type: list of int
+- Value: `[1, 2]`
+- Purpose: Enumerates the supported values for the `NODE_TYPE_VERSION` system attribute.
+
+### RawPyTablesIO (class)
+- Type: subclass of `io.RawIOBase`
+- Purpose: Provides a low-level, binary IO interface to a PyTables file node. It serves as the base for integrating a PyTables file node with Python’s IO stack.
+
+#### Constructor
+- Signature: `RawPyTablesIO(node, mode=None)`
+- Parameters:
+  - `node`: The PyTables file node to operate on. The object is expected to expose PyTables node internals (e.g., attributes, methods) used by the implementation.
+  - `mode` (optional): IO mode string (e.g., `'r'`, `'w'`, `'a'`, `'r+'`, etc.). If `None`, the mode is inferred from `node._v_file.mode`.
+- Behavior:
+  - Validates the node and its attributes.
+  - Determines effective mode and cross-checks with the underlying PyTables file mode.
+  - Initializes internal state (position, version, value shape helper, and element type).
+
+#### Important internal attributes (as used by the implementation)
+- `_node` — The underlying PyTables node object.
+- `_mode` — The IO mode used for the stream.
+- `_pos` — Current byte position in the stream.
+- `_version` — Node type version (e.g., 1 or 2).
+- `_vshape` — A function to shape a byte count to a read/write vector size per version.
+- `_vtype` — Underlying data type of the node’s atoms.
+
+---
+
+## Core Behavior and Semantics
+
+- Inheritance: `RawPyTablesIO` inherits from `io.RawIOBase`, enabling the standard binary IO protocol (readinto, write, seek, tell, etc.) to apply to PyTables file nodes.
+- Positioning:
+  - `tell()` returns the current byte position.
+  - `seek(pos, whence=0)` adjusts the current position with standard semantics:
+    - `whence=0` (start): offset must be non-negative.
+    - `whence=1` (current): offset is relative to current position.
+    - `whence=2` (end): offset is relative to end; negative values are contoured to end.
+- Readable/Writable:
+  - `readable()` returns `True` if the stream mode permits reading (contains `'r'` or `'+'`).
+  - `writable()` returns `True` if the stream mode permits writing (contains `'w'`, `'a'`, or `'+'`).
+- I/O operations:
+  - `readinto(b)` reads up to `len(b)` bytes into the provided buffer `b` and returns the number of bytes read.
+  - Internal optimization paths exist for efficient data transfer when possible (e.g., directly filling numpy arrays).
+  - `truncate(pos=None)` enlarges the file (if necessary) and fills the gap with zeros when truncating is used to grow; this operation is limited to growing the file and is not intended for in-place rewrites.
+- File-like semantics:
+  - `fileno()` returns the underlying file descriptor if available; otherwise raises an error.
+  - `flush()` flushes write buffers via the underlying PyTables file.
+  - `close()` releases the node reference and marks the IO as closed.
+  - `seekable()` always returns `True` in this implementation.
+
+Notes on error handling:
+- The class performs closed-state checks via `_checkClosed()` before IO operations.
+- Mode validation and cross-checks are performed against the underlying PyTables file mode through `_check_mode()` and `_cross_check_mode()`. These helpers are assumed to be provided by the base or surrounding infrastructure.
+
+---
+
+## Typical Usage Patterns
+
+Because `RawPyTablesIO` is designed to act as a low-level binary IO backend, most user code will wrap it with Python’s higher-level IO wrappers to obtain a convenient reader/writer.
+
+- Create a new file node and obtain a binary writer:
+  - This assumes you have access to a PyTables node object via `new_node(...)` (or equivalent) that returns a node compatible with `RawPyTablesIO`.
+  - You wrap the raw IO with a buffered writer for convenient API.
+
+  Example (conceptual):
+  - Note: Replace `new_node(...)` with the actual API from PyTables for creating a file node.
+
+  - Python:
+    - Create node
+    - raw = RawPyTablesIO(node, mode='w+b')
+    - buf = io.BufferedWriter(raw)
+    - buf.write(b'hello world')
+    - buf.flush()
+    - buf.close()
+
+- Open an existing node for reading:
+  - raw = RawPyTablesIO(node, mode='r')
+  - buf = io.BufferedReader(raw)
+  - data = buf.read(1024)
+  - buf.close()
+
+- Open an existing node for read/write (append):
+  - raw = RawPyTablesIO(node, mode='a+')
+  - buf = io.BufferedRandom(raw)
+  - buf.write(b'append this')
+  - buf.seek(0)
+  - data = buf.read()
+
+- Integrating with NumPy:
+  - When reading into a NumPy array, the internal path may fill a NumPy-backed buffer and then be converted to bytes as needed.
+
+Important: The module’s IO is binary. If you need text processing, perform an explicit encoding/decoding step after reading/writing.
+
+---
+
+## Examples
+
+### Example 1: Creating and writing to a new file node (conceptual)
+
+```python
+import io
+import numpy as np
+import tables as tb
+# Assume new_node() returns a PyTables Node compatible with RawPyTablesIO
+# node = new_node(...)
+
+# raw IO for the node
+raw = RawPyTablesIO(node, mode='w+b')
+# High-level wrapper
+stream = io.BufferedWriter(raw)
+
+# Write bytes
+stream.write(b'PyTables FileNode demo')
+stream.flush()
+stream.close()
+```
+
+### Example 2: Reading from an existing file node
+
+```python
+# node = existing_node(...)
+raw = RawPyTablesIO(node, mode='r')
+reader = io.BufferedReader(raw)
+
+content = reader.read()
+print(content)  # bytes
+reader.close()
+```
+
+### Example 3: Read/Write with a general approach
+
+```python
+# Open for read and write (append)
+raw = RawPyTablesIO(node, mode='a+')
+stream = io.BufferedRandom(raw)
+
+# Append data
+stream.write(b'extra data')
+stream.seek(0)
+print(stream.read())  # read from start
+stream.close()
+```
+
+---
+
+## Migration and Versioning Notes
+
+- Version 3.0 marks a complete rewrite to align with Python’s `io` module interfaces. If you rely on older behavior, review the public API and adjust mode strings and buffering as needed.
+- The `NodeType` and `NodeTypeVersions` constants define the node system attributes used for compatibility checks across PyTables versions.
+
+---
+
+## Best Practices
+
+- Always wrap `RawPyTablesIO` with a higher-level IO buffer (e.g., `io.BufferedReader`, `io.BufferedWriter`, or `io.BufferedRandom`) to obtain a convenient stream-like interface.
+- Use binary IO; avoid text processing at the IO boundary.
+- Leverage NumPy for efficient bulk transfers when possible (e.g., reading into a pre-allocated NumPy array).
+- Ensure proper closing of streams to release node references and flush buffers.
+
+---
+
+## Reference
+
+- Module: FileNode IO for PyTables
+- Public constants:
+  - `NodeType = 'file'`
+  - `NodeTypeVersions = [1, 2]`
+- Public class:
+  - `RawPyTablesIO(node, mode=None)`
+
+For a complete usage guide, see the Filenode Users Guide (filenode_usersguide) referenced in the module docstring. The guide contains concrete examples and integration steps with the PyTables node lifecycle (creation, opening, closing, and type/version handling).
+
+If you need, I can tailor this documentation to a specific format (RST) or expand individual sections with more precise code samples based on your PyTables version and node creation APIs.

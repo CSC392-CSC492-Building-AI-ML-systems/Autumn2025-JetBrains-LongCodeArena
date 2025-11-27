@@ -1,0 +1,136 @@
+Neural network models (supervised)
+===================================
+
+
+Overview
+--------
+
+This section documents the supervised neural network utilities provided by the codebase. It covers:
+
+- Activation functions and their in-place implementations
+- Derivatives of activations for backpropagation (in-place)
+- Loss functions commonly used for regression and classification
+- How to compose these pieces in forward and backward passes
+- Practical examples demonstrating usage and integration in a simple two-layer network
+- Extensibility and practical notes for developers
+
+API and core concepts
+---------------------
+
+Activation functions (in-place)
+- Available activations (mutate input in place):
+  - identity: no change
+  - tanh: hyperbolic tangent
+  - logistic: logistic (sigmoid)
+  - relu: rectified linear unit
+  - softmax: K-way softmax (row-wise)
+
+- Mapping: ACTIVATIONS
+  - Values are functions with signature inplace_activation(X), which modify X in place to contain the activated values.
+
+Example:
+- Z = X.copy(); ACTIVATIONS["relu"](Z)  # Z now contains ReLU(X)
+
+Activation derivatives (in-place)
+- For backpropagation, derivatives are provided as in-place functions that modify the backpropagated error signal (delta) given the activation outputs Z from the forward pass.
+- Available derivatives (only for some activations):
+  - identity: derivative is a no-op
+  - tanh: derivative factor 1 - Z^2
+  - logistic: derivative factor Z * (1 - Z) (uses Z which is the activation output)
+  - relu: derivative is 0 where Z == 0, otherwise unchanged
+
+- Mapping: DERIVATIVES
+  - Values are functions with signature inplace_derivative(Z, delta), which modify delta in place to reflect dL/dZ.
+
+Loss functions
+- Supported losses include typical supervised objectives:
+  - squared_loss(y_true, y_pred): for regression (mean squared error, scaled by 1/2 as per convention in code)
+  - log_loss(y_true, y_prob): cross-entropy loss for multi-class classification (probabilities from predict_proba)
+  - binary_log_loss(y_true, y_prob): cross-entropy loss for binary/multi-label scenarios
+- Usage examples:
+  - loss = squared_loss(y_true, y_pred)
+  - loss = log_loss(y_true, y_prob)
+  - loss = binary_log_loss(y_true, y_prob)
+
+Notes on shapes and stability
+- Data shapes:
+  - Features input X: shape (n_samples, n_features)
+  - Activation outputs Z: shape matches the input to the activation
+  - Delta (backprop signal): same shape as Z
+  - For multi-class problems, y_true and y_prob are typically shaped (n_samples, n_classes)
+- The log_loss implementations clip probabilities to numeric stability bounds eps = machine epsilon for the given dtype.
+- Softmax implementation uses a numerically stable form: subtract max per row before exponentiation.
+
+Typical usage pattern (forward and backward)
+- Forward: compute linear pre-activations, apply an activation in place to obtain activations, compute next layer, etc.
+- Backward: start with delta at the output (often y_pred - y_true for squared loss; or derived from cross-entropy with softmax), apply derivatives to backpropagate through activations (in-place), update weights accordingly.
+
+Example 1: simple two-layer network (forward pass)
+- Objective: regression with squared_loss, using ReLU in the hidden layer and identity at the output.
+
+Code sketch:
+- X: (n_samples, n_features)
+- W1: (n_features, n_hidden)
+- W2: (n_hidden, n_outputs)
+- y_true: (n_samples, n_outputs)
+
+Z1 = X.dot(W1)               # (n_samples, n_hidden)
+A1 = Z1.copy()
+ACTIVATIONS["relu"](A1)      # in-place ReLU on A1
+
+Z2 = A1.dot(W2)               # (n_samples, n_outputs)
+Y_pred = Z2.copy()             # output activation is identity here
+# If you want to apply an activation, apply in-place to Y_pred accordingly
+
+loss = squared_loss(y_true, Y_pred)
+
+Example 2: backward pass (gradient steps without biases)
+- Assume output activation is identity (common for regression)
+- delta = Y_pred - y_true  # derivative of squared_loss w.r.t. Y_pred
+
+# Backprop to W2
+# If there is an activation on Z2, apply its derivative to delta first, e.g.:
+# DERIVATIVES["identity"](Z2, delta)
+
+dW2 = A1.T.dot(delta) / n_samples  # gradient for W2
+W2 -= lr * dW2
+
+# Backprop to hidden layer
+delta1 = delta.dot(W2.T)            # (n_samples, n_hidden)
+DERIVATIVES["relu"](Z1, delta1)     # applies ReLU derivative to delta1 in place
+
+dW1 = X.T.dot(delta1) / n_samples
+W1 -= lr * dW1
+
+Notes:
+- Bias terms are not included in these utilities; if your model includes biases, handle them separately (e.g., as separate parameters and corresponding gradient updates).
+- The in-place nature of ACTIVATIONS and DERIVATIVES favors memory-efficient updates in tight training loops.
+- For sparse inputs, care should be taken: the in-place activation/derivative utilities are written to operate on dense arrays. If you plan to use sparse matrices, you may need to convert to dense form or implement sparse-friendly variants.
+
+Extending the API
+- To add a new activation:
+  - Implement a function new_activation_inplace(X) that mutates X in place.
+  - Add to ACTIVATIONS: "new_activation": new_activation_inplace
+- To add the derivative:
+  - Implement new_derivative_inplace(Z, delta) following the same signature pattern.
+  - Add to DERIVATIVES: "new_activation": new_derivative_inplace
+- Ensure the derivative uses Z as the activation output from the forward pass, and delta is modified in place to reflect dL/dZ.
+
+Practical considerations
+- Numeric stability:
+  - Softmax is implemented to be stable by subtracting the row-wise max before exponentiation.
+  - log_loss clips predictions to [eps, 1 - eps] to avoid log(0).
+- Use cases:
+  - Regression: squared_loss with identity output or appropriate activation on the final layer
+  - Multi-class classification: log_loss with softmax probabilities
+  - Binary/multi-label classification: binary_log_loss with sigmoid (logistic) outputs
+
+References to code structure (for developers)
+- ACTIVATIONS: mapping of activation names to in-place implementations
+- DERIVATIVES: mapping of activation names to in-place derivative implementations
+- LOSS_FUNCTIONS: mapping of loss names to their corresponding callable implementations (squared_loss, log_loss, binary_log_loss)
+
+Example test snippet (conceptual)
+- Create a tiny dataset, perform a forward pass, compute loss, and execute a small backward step as described above to validate shapes and in-place behavior.
+
+Code blocks are illustrative; adapt to your project’s exact weight initialization, bias handling, and training loop conventions.

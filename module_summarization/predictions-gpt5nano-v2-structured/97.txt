@@ -1,0 +1,142 @@
+How Mitogen Works: Tutorial
+=============================
+
+This tutorial explains, at a high level, how Mitogen orchestrates remote execution and module distribution. It focuses on the core concepts, data flow, and the role of the main building blocks that power Mitogen’s remote execution model.
+
+Overview
+--------
+
+Mitogen is designed to execute Python code in a separate process or on a remote host while maintaining a simple, high-performance API on the caller side. A lightweight bootstrap payload is sent to every new slave context, after which interprocess or network communication proceeds via a message bus built around a Broker/Router model. Core capabilities include module loading, function invocation, and routing/logging across process boundaries.
+
+Key Concepts
+------------
+
+- Master and Slave (Context)
+  - The “master” creates and controls work to be executed remotely.
+  - Each remote process (slave) runs a bootstrap payload that establishes the Mitogen runtime and connects to the master’s Broker/Router.
+
+- Broker and Router
+  - The Broker handles IO and message transport.
+  - The Router manages message routing between contexts, including add/removing routes and handling disconnections.
+
+- Channel and IO
+  - Communication occurs over channels with a configurable buffer size. A typical default buffer (128KiB) is chosen for performance and memory considerations.
+
+- Messages and Opcodes
+  - Mitogen uses a compact, numeric message protocol. Each message carries an opcode and associated payload.
+  - The code defines opcodes such as:
+    - GET_MODULE
+    - CALL_FUNCTION
+    - FORWARD_LOG
+    - ADD_ROUTE
+    - DEL_ROUTE
+    - ALLOCATE_ID
+    - SHUTDOWN
+    - LOAD_MODULE
+    - FORWARD_MODULE
+    - DETACHING
+    - CALL_SERVICE
+    - STUB_CALL_SERVICE
+  - A special sentinel value IS_DEAD signals disconnection or an inability to route a message.
+
+- Module Loading and Execution
+  - Modules can be loaded on the remote side and functions invoked by the master.
+  - There are dedicated messages to load modules and to forward module data as needed.
+
+- Bootstrap Payload
+  - The bootstrap implementation is shipped to every new slave context to initialize Mitogen’s runtime and establish routing, without pulling in non-essential code that would bloat the slave process.
+
+How Data Flows Through Mitogen
+------------------------------
+
+1. Establishing a Slave Context
+   - The master creates a context for remote execution.
+   - A bootstrap payload is sent to initialize the Mitogen runtime on the slave.
+
+2. Allocating IDs and Routing
+   - The master may allocate IDs for remote objects or routes, using ALLOCATE_ID.
+   - ADD_ROUTE and DEL_ROUTE messages keep the Router’s view of how to reach remote contexts up to date.
+
+3. Loading Modules
+   - When remote code needs to be executed, the master uses LOAD_MODULE to send the necessary module data to the slave.
+   - FORWARD_MODULE may be used to forward already-loaded module data to another context or to adapt to routing changes.
+
+4. Invoking Remote Functions
+   - CALL_FUNCTION messages carry the function to be executed and its arguments on the remote context.
+   - The remote side executes the function and sends back a response with the result or an error.
+
+5. Logging and Service Calls
+   - FORWARD_LOG messages allow log records generated on the slave to be forwarded back to the master.
+   - CALL_SERVICE and STUB_CALL_SERVICE support service-like interactions between master and remote contexts.
+
+6. Detaching and Shutdown
+   - DETACHING signals indicate a context is being torn down or a route is being cleaned up.
+   - SHUTDOWN instructs the remote side to gracefully shut down and release resources.
+
+Example: End-to-End Flow (High-Level)
+-------------------------------------
+
+- Master requests a remote operation:
+  - SEND: ALLOCATE_ID to reserve a remote identifier.
+  - SEND: LOAD_MODULE with the needed module bytes.
+  - SEND: CALL_FUNCTION with the module’s function name and arguments.
+- Slave executes:
+  - Loads the module, finds the function, runs it, captures the result or exception.
+  - Returns a reply via the Broker/Router with the outcome.
+- Master processes the reply:
+  - If successful, use the result; if an error occurred, handle/propagate the exception.
+  - Optionally SEND FORWARD_LOG to capture logs from the slave.
+
+Practical Tips and Considerations
+----------------------------------
+
+- Buffer sizing
+  - The default per-call/buffer size is designed as a balance between CPU efficiency and memory usage. Large messages may require fewer IO iterations but consume more RAM; small messages incur more IO cycles. The 128KiB benchmark is a commonly effective default.
+
+- Robust routing
+  - Use ADD_ROUTE and DEL_ROUTE to keep the Router’s view in sync with dynamic topology changes (e.g., slaves disconnecting or reappearing).
+
+- Dead-end handling
+  - IS_DEAD is used to indicate a failed route or a disconnected sender. Code should gracefully handle this sentinel by cleaning up or retrying appropriately.
+
+- Bootstrap behavior
+  - The bootstrap code is intentionally lightweight and sent to new slave contexts to enable rapid startup and a consistent execution environment across contexts.
+
+Minimal Code Snippet (Conceptual)
+----------------------------------
+
+The following pseudo-flow illustrates the core steps a master performs to execute a remote function. This is illustrative and not a drop-in API usage.
+
+# Pseudo-code (conceptual)
+master_context = mitogen.master.create_context(remote_host)
+slave_id = master_context.allocate_id()
+
+# Load the required module on the remote side
+module_bytes = read_module('mymodule')
+master_context.send('LOAD_MODULE', module_bytes, target=slave_id)
+
+# Call a function remotely
+args = (1, 2, 3)
+kwargs = {'verbose': True}
+master_context.send('CALL_FUNCTION', {'func': 'mymodule.my_func', 'args': args, 'kwargs': kwargs}, target=slave_id)
+
+# Receive result
+result = master_context.recv_somehow()
+
+Notes
+-----
+
+- The above flow highlights the roles of opcodes and the lifecycle of a remote invocation.
+- The actual Mitogen API abstracts these details behind higher-level constructs, but understanding these opcodes can help in debugging complex workflows.
+
+Further Reading
+--------------
+
+- Architecture diagrams and code references within the Mitogen codebase for Broker, Router, and channel implementations.
+- Debugging tips for routing failures and dead-end scenarios.
+- Tuning guidelines for large-scale deployments with many remote contexts.
+
+End of Tutorial
+---------------
+
+This concludes a high-level tour of how Mitogen works, including the core components, message protocol, and data flow from master to remote contexts.

@@ -1,0 +1,202 @@
+Calibration of Predicted Probabilities
+========================================
+
+This documentation provides a practical tutorial for probability calibration using the CalibratedClassifierCV class. It explains when and why to calibrate, the available calibration methods, cross-validation behavior, and concrete usage examples.
+
+Introduction
+------------
+
+Predictive models often output scores or decision values that are not well aligned with true probabilities. Calibration maps a model’s raw outputs to well-calibrated probability estimates, enabling reliable probability-based decision making and proper interpretation of predicted probabilities.
+
+Key ideas:
+- Calibration methods: sigmoid (Platt scaling) or isotonic regression.
+- Cross-validation is used to generate unbiased calibration data and, optionally, to form an ensemble of calibrated classifiers for prediction.
+- Calibration can be performed on top of estimators that do or do not natively provide probability estimates via predict_proba.
+- The API supports both standard training workflows and a “prefit” workflow for separating training and calibration data.
+
+Core Concepts
+-------------
+
+- CalibratedClassifierCV
+  - Calibrates the predicted probabilities of an underlying estimator.
+  - Supports two calibration methods:
+    - sigmoid: Platt’s method (logistic regression) applied to the estimator outputs.
+    - isotonic: a non-parametric isotonic regression-based calibration.
+  - Cross-validation (cv) controls how calibration data are generated:
+    - ensemble=True (default): train-calibrate on each CV split and average probability estimates across folds.
+    - ensemble=False: use cross_val_predict to obtain unbiased predictions for calibration; at prediction time, the estimator trained on all data is used.
+  - prefit option: cv="prefit" uses a pre-fitted estimator and calibrates on the provided data without further cross-validation.
+  - Calibration uses decision_function if available; otherwise, it uses predict_proba.
+
+API Overview (CalibratedClassifierCV)
+--------------------------------------
+
+- estimator: The base classifier to calibrate. If not supplied, a default (e.g., LinearSVC) may be used depending on the context.
+- method: 'sigmoid' (Platt scaling) or 'isotonic' (default='sigmoid').
+- cv: Cross-validation strategy (None/5-fold by default, integer folds, CV splitter, or "prefit").
+- n_jobs: Number of parallel jobs.
+- ensemble: If True (default), fits a calibrated estimator per CV fold and averages predictions. If False, uses cross_val_predict for calibration and uses the full-estimator for prediction.
+- base_estimator: Deprecated alias for estimator.
+- Attributes (after fit):
+  - classes_: Class labels.
+  - n_features_in_, feature_names_in_: Feature information if the base estimator exposes it.
+  - calibrated_classifiers_: List of calibrated estimators (length depends on cv or 1 for "prefit"/ensemble=False).
+
+Tutorial: Probability Calibration Workflow
+-------------------------------------------
+
+This tutorial demonstrates how to calibrate probabilities for a binary classification problem using CalibratedClassifierCV.
+
+Prerequisites:
+- A dataset with features X and binary labels y.
+- A base estimator that can be used for classification (e.g., LinearSVC, SVC, LogisticRegression).
+
+Step-by-step guide
+1. Prepare data
+   - Split data into train/calibration/test sets or rely on cross-validation for calibration.
+2. Choose a calibration method
+   - method='sigmoid' for Platt scaling (default).
+   - method='isotonic' for a non-parametric approach (watch for overfitting with small calibration sets).
+3. Create the calibrator
+   - Use CalibratedClassifierCV with your base estimator and chosen method.
+4. Fit and predict
+   - Fit on training data (calibration happens via cross-validation by default).
+   - Predict calibrated probabilities with predict_proba on new samples.
+5. Evaluate
+   - Use Brier score, reliability diagrams, or calibration curves to assess calibration quality.
+
+Example 1: Binary classification with LinearSVC and sigmoid calibration
+--------------------------------------------------------------
+
+This example demonstrates calibrating a LinearSVC with Platt scaling.
+
+.. code-block:: python
+   :language: python
+
+   from sklearn.datasets import make_classification
+   from sklearn.svm import LinearSVC
+   from sklearn.calibration import CalibratedClassifierCV
+   from sklearn.model_selection import train_test_split
+   from sklearn.metrics import brier_score_loss
+
+   # Generate a binary classification dataset
+   X, y = make_classification(n_samples=1000, n_features=20,
+                              n_informative=15, n_redundant=5,
+                              random_state=42)
+
+   # Split data into train and test sets
+   X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2,
+                                                       random_state=42, stratify=y)
+
+   # Base estimator without native probabilistic outputs
+   base_estimator = LinearSVC()
+
+   # Calibrate probabilities with sigmoid (Platt scaling)
+   calibrated_clf = CalibratedClassifierCV(base_estimator, method='sigmoid', cv=5)
+
+   # Fit (calibration occurs inside)
+   calibrated_clf.fit(X_train, y_train)
+
+   # Predict calibrated probabilities for the positive class
+   probs = calibrated_clf.predict_proba(X_test)[:, 1]
+
+   # Evaluate calibration quality
+   brier = brier_score_loss(y_test, probs)
+   print("Brier score (calibrated):", brier)
+
+Notes:
+- LinearSVC does not provide predict_proba; calibration uses the decision_function via Platt scaling to obtain probabilities.
+- The cv=5 setting performs cross-validated calibration; the final prediction for new data is the average of calibrated probabilities across folds.
+
+Example 2: Isotonic calibration
+--------------------------------
+
+Isotonic calibration can be useful when a non-parametric calibration is appropriate and enough calibration samples are available.
+
+.. code-block:: python
+   :language: python
+
+   from sklearn.svm import LinearSVC
+   from sklearn.calibration import CalibratedClassifierCV
+
+   base_estimator = LinearSVC()
+   isotonic_clf = CalibratedClassifierCV(base_estimator, method='isotonic', cv=5)
+   isotonic_clf.fit(X_train, y_train)
+
+   probs = isotonic_clf.predict_proba(X_test)[:, 1]
+   # Evaluate as needed (e.g., Brier score, reliability diagram)
+
+Notes:
+- Isotonic calibration can overfit with small calibration samples (especially when calibration data are << 1000 samples). Prefer sigmoid calibration when calibration data are limited.
+
+Example 3: Using prefit estimator (cv="prefit")
+----------------------------------------------
+
+When you already have a fitted estimator, you can calibrate using cv="prefit".
+
+.. code-block:: python
+   :language: python
+
+   from sklearn.svm import LinearSVC
+   from sklearn.calibration import CalibratedClassifierCV
+
+   # Fit the base estimator on the full training data
+   base_estimator = LinearSVC().fit(X_train, y_train)
+
+   # Calibrate using the prefit estimator (no further cross-validation)
+   prefit_clf = CalibratedClassifierCV(base_estimator, method='sigmoid', cv="prefit")
+   prefit_clf.fit(X_train, y_train)  # uses all data for calibration
+
+   probs = prefit_clf.predict_proba(X_test)[:, 1]
+
+Notes:
+- When using cv="prefit", ensure that training data and calibration data are disjoint if you intend to evaluate on unseen data.
+
+How Calibration Works Under the Hood
+-----------------------------------
+
+- Decision function vs probability:
+  - If the base estimator provides a decision_function, calibration is applied to that output.
+  - Otherwise, calibration uses predict_proba to produce calibrated probabilities.
+
+- Cross-validation and ensembles:
+  - ensemble=True (default): for each CV split, fit the base estimator on the training portion, calibrate on the test portion, and average probabilities across folds for final predictions.
+  - ensemble=False: use cross_val_predict to obtain unbiased predictions on the training data, calibrate, and use the estimator trained on all data for final predictions.
+
+- Validation targets:
+  - Calibration relies on the true labels in the calibration set to learn the mapping from raw scores (or decision values) to probabilities.
+
+Practical Tips
+--------------
+
+- Method selection:
+  - Use 'sigmoid' for most problems; it provides a smooth parametric calibration and tends to be robust when calibration data are moderate.
+  - Use 'isotonic' if you have a large calibration set and suspect non-parametric calibration is beneficial. Be cautious of overfitting with small datasets.
+
+- Data splitting:
+  - If you have limited data, rely on cross-validated calibration (default) rather than a separate hold-out calibration set.
+
+- Model choices:
+  - CalibratedClassifierCV works with estimators that expose decision_function or predict_proba. If your estimator does not provide these, consider replacing it with one that does or use a different calibration approach.
+
+- Evaluation:
+  - In addition to Brier score, visualize reliability diagrams or calibration curves to assess how well calibrated probabilities align with observed frequencies.
+
+- Performance notes:
+  - Calibration introduces additional training passes over data via cross-validation. Parallelization can speed up calibration with n_jobs, especially for large datasets.
+
+References and Further Reading
+------------------------------
+
+- CalibratedClassifierCV: probability calibration with isotonic regression or sigmoid (Platt scaling) and cross-validation.
+- Isotonic Regression for probability calibration.
+- Platt Scaling (sigmoid calibration) for probabilistic outputs.
+- Calibration curves and reliability diagrams as diagnostic tools.
+
+See Also
+--------
+
+- calibration_curve, reliability diagrams, and related plotting utilities in the calibration module.
+- Cross-validation and cross_val_predict for generating unbiased predictions during calibration.
+
+This document provides a practical tutorial for probability calibration using CalibratedClassifierCV, with concrete code examples and guidance on when and how to apply each calibration strategy.

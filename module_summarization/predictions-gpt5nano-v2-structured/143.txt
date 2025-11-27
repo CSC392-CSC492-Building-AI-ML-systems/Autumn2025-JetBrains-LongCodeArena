@@ -1,0 +1,131 @@
+memory.rst
+
+Managing Memory
+===============
+
+This document describes how memory is managed within the distributed system and provides guidance on configuring, observing, and reacting to memory pressure to maintain stable operation.
+
+Overview
+--------
+
+Memory management ensures that computations can proceed without exhausting available RAM on workers. Key aspects include:
+
+- Tracking memory usage on each worker
+- Spilling data to disk when memory limits are approached
+- Evicting or releasing cached data when necessary
+- Providing visibility into memory usage via dashboards and metrics
+- Tuning memory-related behavior to suit workloads and hardware
+
+Key Concepts
+------------
+
+- Memory usage: The amount of RAM consumed by data and tasks on a worker. This includes in-memory data structures, task results, and cached intermediates.
+- Memory limit: A per-worker boundary used to determine when to take action to free memory (e.g., spill to disk or pause task submission).
+- Spill to disk: When memory usage nears the limit, data may be written to disk to free RAM while keeping the data accessible for future computations.
+- Eviction: Removing cached or least-needed data from memory to keep usage within limits.
+- Futures memory footprint: Local references to results of remote computations (Future objects) contribute to memory usage on the client side; releasing or discarding futures and results helps reclaim memory.
+
+Configuring Memory
+------------------
+
+Memory management is driven by per-worker memory limits and policy decisions made by the scheduler/worker. In practice, you configure these limits when starting workers or clusters.
+
+Example: Start a LocalCluster with a per-worker memory limit
+- Python
+  - from dask.distributed import LocalCluster, Client
+  - cluster = LocalCluster(n_workers=4, threads_per_worker=1, memory_limit="2 GiB")
+  - client = Client(cluster)
+
+- This sets a 2 GiB memory limit per worker. The memory manager will spill or evict data as needed to avoid exceeding this limit.
+
+Observing Memory Usage
+----------------------
+
+Memory usage is exposed via dashboards and programmatic metrics. Typical observables include:
+
+- Current memory usage per worker
+- Memory limit per worker
+- Spill and eviction counts (how often data has been moved to disk or removed from memory)
+- Trends over time to identify memory pressure late in a workflow
+
+Best practices for observation:
+- Regularly monitor the worker dashboards to spot rising memory usage.
+- Use the scheduler/client metrics to identify which tasks or data are driving memory consumption.
+- Correlate memory usage with job execution patterns to optimize task granularity and data locality.
+
+Handling Memory Pressure
+------------------------
+
+When memory pressure is detected, the system may take several automatic actions to maintain stability:
+
+- Spill to disk: Move selected in-memory data to disk to free RAM while preserving the ability to retrieve it later.
+- Evict cached data: Remove less frequently accessed data from memory.
+- Pause new task submissions: Stop or delay scheduling new tasks if memory is critically low.
+- Cancel or restart tasks: In some scenarios, canceling or restarting long-running tasks can reduce memory consumption.
+
+Operational guidance:
+- If you repeatedly hit memory limits, consider increasing per-worker memory limits, adding more workers, or revising task granularity to reduce peak memory usage.
+- Examine data locality and shuffles; rebalancing data or changing shuffle strategies can reduce memory pressure.
+- Use memory profiling to identify large intermediates and adjust algorithms accordingly.
+
+Futures and Memory
+------------------
+
+Futures represent results of remote computations held locally by the client. They contribute to the client's memory footprint while active. To manage memory effectively:
+
+- Release futures when results are no longer needed:
+  - result = future.result()
+  - del future
+  - del result
+- Use streaming or chunked results for large outputs when possible to reduce peak memory usage on the client.
+
+Code Examples
+-------------
+
+Starting a cluster with memory limits (example)
+```python
+from dask.distributed import LocalCluster, Client
+
+# 4 workers, 2 GiB per worker
+cluster = LocalCluster(n_workers=4, memory_limit="2 GiB")
+client = Client(cluster)
+
+# Your computations here
+```
+
+Querying memory usage (conceptual)
+```python
+# Inspect per-worker memory metrics via the dashboard or client-side tooling
+# Example (pseudo-code; adjust to your environment):
+# mem_info = client.scheduler_info()['workers']
+# for host, info in mem_info.items():
+#     print(host, info['memory'], info['memory_limit'])
+```
+
+Managing futures to control client-side memory
+```python
+from distributed import Client
+client = Client(...)
+
+f = client.submit(some_heavy_function, data)
+# ... later, use the result
+res = f.result()
+# Release references to free memory
+del f
+del res
+```
+
+Best Practices
+--------------
+
+- Start with conservative memory limits and scale up as you observe actual usage.
+- Favor task granularity that avoids large peak intermediates.
+- Use data locality and caching policies to reduce cross-node data transfers that spike memory usage.
+- Regularly monitor both worker and client memory footprints and set up alerts for abnormal growth.
+- For long-running workflows, periodically review and prune cached data that is no longer needed.
+
+References
+----------
+
+- Distributed memory management concepts and configuration may vary by version. Consult your deployment’s specific memory management documentation for exact configuration keys and API semantics.
+- Use the built-in dashboards and metrics exposed by your cluster to diagnose and tune memory behavior.

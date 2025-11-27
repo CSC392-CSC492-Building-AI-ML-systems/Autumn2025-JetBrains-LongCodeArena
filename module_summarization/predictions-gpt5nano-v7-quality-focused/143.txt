@@ -1,0 +1,165 @@
+Memory Management
+=================
+
+Overview
+--------
+
+This module manages memory for distributed computations by coordinating client references, futures, and scheduler interactions. It uses lazy binding and weak references to minimize memory retention while ensuring necessary data remains available for remote computations.
+
+Global Client Registry
+----------------------
+
+What it is
+^^^^^^^^^^^
+
+A registry of Client instances kept as a weak reference map. This avoids preventing garbage collection of clients that are no longer in use.
+
+How it works
+^^^^^^^^^^^^^^
+
+- _global_clients is a WeakValueDictionary[int, Client]. Values are weakly referenced, so when a Client is no longer referenced elsewhere, it can be collected and automatically removed from the registry.
+- _global_client_index assigns unique integer keys to registered clients.
+- _current_client is a ContextVar that can hold a Client in the current context.
+
+Lifecycle and memory behavior
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- _get_global_client()
+  - Returns the most recent non-closed client from the registry.
+  - Cleans up closed clients from the registry as they are discovered.
+
+- _set_global_client(c)
+  - Registers a Client in the global registry.
+  - Sets c._set_as_default = True to mark it as the default client for the current context.
+  - Increments the global index to ensure a unique key for each client.
+
+- _del_global_client(c)
+  - Explicitly removes a specific Client from the registry if found.
+
+Code references
+```
+_global_clients: weakref.WeakValueDictionary[int, Client]
+_global_client_index = [0]
+_current_client: ContextVar[Client | None] = ContextVar("_current_client", default=None)
+```
+
+Example
+
+- Registering a client for global use:
+```
+_set_global_client(my_client)
+```
+
+- Retrieving an available global client:
+```
+c = _get_global_client()
+```
+
+Futures and Memory
+------------------
+
+What is a Future
+^^^^^^^^^^^^^^^^
+
+A Future is a local proxy to a result computed remotely. It carries the remote key, the owning client, and state information to track progress and results without eagerly materializing remote data locally.
+
+Lazy binding and memory footprint
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Futures bind to a Client lazily via _bind_late. If no client is set, it attempts to acquire one with get_client().
+- When binding, the Future increments a per-key reference count in the client:
+  - self._client._inc_ref(self.key)
+  - self._generation is set from self._client.generation
+- The per-key state is stored in client.futures:
+  - If the key already exists, the corresponding FutureState is reused.
+  - Otherwise, a new FutureState is created and stored as client.futures[self.key].
+- Memory-aware communication with the scheduler:
+  - If inform is True, the Future sends an update to the scheduler to declare that the client desires the given key:
+    - {"op": "client-desires-keys", "keys": [self.key], "client": self._client.id}
+- Optional state handling:
+  - If an input_state is provided, the code attempts to find and apply a corresponding state handler in self._client._state_handlers.
+
+Key interactions
+^^^^^^^^^^^^^^^^
+
+- Reference management: _inc_ref(self.key) helps track which remote keys are needed, aiding memory accounting on the client side.
+- Local vs remote memory: The Future keeps a lightweight local proxy and defers heavy data transfer or computation results until explicitly requested.
+- Cleanup: When Futures become unused and Clients are GC’d, weak references and context management help release memory.
+
+Code references
+```
+def __init__(self, key, client=None, inform=True, state=None):
+    self.key = key
+    self._cleared = False
+    self._client = client
+    self._input_state = state
+    self._inform = inform
+    self._state = None
+    self._bind_late()
+
+def _bind_late(self):
+    if not self._client:
+        try:
+            client = get_client()
+        except ValueError:
+            client = None
+        self._client = client
+    if self._client and not self._state:
+        self._client._inc_ref(self.key)
+        self._generation = self._client.generation
+
+        if self.key in self._client.futures:
+            self._state = self._client.futures[self.key]
+        else:
+            self._client.futures[self.key] = FutureState()
+            self._state = self._client.futures[self.key]
+
+        if self._inform:
+            self._client._send_to_scheduler(
+                {
+                    "op": "client-desires-keys",
+                    "keys": [self.key],
+                    "client": self._client.id,
+                }
+            )
+
+        if self._input_state is not None:
+            try:
+                handler = self._client._state_handlers[self._input_state]
+            except KeyError:
+                pass
+            else:
+                handler
+```
+
+Context and state
+-----------------
+
+Context management
+^^^^^^^^^^^^^^^^^^
+
+- _current_client is a ContextVar used to scope a Client to a particular logical context. This helps ensure memory references are confined to the active workflow or thread, aiding predictable cleanup and avoiding unintended retention.
+
+- The default client can be recorded in _set_global_client for reuse, while weak references in the registry ensure that forgotten clients do not survive in memory.
+
+State management
+^^^^^^^^^^^^^^
+
+- Each key tracked by a Client has an entry in client.futures, storing a FutureState object that captures progress and result metadata.
+- Optional input_state enables applying a specific state handler when binding a Future, allowing customized memory- or lifecycle-related behaviors per state.
+
+Practical tips
+--------------
+
+- Favor lazy binding (default in Future) to avoid retaining large remote graphs or data structures in memory until needed.
+- Rely on weak references for the global client registry to prevent memory leaks as clients go out of scope.
+- Use context-local clients (via ContextVar) to limit memory retention to the active execution context.
+
+See Also
+--------
+
+- Future: A proxy for remote computations (see class Future)
+- Client lifecycle and reference counting: _inc_ref, client.futures
+- Scheduler communication for memory awareness: op "client-desires-keys"
+
+This document reflects the memory-management behavior evident in the provided code, including the use of weak references for the global client registry, lazy binding of Futures, and per-key state management within each Client.

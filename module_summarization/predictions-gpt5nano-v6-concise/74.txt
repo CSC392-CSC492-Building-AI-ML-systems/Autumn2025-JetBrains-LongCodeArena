@@ -1,0 +1,157 @@
+# Random Projection transformers
+
+Overview
+- This module provides lightweight, computationally efficient dimensionality reduction by projecting data into a lower-dimensional space using random projections.
+- The main idea is to reduce dimensionality with controlled distortion of pairwise distances, trading a small amount of accuracy (variance) for faster computations and smaller models.
+- Theoretical foundation: Johnson-Lindenstrauss lemma. With a random projection matrix, distances between points are preserved up to a factor of (1 ± eps) with high probability:
+  - (1 - eps) ||u - v||^2 <= ||p(u) - p(v)||^2 <= (1 + eps) ||u - v||^2
+  - Here, u and v are rows from a dataset of shape (n_samples, n_features), and p is a projection by a random Gaussian or sparse matrix.
+- The module exposes both dense Gaussian projections and sparse projections (Achlioptas-style) with adjustable density.
+
+Public API
+- johnson_lindenstrauss_min_dim(n_samples, eps=0.1)
+  - Compute a safe (minimum) number of components required to achieve an eps-embedding for a given set of samples.
+- GaussianRandomProjection
+  - Transformer that projects data using a dense Gaussian random matrix.
+  - Parameters typically include n_components and random_state.
+- SparseRandomProjection
+  - Transformer that projects data using a sparse random matrix (e.g., Achlioptas matrices with a specified density).
+  - Parameters include n_components, density, and random_state.
+- __all__ exported names:
+  - "SparseRandomProjection"
+  - "GaussianRandomProjection"
+  - "johnson_lindenstrauss_min_dim"
+
+Key concepts and implementation notes
+- Random matrix generation
+  - Gaussian random matrix: entries drawn from N(0, 1/n_components) (or similar scaling) to stabilize variance in the projected space.
+  - Sparse (Achlioptas) matrices: use a specified density to sparsify the projection matrix, reducing computation and memory usage.
+- Density parameter
+  - density can be "auto" or a value in (0, 1].
+  - "auto" selects density = 1 / sqrt(n_features) as a practical default balancing sparsity and accuracy.
+  - Validation ensures density lies in (0, 1].
+- Input validation helpers (internal/private)
+  - _check_input_size(n_components, n_features): validates positive integers for projection shape.
+  - _check_density(density, n_features): resolves and validates density, including "auto".
+  - _gaussian_random_matrix(n_components, n_features, random_state=None): utility for creating the dense projection matrix.
+- Johnson-Lindenstrauss helper
+  - johnson_lindenstrauss_min_dim(n_samples, eps): computes the minimum number of components needed for an eps-embedding given n_samples, with bounds derived from the JL lemma.
+
+API details
+
+johnson_lindenstrauss_min_dim(n_samples, *, eps=0.1)
+- Purpose: Return the minimal number of projection components needed to guarantee (with high probability) an eps-embedding for the provided sample count.
+- Parameters:
+  - n_samples: int or array-like of ints
+    - Number of samples (or an array of sample counts) (> 0). If an array is given, the computation returns an array of the same shape with the safe component counts.
+  - eps: float or array-like of shape (n_components,), default 0.1
+    - Distortion bound in (0, 1). If an array is provided, the result is computed element-wise.
+- Returns:
+  - n_components: int or ndarray of ints
+    - Minimal number of components to guarantee an eps-embedding with the given n_samples.
+- Notes:
+  - Requires 0 < eps < 1.
+  - The bound grows with log(n_samples) and shrinks as eps increases.
+- Examples:
+  - Minimal components for 1,000,000 samples with eps=0.5: 663
+  - Minimal components for 1,000,000 samples with multiple eps values: array([663, 11841, 1112658])
+  - Minimal components for a vector of sample counts: [7894, 9868, 11841]
+
+GaussianRandomProjection
+- Purpose: Project data into a lower-dimensional space using a dense Gaussian random matrix.
+- Key concepts:
+  - Each entry of the projection matrix is drawn from a zero-mean Gaussian distribution with appropriate scaling (commonly N(0, 1/n_components)).
+  - The projection preserves pairwise distances in expectation, with concentration around the Johnson-Lindenstrauss bound.
+- Parameters (typical; exact signature may vary in implementation):
+  - n_components: int
+    - Target dimensionality of the projected space.
+  - random_state: int, RandomState instance, or None
+    - Seed or RNG to ensure reproducible projections.
+- Fitting and transforming:
+  - Use fit_transform(X) to learn any required parameters (if applicable) and apply the dimensionality reduction in one step.
+- Typical usage:
+  - from sklearn.random_projection import GaussianRandomProjection
+  - transformer = GaussianRandomProjection(n_components=100, random_state=42)
+  - X_projected = transformer.fit_transform(X)
+
+SparseRandomProjection
+- Purpose: Project data using a sparse random projection matrix.
+- Key concepts:
+  - Uses a sparse matrix (e.g., Achlioptas-like distribution) to reduce computation and memory usage while preserving distances.
+  - density controls the fraction of non-zero entries. Density can be set directly or automatically determined by _check_density.
+- Parameters (typical):
+  - n_components: int
+  - density: float or "auto"
+    - If "auto", density is set to 1 / sqrt(n_features).
+  - random_state: int, RandomState instance, or None
+- Example:
+  - from sklearn.random_projection import SparseRandomProjection
+  - transformer = SparseRandomProjection(n_components=100, density=0.3, random_state=0)
+  - X_projected = transformer.fit_transform(X)
+
+Internal helpers (for developers)
+- _gaussian_random_matrix(n_components, n_features, random_state=None)
+  - Creates a dense Gaussian projection matrix with scaling suitable for stable variance in the projected space.
+- _check_input_size(n_components, n_features)
+  - Validates that n_components and n_features are positive integers.
+- _check_density(density, n_features)
+  - Resolves density when given as "auto" and validates that it lies in (0, 1].
+- johnson_lindenstrauss_min_dim
+  - Public utility that helps decide a safe dimensionality before fitting a projection.
+
+Example workflows
+
+1) Compute a safe number of components for a large dataset
+- Code:
+  - from sklearn.random_projection import johnson_lindenstrauss_min_dim
+  - n_components = johnson_lindenstrauss_min_dim(1e6, eps=0.5)
+  - print(n_components)  # 663
+
+2) Gaussian random projection on a matrix
+- Code:
+  - from sklearn.random_projection import GaussianRandomProjection
+  - X_projected = GaussianRandomProjection(n_components=100, random_state=42).fit_transform(X)
+- Notes:
+  - Suitable for dense datasets.
+  - Simple to use; no need to precompute the projection matrix.
+
+3) Sparse random projection on a high-dimensional sparse dataset
+- Code:
+  - from sklearn.random_projection import SparseRandomProjection
+  - transformer = SparseRandomProjection(n_components=100, density=0.25, random_state=0)
+  - X_projected = transformer.fit_transform(X_sparse)
+- Notes:
+  - Particularly useful for very high-dimensional sparse data (e.g., text data in bag-of-words form).
+  - Density controls sparsity and computational efficiency.
+
+Design and implementation considerations
+- Numerical stability: Scaling of projection matrices is chosen to keep projected variances stable, aiding downstream learning or clustering tasks.
+- Reproducibility: random_state parameter ensures determinism across runs.
+- Compatibility: The module is designed to integrate with standard fit/transform pipelines (and follows the typical estimator/mixin pattern found in the broader library).
+- Performance: Sparse projections reduce memory and CPU usage for large n_features by leveraging sparse matrices during multiplication.
+
+References
+- Johnson-Lindenstrauss Lemma: https://en.wikipedia.org/wiki/Johnson%E2%80%93Lindenstrauss_lemma
+- Practical implementations and empirical guidance in dimensionality reduction literature.
+
+Notes for developers
+- The public surface consists of the two transformers (GaussianRandomProjection and SparseRandomProjection) and the utility to compute a safe projection dimension (johnson_lindenstrauss_min_dim).
+- Internal helpers (_gaussian_random_matrix, _check_density, _check_input_size) are designed to be robust and easily testable in isolation.
+- When extending this module, ensure:
+  - Validation messages are clear and consistent.
+  - Random state is propagated to any random number generators.
+  - Documentation strings for new functions/classes reflect usage, parameters, and interpretations in the context of JL bounds.
+
+Examples in code (reference)
+- Minimal JL dim:
+  - >>> from sklearn.random_projection import johnson_lindenstrauss_min_dim
+  - >>> johnson_lindenstrauss_min_dim(1e6, eps=0.5)
+  - 663
+- Gaussian projection:
+  - >>> from sklearn.random_projection import GaussianRandomProjection
+  - >>> X_proj = GaussianRandomProjection(n_components=100, random_state=0).fit_transform(X)
+- Sparse projection:
+  - >>> from sklearn.random_projection import SparseRandomProjection
+  - >>> X_proj = SparseRandomProjection(n_components=100, density=0.3, random_state=0).fit_transform(X)
+
+This documentation provides a developer-focused overview of the random_projection module, its public API, internal helpers, usage patterns, and practical examples to guide integration and extension.

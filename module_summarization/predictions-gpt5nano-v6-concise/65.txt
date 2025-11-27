@@ -1,0 +1,181 @@
+Calibration of predicted probabilities with CalibratedClassifierCV
+===============================================================
+
+This document explains how to generate probability-calibrated predictions using
+the CalibratedClassifierCV class. It covers the intuition, available options,
+and provides practical examples for binary and multiclass problems, including
+pre-fit calibration and cross-validated ensemble calibration.
+
+Overview
+--------
+Predictive models often produce scores or decision values that are poorly calibrated
+probabilities. CalibratedClassifierCV provides a simple, model-agnostic way to map
+these scores to well-calibrated probability estimates.
+
+- Calibration methods:
+  - sigmoid (Platt scaling): fits a sigmoid (logistic regression) to the
+    decision function or predicted scores.
+  - isotonic: non-parametric monotonic calibration using isotonic regression.
+- Cross-validation:
+  - ensemble=True (default): for each CV split, fit a copy of the base estimator on
+    the training subset and calibrate it on the testing subset. Predictions are
+    averaged across folds.
+  - ensemble=False: use cross_val_predict to obtain unbiased predictions for fitting
+    the calibrator, and then train the base estimator on all data for final predictions.
+- Prefit calibration:
+  - cv="prefit" uses a pre-fitted estimator and calibrates it on the provided data.
+    The user must ensure that the data used for fitting and calibration are disjoint.
+
+Key concepts
+------------
+- Base estimator: the classifier whose outputs you want to calibrate. It must expose
+  either decision_function (recommended) or predict_proba.
+- Calibration model: a simple model (logistic regression for sigmoid, isotonic regression)
+  fitted on the base estimator’s scores to map them to probabilities.
+- Output: calibrated probabilities that reflect true class likelihoods, usable with
+  predict_proba on the calibrated classifier.
+
+API reference (highlights)
+--------------------------
+- estimator: classifier to calibrate (default is a LinearSVC). Must provide
+  decision_function or predict_proba.
+- method: {'sigmoid', 'isotonic'}, default='sigmoid'
+  - 'sigmoid': Platt's method, a logistic regression model on top of the scores.
+  - 'isotonic': non-parametric isotonic calibration.
+- cv: cross-validation strategy. See cross-validation docs for accepted inputs.
+  - None or int: default 5-fold CV (StratifiedKFold for binary/multiclass, otherwise KFold).
+  - "prefit": estimator is already fitted; all data is used for calibration.
+- n_jobs: number of parallel jobs (default=None, meaning 1 unless in a parallel context).
+- ensemble: whether to fit and calibrate inside each CV fold and average
+  predictions (True, default) or to calibrate using cross_val_predict and then
+  train the base estimator on all data (False).
+- base_estimator: deprecated alias for estimator (use estimator instead).
+- calibrated_classifiers_: list of fitted calibrated classifiers
+  (length is equal to the number of CV folds, or 1 if cv="prefit" or ensemble=False).
+
+Common attributes after fitting
+-------------------------------
+- classes_: class labels
+- n_features_in_: number of features seen during fit (if the estimator exposes this)
+- feature_names_in_: feature names seen during fit (if provided by the estimator)
+- calibrated_classifiers_: list of the calibrated classifier objects (one per CV fold
+  when ensemble=True)
+
+When to use which method
+------------------------
+- Use sigmoid when you want a simple, stable calibration that generally performs well
+  with a reasonable amount of calibration data.
+- Use isotonic when you have a lot of calibration data and want a flexible, non-parametric
+  calibration. Be cautious with small datasets (isotonic can overfit and behave poorly
+  with << 1000 samples).
+
+Examples
+--------
+
+Binary classification with sigmoid calibration
+---------------------------------------------
+This example demonstrates calibrating a linear SVC using sigmoid calibration
+with 5-fold cross-validation.
+
+.. code-block:: python
+
+    from sklearn.datasets import make_classification
+    from sklearn.svm import LinearSVC
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.model_selection import train_test_split
+
+    # Generate a binary classification dataset
+    X, y = make_classification(n_samples=500, n_features=20, n_informative=2,
+                               n_redundant=0, random_state=42)
+
+    # Base classifier that provides a decision function
+    base_clf = LinearSVC()
+
+    # Calibrate probabilities with sigmoid using 5-fold CV
+    calibrated_clf = CalibratedClassifierCV(base_clf, method='sigmoid', cv=5)
+
+    # Fit on the full training data
+    calibrated_clf.fit(X, y)
+
+    # Predict calibrated probabilities
+    probs = calibrated_clf.predict_proba(X[:5])
+    print(probs)
+
+Notes:
+- LinearSVC exposes a decision_function; sigmoid calibration fits a logistic model
+  on top of that function to produce probabilities.
+
+Isotonic calibration for multiclass problems
+---------------------------------------------
+Isotonic calibration can be used in multiclass settings. It is non-parametric and
+flexible, but requires more calibration samples. The workflow is the same as for
+sigmoid, just with method='isotonic'.
+
+.. code-block:: python
+
+    from sklearn.datasets import make_classification
+    from sklearn.linear_model import SGDClassifier
+    from sklearn.calibration import CalibratedClassifierCV
+
+    X, y = make_classification(n_samples=1000, n_features=20, n_informative=15,
+                               n_classes=3, random_state=0)
+
+    # Use a classifier that supports probability estimates (or decision function)
+    base_clf = SGDClassifier(loss='log', max_iter=1000, random_state=0)
+
+    # Isotonic calibration
+    calib_clf = CalibratedClassifierCV(base_clf, method='isotonic', cv=5)
+    calib_clf.fit(X, y)
+    proba = calib_clf.predict_proba(X[:3])
+    print(proba)
+
+Prefit calibration
+------------------
+If you already trained the base estimator and want to calibrate it on separate data:
+
+.. code-block:: python
+
+    from sklearn.datasets import make_classification
+    from sklearn.svm import LinearSVC
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.model_selection import train_test_split
+
+    X, y = make_classification(n_samples=1000, n_features=20, random_state=0)
+
+    X_train, X_cal, y_train, y_cal = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Train base estimator on training data
+    base_clf = LinearSVC().fit(X_train, y_train)
+
+    # Calibrate using the separate calibration data
+    calib_clf = CalibratedClassifierCV(estimator=base_clf, cv="prefit", method='sigmoid')
+    calib_clf.fit(X_cal, y_cal)
+    proba = calib_clf.predict_proba(X_cal[:5])
+    print(proba)
+
+Notes:
+- When cv="prefit", no cross-validation is performed. The provided estimator should be
+  fitted on data disjoint from the calibration data.
+
+Practical tips and caveats
+--------------------------
+- Calibration quality depends on the amount of calibration data:
+  - Sigmoid calibration is generally robust with moderate data.
+  - Isotonic calibration benefits from more data but risks overfitting with small datasets.
+- The predicted probabilities from the calibrated model should be used with predict_proba.
+- If the underlying estimator cannot provide probabilities and no decision_function
+  is available, you may need a different estimator or a custom calibration strategy.
+
+Usage notes
+-----------
+- The calibration approach is model-agnostic: it wraps around any compatible classifier.
+- The calibrated_classifiers_ attribute can be inspected when ensemble=True to access
+  the calibrated models for each CV fold.
+
+See also
+--------
+- User guide: Calibration of predicted probabilities
+- Reference: sklearn.calibration.CalibratedClassifierCV
+
+This documentation covers how to generate probability-calibrated predictions with CalibratedClassifierCV,
+including the choices between sigmoid and isotonic calibration, cross-validation behavior, and practical examples.

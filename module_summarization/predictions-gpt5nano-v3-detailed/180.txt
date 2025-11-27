@@ -1,0 +1,186 @@
+# Cross-validation: evaluating estimator performance
+
+Introduction
+------------
+This module provides utilities for evaluating estimator performance under cross-validation. It focuses on two complementary visualization approaches:
+
+- Learning curves: how training and validation scores evolve as the training set size grows.
+- Validation curves (hyperparameter curves): how the score varies as a function of a hyperparameter.
+
+Key components are functions to compute these curves and display classes that render plots suitable for quick interpretation and comparison.
+
+Public API overview
+-------------------
+
+### Functions
+
+- learning_curve
+  - Purpose: Compute learning curves by evaluating estimator performance on training sets of increasing size using cross-validation.
+  - Typical inputs: estimator, X, y, train_sizes, cv, scoring, n_jobs, shuffle, random_state.
+  - Outputs: train_sizes, train_scores, test_scores (and optionally fit_times).
+  - Use case: Assess whether the model benefits from more data and whether the score saturates.
+
+- validation_curve
+  - Purpose: Evaluate how a score changes with a specific hyperparameter value using cross-validation.
+  - Typical inputs: estimator, X, y, parameter name, parameter values, cv, scoring.
+  - Outputs: param_values, train_scores, test_scores.
+  - Use case: Select a good value for a hyperparameter by inspecting the learning curves of performance.
+
+### Display utilities
+
+- _BaseCurveDisplay
+  - Internal helper class that provides common plotting logic for cross-validation curve displays.
+  - Core plotting capabilities are exposed via the _plot_curve method, which handles:
+    - Data preparation (support for negating scores)
+    - Standard deviation rendering options
+    - Different score types (train, test, or both)
+    - Labeling, legend, and axis scaling
+  - Key parameters:
+    - x_data: values on the x-axis (training sizes or hyperparameter values)
+    - negatescore: whether to negate scores for display (e.g., for losses)
+    - score_name: label for the y-axis
+    - score_type: "train", "test", or "both"
+    - std_display_style: "fill_between", "errorbar", or None
+    - line_kw / fill_between_kw / errorbar_kw: styling for the plot elements
+
+- LearningCurveDisplay
+  - Public class to visualize learning curves.
+  - Core attributes (as per the class docstring):
+    - ax_: matplotlib Axes containing the learning curve
+    - figure_: matplotlib Figure containing the curve
+    - train_sizes: array of training set sizes used
+    - train_scores: array of training scores with shape (n_ticks, n_cv_folds)
+    - test_scores: array of test scores with shape (n_ticks, n_cv_folds)
+    - score_name: label used on the y-axis
+    - errorbar_: list of errorbar artists (if std_display_style is "errorbar")
+    - lines_: list of Line2D artists (if std_display_style is "fill_between" or "linear" display)
+    - fill_between_: list of PolyCollection artists (for the "fill_between" style)
+  - Plotting behavior:
+    - Supports multiple std display styles: fill_between, errorbar, or none
+    - Automatically sets x-scale based on data and a heuristic (deprecated log_scale handling is present for backward compatibility)
+  - Recommended usage:
+    - Create via from_estimator or by passing precomputed scores to the constructor, then call plot().
+
+- ValidationCurveDisplay (referenced)
+  - A complementary display utility for validation curves (not shown in the excerpt but commonly available in this API).
+  - Provides a similar interface for visualizing how performance changes with a hyperparameter.
+
+Key parameters and return values
+--------------------------------
+
+LearningCurveDisplay (parameters of interest)
+- train_sizes: array-like, shape (n_ticks,)
+  - The number of training examples used for each point on the curve.
+- train_scores: ndarray, shape (n_ticks, n_cv_folds)
+  - Training score for each tick and cross-validation fold.
+- test_scores: ndarray, shape (n_ticks, n_cv_folds)
+  - Validation/test score for each tick and cross-validation fold.
+- score_name: str
+  - Label for the y-axis; derived automatically if not provided.
+
+Display options (via _plot_curve)
+- x_data: array-like for x-axis (train_sizes or hyperparameter values)
+- score_type: "train", "test", or "both" (which series to plot)
+- std_display_style: "fill_between", "errorbar", or None
+  - "fill_between": show mean score with shaded standard deviation via fill_between
+  - "errorbar": show mean score with error bars representing standard deviation
+  - None: plot only the mean scores
+- log_scale: deprecated (legacy compatibility); modern usage uses ax_.set_xscale / set_yscale
+- notes: _BaseCurveDisplay handles negation of scores (to display losses as positive values if needed) and sets axis labels accordingly.
+
+Usage examples
+--------------
+
+Learning curve visualization (recommended approach)
+
+Option A: Using the display helper with precomputed scores
+```python
+import numpy as np
+from sklearn.model_selection import learning_curve
+from sklearn.svm import SVC
+from sklearn.datasets import load_digits
+from sklearn.model_selection import StratifiedKFold
+from matplotlib import pyplot as plt
+
+X, y = load_digits(return_X_y=True)
+estimator = SVC(kernel="rbf", gamma="scale")
+
+cv = StratifiedKFold(n_splits=5)
+train_sizes, train_scores, test_scores = learning_curve(
+    estimator, X, y, cv=cv, scoring="accuracy",
+    train_sizes=np.linspace(0.1, 1.0, 5), n_jobs=-1
+)
+
+from sklearn.model_selection import LearningCurveDisplay
+display = LearningCurveDisplay(
+    train_sizes=train_sizes,
+    train_scores=train_scores,
+    test_scores=test_scores,
+    score_name="Accuracy"
+)
+display.plot()
+plt.show()
+```
+
+Option B: Using a convenience constructor (from_estimator)
+```python
+from sklearn.model_selection import LearningCurveDisplay
+display = LearningCurveDisplay.from_estimator(
+    estimator, X, y, cv=cv, scoring="accuracy",
+    train_sizes=np.linspace(0.1, 1.0, 5)
+)
+display.plot()
+plt.show()
+```
+
+Validation curve visualization (for hyperparameter tuning)
+
+```python
+from sklearn.model_selection import validation_curve
+from sklearn.svm import SVC
+from sklearn.datasets import load_digits
+X, y = load_digits(return_X_y=True)
+
+param_name = "C"
+param_range = [0.5, 1.0, 2.0, 4.0, 8.0]
+
+train_scores, test_scores = validation_curve(
+    SVC(kernel="rbf", gamma="scale"), X, y,
+    param_name=param_name, param_range=param_range,
+    cv=5, scoring="accuracy", n_jobs=-1
+)
+
+from sklearn.model_selection import ValidationCurveDisplay
+display = ValidationCurveDisplay.from_training_scores(
+    param_values=param_range,
+    train_scores=train_scores,
+    test_scores=test_scores,
+    score_name="Accuracy"
+)
+display.plot()
+plt.show()
+```
+
+Important considerations and edge cases
+---------------------------------------
+- Score interpretation:
+  - The display supports negating scores to show losses if needed (negate_score flag in plotting). Ensure you understand the score semantics for your chosen metric.
+- std_display_style:
+  - Choose "fill_between" for a smooth visualization of variability, "errorbar" for explicit error bars, or None for a simple line plot.
+- log scale handling:
+  - The log_scale parameter is deprecated. Prefer using axis scaling methods on the underlying matplotlib axis (ax_.set_xscale / ax_.set_yscale).
+- Data and cross-validation:
+  - Learning curves and validation curves depend on the width of the training set and the choice of cross-validation strategy (e.g., KFold, StratifiedKFold). Ensure cv aligns with your data characteristics (e.g., stratification for classification tasks).
+- Edge cases:
+  - Very small datasets or large numbers of folds can produce unstable estimates; consider adjusting cv or the scoring metric.
+  - When there are few unique training set sizes, the curve may appear noisy; increasing the range or number of points in train_sizes helps stabilize the visualization.
+- Interpretation caveats:
+  - Learning curves reveal whether a model would benefit from more data or from different features, hyperparameters, or model types.
+  - Validation curves help identify underfitting/overfitting behavior with respect to a hyperparameter; look for regions where train and test scores converge or diverge.
+
+Notes
+-----
+- The LearningCurveDisplay class is designed to be used with the computed results from learning_curve. It is recommended to create the display via from_estimator when possible, as it encapsulates the end-to-end process for typical workflows.
+- The module also provides a ValidationCurveDisplay (and related utilities) to visualize how a metric changes with a hyperparameter, mirroring the approach used for learning curves.
+
+End of documentation.

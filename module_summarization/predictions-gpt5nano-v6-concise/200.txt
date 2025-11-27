@@ -1,0 +1,167 @@
+Outlier and Novelty Detection
+================================
+
+Overview
+--------
+This section covers two related, but distinct, paradigms for identifying unusual observations in data:
+
+- Outlier (anomaly) detection: Identify unusual observations in a dataset where the training data may contain some anomalies or be unlabeled. The goal is to label observations as normal or anomalous in an unsupervised or semi-supervised fashion.
+- Novelty detection: Detect observations that do not conform to the distribution learned from a model trained on “normal” or known-good data. Training data is assumed to contain only normal instances; anomalies are considered novel when evaluating new data.
+
+Key distinction
+- Outlier detection often uses all available training data (which may contain anomalies) to learn a notion of normality.
+- Novelty detection trains only on normal data and treats any unseen pattern as a potential novelty.
+
+This doc focuses on practical guidance for developers using scikit-learn estimators for these tasks, including when to use each approach and representative examples.
+
+Terminology
+- Normal data: Data points that are representative of the expected, typical behavior.
+- Anomaly/outlier: A data point that deviates significantly from the normal pattern.
+- Novelty: A new pattern not seen in the training data that should be flagged as unusual.
+
+Algorithms and how they map to the tasks
+------------------------------------------------
+The following estimators are commonly used in scikit-learn for outlier and novelty detection. Some estimators support both modes via configuration.
+
+Local Outlier Factor (LOF)
+- Purpose: Density-based anomaly detection. Can be used in outlier mode, and (in newer versions) a novelty mode via the novelty parameter.
+- Typical use:
+  - Outlier detection: fit on data (no explicit normal-only requirement) and predict anomalies.
+  - Novelty detection: fit with novelty=True on normal data, then predict on new data.
+
+Isolation Forest
+- Purpose: Ensemble-based method that isolates anomalies more quickly than normal points.
+- Typical use: Unsupervised outlier detection. Train on data (assumed mostly normal) and score/predict anomalies on new data.
+
+One-Class Support Vector Machine (OneClassSVM)
+- Purpose: One-class classifier used for novelty detection when trained only on normal data.
+- Typical use: Train on normal data; detect novel observations in new data with predict.
+
+Elliptic Envelope (Robust Covariance)
+- Purpose: Fits a robust Gaussian to data and flags points far from the robust center as outliers.
+- Typical use: Unsupervised outlier detection; effective when the normal data are approximately Gaussian.
+
+Choosing a method
+------------------
+Guidelines:
+- If you have labeled anomalies and want a supervised approach, consider methods that accommodate labels (not in the classic anomaly detection sense). For pure anomaly detection, use unsupervised or semi-supervised methods.
+- For novelty detection (training on normal data only), use OneClassSVM (novelty mode with LOF in novelty mode, or other estimators that support novelty).
+- For broad, scalable outlier detection on unlabeled data, start with Isolation Forest or LOF (without novelty mode). If you expect data to be Gaussian-like, Elliptic Envelope can be effective.
+- Data characteristics:
+  - High-dimensional data: LOF and Isolation Forest scale reasonably well; consider feature scaling.
+  - Non-Gaussian distributions: Elliptic Envelope may underperform; LOF or Isolation Forest often better.
+  - Presence of label information: If you have labeled anomalies, consider supervised alternatives or hybrid approaches.
+
+Evaluation in unsupervised contexts
+-----------------------------------
+- Without ground-truth labels, use proxy metrics such as:
+  - Stability across cross-validation splits
+  - Consistency of anomaly scores across related datasets
+  - Domain-specific validation (expert review of flagged instances)
+- If you have labeled data, standard metrics apply (see below).
+
+Metrics
+-------
+- Precision, Recall, F1-score (when ground-truth labels are available)
+- ROC-AUC on anomaly scores (where applicable)
+- Precision@k or anomaly-score thresholds tuned for your risk model
+
+Practical considerations
+------------------------
+- Preprocessing: Scale features when using distance- or kernel-based models (e.g., OneClassSVM, LOF).
+- Contamination parameter: Some models require an estimate of the proportion of anomalies (e.g., LOF, Isolation Forest). Set this thoughtfully or use cross-validation to select.
+- Model monitoring: Anomaly scoring can shift with data drift. Monitor model scores and retrain when needed.
+- Computational cost: LOF with large datasets can be expensive; prefer scalable models (Isolation Forest) for big data.
+
+Examples
+--------
+
+Example 1: Outlier detection with Isolation Forest
+---------------------------------------------------
+This example demonstrates detecting anomalies in a dataset that contains injected outliers.
+
+.. code-block:: python
+
+   import numpy as np
+   from sklearn.ensemble import IsolationForest
+
+   # Create a dataset with normal data and a small number of outliers
+   rng = np.random.default_rng(42)
+   X_normal = rng.normal(loc=0.0, scale=0.5, size=(200, 2))
+   X_outliers = rng.normal(loc=5.0, scale=0.5, size=(20, 2))
+   X = np.vstack([X_normal, X_outliers])
+
+   # Isolation Forest for outlier detection
+   iso = IsolationForest(contamination=0.1, random_state=42)
+   iso.fit(X)
+
+   # Predict: -1 for anomalies, 1 for normal
+   y_pred = iso.predict(X)
+
+   # Optional: anomaly scores
+   scores = iso.decision_function(X)  # higher scores = more normal
+
+Example 2: Novelty detection with One-Class SVM
+-----------------------------------------------
+Use novelty detection when the training data consists only of normal observations.
+
+.. code-block:: python
+
+   import numpy as np
+   from sklearn.svm import OneClassSVM
+
+   # Normal data only for training
+   rng = np.random.default_rng(0)
+   X_train = rng.normal(loc=0.0, scale=0.5, size=(300, 2))
+
+   # Train a One-Class SVM for novelty detection
+   clf = OneClassSVM(nu=0.05, kernel="rbf", gamma="scale")
+   clf.fit(X_train)
+
+   # Test data includes normal and novel observations
+   X_test = rng.normal(loc=0.0, scale=0.5, size=(100, 2))
+   # Introduce novel points far from training distribution
+   X_test = np.vstack([X_test, rng.normal(loc=3.0, scale=0.2, size=(10, 2))])
+
+   y_pred = clf.predict(X_test)  # -1 for novel observations, 1 for normal
+
+Example 3: Outlier detection with Local Outlier Factor (unsupervised)
+---------------------------------------------------------------------
+Local Outlier Factor detects anomalies based on local density. By default LOF operates in outlier mode.
+
+.. code-block:: python
+
+   import numpy as np
+   from sklearn.neighbors import LocalOutlierFactor
+
+   rng = np.random.default_rng(7)
+   X = rng.normal(loc=0.0, scale=0.5, size=(250, 2))
+   # Add a few anomalies
+   X = np.vstack([X, rng.normal(loc=5.0, scale=0.5, size=(20, 2))])
+
+   lof = LocalOutlierFactor(n_neighbors=20)
+   y_pred = lof.fit_predict(X)  # -1 for outliers, 1 for inliers
+
+Note: Local Outlier Factor also supports a novelty detection mode via the novelty parameter
+(i.e., LOF(novelty=True)); in novelty mode, you fit on normal data and call predict on new data.
+
+Best practices and tips for developers
+--------------------------------------
+- Start with Isolation Forest for scalable outlier detection on large datasets.
+- For novelty detection when you have a clean normal-sample dataset, use One-Class SVM or LOF with novelty mode.
+- Always inspect a subset of flagged points to validate domain relevance.
+- Use feature scaling for kernel-based methods (OneClassSVM, LOF with RBF kernel).
+- If you have some labeled anomalies, consider semi-supervised approaches or tune contamination to reflect domain risk.
+
+Reference and further reading
+----------------------------
+- scikit-learn documentation on anomaly and novelty detection estimators:
+  - Local Outlier Factor (with and without novelty mode)
+  - Isolation Forest
+  - One-Class SVM
+  - Elliptic Envelope
+
+Note to developers
+------------------
+- The APIs and availability of novelty mode vary by estimator and scikit-learn version. When implementing in a project, verify the estimator version and consult the corresponding API docs for parameters like novelty, contamination, and scoring methods.
+- Consider implementing a small utility to switch between novelty and outlier modes with minimal code changes, to ease experimentation across datasets.

@@ -1,0 +1,240 @@
+delayed-api.rst
+================
+
+Overview
+--------
+
+The dask.delayed interface provides a lightweight, lazy, task-based API
+for constructing Dask graphs from regular Python code. A Delayed object
+wraps a value or a function call and records its dependencies so that
+computation can be executed later by a scheduler. This file documents the
+high-level design and the key components of the dask.delayed interface,
+as implemented in the current codebase.
+
+Key concepts
+------------
+
+- Delayed: A lightweight wrapper representing a single task or a nested
+  collection of tasks. Each Delayed has a unique key and an associated
+  task graph (dask) that describes how to compute it.
+
+- delayed: The primary entry point to create Delayed objects. It can be
+  used as a decorator or as a factory to wrap functions and values into
+  delayed tasks.
+
+- Task graphs and keys: Delayed objects contribute entries to a HighLevelGraph
+  that encodes dependencies between tasks. Keys uniquely identify tasks.
+
+- Unpacking and normalization: Expressions containing Delayed objects
+  (possibly nested inside lists, tuples, dicts, dataclasses, etc.) can be
+  normalized into a single task and a merged dask graph. This is exposed
+  by unpack_collections (and, for backward compatibility, by the deprecated
+  to_task_dask).
+
+- Finalizing: The finalize() helper attaches a postcompute step that runs
+  after the underlying tasks complete, enabling finalization logic (e.g.,
+  writing results, persisting outputs).
+
+- Backward compatibility: to_task_dask exists for historical use and is
+  deprecated in favor of unpack_collections. It emits a deprecation warning.
+
+API reference
+-------------
+
+Delated and delayed decorator
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- Overview
+  - The main user-facing entry point is the delayed interface, exposed as
+    Delayed (class) and delayed (factory/decorator). A Delayed object
+    represents a single computation or a structured collection of
+    computations. The delayed API builds a Dask task graph lazily; actual
+    computation is triggered via compute(), persist(), or the scheduler's
+    compute methods.
+
+- Primary usage patterns
+  - Decorating a function to become delayed:
+    .. code-block:: python
+
+       from dask import delayed
+
+       @delayed
+       def add(x, y):
+           return x + y
+
+       a = add(1, 2)  # a is a Delayed object
+       a.compute()    # executes the task graph via the default scheduler
+
+  - Wrapping a function call directly:
+    .. code-block:: python
+
+       from dask import delayed
+
+       def f(x): return x * 2
+       g = delayed(f)(3)  # Delayed object representing f(3)
+
+  - Accessing the underlying graph
+    .. code-block:: python
+
+       dsk = g.dask  # or g.__dask_graph__() if available
+       key = g.__dask_keys__()[0]  # the task key representing the result
+
+- Internal points (developers)
+  - Delayed objects implement:
+    - __dask_keys__(): return the keys involved in computing the Delayed.
+    - __dask_graph__(): return the underlying task graph (as a HighLevelGraph or low-level dict).
+    - __dask_postcompute__(): a callable and its arguments to run after the main tasks finish (used by finalize).
+
+Finalize and unpack_collections
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- finalize(collection)
+  - Purpose: Create a finalizing step for a dask collection. The finalizer
+    is added as a separate task, taking the original collection’s keys as
+    input.
+  - Returns: A Delayed object representing the final computation.
+  - Example:
+    .. code-block:: python
+
+       from dask import delayed
+       c = delayed([1, 2, 3])
+       final = finalize(c)
+       final.compute()
+
+- unpack_collections(expr)
+  - Purpose: Normalize a Python object that can contain Delayed objects,
+    and merge all sub-graphs into a single graph. It handles nested
+    structures and converts them into a task that, when executed, yields
+    a structure of results with all dependencies wired up.
+  - Semantics (high level):
+    - Replaces Delayed objects with their keys.
+    - Converts literals to scheduler-friendly forms.
+    - Extracts dask graphs from enclosed values and merges them.
+  - Returns: A pair (task, collections), where:
+    - task is the normalized task suitable for scheduling.
+    - collections is a tuple of Delayed objects involved in the task.
+  - Examples
+    - Basic use with a list:
+      .. code-block:: python
+
+         from dask import delayed
+         a = delayed(1, 'a')
+         b = delayed(2, 'b')
+         task, collections = unpack_collections([a, b, 3])
+         # task == ['a', 'b', 3]
+         # collections == (Delayed('a'), Delayed('b'))
+
+    - Use with a dict:
+      .. code-block:: python
+
+         task, collections = unpack_collections({a: 1, b: 2})
+         # task == (dict, [['a', 1], ['b', 2]])
+         # collections == (Delayed('a'), Delayed('b'))
+
+    - Dataclasses and namedtuples:
+      The function supports normalizing dataclass and namedtuple instances by
+      unpacking their fields and reconstructing the instance after the graph
+      is computed.
+
+- to_task_dask(expr) (Deprecated)
+  - Purpose: Legacy helper that performs normalization and graph extraction
+    similarly to unpack_collections, but is deprecated in favor of
+    unpack_collections. It emits a deprecation warning.
+  - Returns: A pair (task, dask), where dask is a merged graph that forms
+    the dag for the task.
+  - Example (historical usage):
+    .. code-block:: python
+
+       task, dask = to_task_dask([a, b, 3])
+
+  - Note: This function is deprecated and will be removed in a future version.
+    Use unpack_collections instead.
+
+Design notes for developers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- Graph construction
+  - Delayed objects contribute entries to a HighLevelGraph. The task keys
+    are generated deterministically using tokenize and the current value of
+    the graph to ensure stability across runs and schedulers.
+
+- Key/tokenization
+  - The implementation uses tokenize to create names for intermediate
+    tasks. This helps maintain stable keys across processes and avoids
+    collisions when merging multiple subgraphs.
+
+- Graph merging and simplification
+  - When dealing with collections of delayed objects, the helper
+    unpack_collections merges subgraphs and returns a single task that
+    represents the collection’s structure. This enables functions that take
+    lists, dicts, or other containers of delayed objects to be scheduled as
+    a single unit.
+
+- Dataclasses and namedtuples
+  - The unpacking logic supports dataclasses and namedtuples by extracting
+    fields and reconstructing instances after computation. Init-only fields
+    and certain custom __init__ signatures may impose limitations.
+
+Examples
+--------
+
+Basic delayed usage
+~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   from dask import delayed
+
+   @delayed
+   def add(x, y):
+       return x + y
+
+   a = add(1, 2)
+   result = a.compute()
+
+Combining delayed objects with collections
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   from dask import delayed
+
+   a = delayed(1, 'a')
+   b = delayed(2, 'b')
+   c = delayed(3, 'c')
+
+   task, collections = unpack_collections([a, b, c, 4])
+   # task -> ['a', 'b', 'c', 4]
+   # collections -> (Delayed('a'), Delayed('b'), Delayed('c'))
+   result = task  # This is the normalized form ready for scheduling
+   # To actually compute, you would typically rely on the graph produced by
+   # the Delayed objects themselves, e.g.,
+   final = delayed(finalize)( [a, b, c] )
+   final.compute()
+
+Finalizing a collection
+~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   from dask import delayed
+
+   data = delayed([1, 2, 3])
+   final = finalize(data)
+   final.compute()
+
+Notes
+-----
+
+- The dask.delayed API is designed to be lazy and composable. Creating
+  Delayed objects does not trigger computation; only when compute() or a
+  scheduler is invoked does the actual work run.
+
+- The unpack_collections helper is the recommended way to normalize
+  nested structures that contain Delayed objects. The to_task_dask function is
+  deprecated; prefer unpack_collections for new code.
+
+- The actual implementation details (names, keys, and graph wiring) are
+  encapsulated in Delayed, the graph construction logic, and the finalize
+  mechanism. This documentation focuses on how to use the API and how the
+  pieces fit together from a developer perspective.

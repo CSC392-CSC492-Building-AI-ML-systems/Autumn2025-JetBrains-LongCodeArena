@@ -1,0 +1,135 @@
+# Image HDU: Data component
+
+Introduction
+- The Data component of an ImageHDU represents the pixel data stored in a FITS image extension. It is exposed as a NumPy array via the `data` attribute and is defined by the header keywords (e.g., NAXIS, NAXIS1, NAXIS2, BITPIX) that describe its shape and data type.
+- This section documents how the data array is represented, how to access and manipulate it, and how verification of the data and its consistency with the header is performed.
+
+Data representation
+- The image data is stored as a NumPy array and is typically two-dimensional (NAXIS = 2) with shape (NAXIS2, NAXIS1). Higher-dimensional image data (NAXIS > 2) forms a data cube (e.g., (NAXIS3, NAXIS2, NAXIS1)).
+- The data type is determined by the BITPIX keyword in the header:
+  - 8, 16, 32: integer types
+  - -32: 32-bit floating point
+  - -64: 64-bit floating point
+- Endianness is preserved according to FITS conventions; data read from a FITS file will already be in the correct byte order for NumPy operations.
+
+Accessing the data
+- The primary way to access the image pixels is through the `data` attribute of an ImageHDU (or any derived image HDU):
+  - Example: load an image and inspect its shape and dtype
+    - code:
+      from astropy.io import fits
+      import numpy as np
+
+      with fits.open('image.fits') as hdul:
+          data = hdul[0].data  # or hdul[ext_index].data
+          print(data.shape)
+          print(data.dtype)
+
+- Data can be memory-mapped for large files to avoid loading the entire image into memory. This is common for very large FITS images and can be handled transparently by the FITS I/O layer in Astropy.
+
+- For multi-extension FITS files, each image HDU has its own `data` attribute. Access patterns are identical across extensions:
+  - Example:
+    from astropy.io import fits
+    with fits.open('multiext.fits') as hdul:
+        first_image = hdul[1].data
+        second_image = hdul[2].data
+
+Data shape and header consistency
+- The actual shape of the data is determined by NAXIS and the axis keywords (NAXIS1, NAXIS2, ...). The data array shape must be compatible with these header values.
+- If the header and data are inconsistent, verification can be performed to surface mismatches and optionally fixable issues.
+
+Data verification
+- A verification framework is provided to check the integrity and consistency of a data component with its header. The mechanism is designed to:
+  - Detect unfixable issues (e.g., missing data)
+  - Optionally fixable issues (e.g., minor inconsistencies)
+  - Report issues as warnings or raise exceptions depending on the chosen option
+- Options supported (examples):
+  - "ignore": do not report any errors
+  - "warn": report issues as warnings
+  - "exception": raise an exception on errors
+  - "fix": attempt to fix fixable issues
+  - "silentfix": fix issues quietly without reporting
+  - Combinations like "fix+warn" or "silentfix+ignore" are also supported
+- The verification process aggregates issues into a nested error list structure to provide a hierarchical view of problems across HDU levels. The internal helpers include:
+  - _Verify: orchestrates the verification run and reporting
+  - _ErrList: a nested list structure for collecting verification messages
+- Typical usage (public API):
+  - hdu.verify("warn")  # or another option string
+  - The exact behavior depends on the HDU implementation of the internal `_verify()` method for that component.
+
+Usage example: basic access and verification
+- Reading data and performing a basic verification on an ImageHDU:
+  code:
+  from astropy.io import fits
+  # Open a FITS file and access the first image extension
+  with fits.open('image.fits') as hdul:
+      hdu = hdul[0]
+      data = hdu.data
+      print(f"Data shape: {getattr(data, 'shape', None)}")
+      print(f"Data dtype: {getattr(data, 'dtype', None)}")
+
+      # Run verification to check consistency between data and header
+      # (the ImageHDU implementation provides a verify() method)
+      hdu.verify("warn")
+
+Edge cases and considerations
+- Empty or missing data: Some HDUs may have no data or data that is None; verify and data access should handle None gracefully.
+- Large data sets: For very large images, memory mapping and on-demand data loading are important to avoid loading the entire array into memory.
+- Data vs. header mismatch: If NAXIS1/NAXIS2 (and additional axes) do not match the actual data shape, verification can detect and report the inconsistency; fixes may be possible in some cases.
+- Data type conformance: The data type must be consistent with BITPIX in the header. Mismatches can lead to incorrect interpretation of pixel values or read errors.
+- Endianness: FITS standard stores data in a defined byte order; NumPy will present the data accordingly upon loading.
+
+Implementation notes
+- NotifierMixin is a generic utility used by several components to register listeners and notify changes. While not specific to the Data component, it supports internal event handling for updates to HDU state.
+- The verification utilities (_Verify and _ErrList) provide a structured way to collect and report issues found during verification, facilitating robust data integrity checks.
+
+Code snippets
+
+- Accessing image data (2D example)
+  code:
+  from astropy.io import fits
+  with fits.open('image.fits') as hdul:
+      image = hdul[0].data
+      print("Shape:", image.shape)
+      print("Dtype:", image.dtype)
+
+- Memory-mapped access for large images
+  code:
+  import numpy as np
+  from astropy.io import fits
+  with fits.open('large_image.fits', memmap=True) as hdul:
+      large_image = hdul[0].data  # memory-mapped array
+      print("First pixel value:", large_image[0, 0])
+
+- Basic verification usage (conceptual)
+  code:
+  from astropy.io import fits
+  with fits.open('image.fits') as hdul:
+      hdu = hdul[0]
+      # Run verification with topic-specific options
+      hdu.verify('warn')
+
+- Custom verification example (advanced)
+  code:
+  # This demonstrates how one might extend a custom ImageHDU with a _verify() method.
+  # The verification framework will call this and aggregate messages.
+  from astropy.io import fits
+  from astropy.io.fits.image import ImageHDU
+  from astropy.io.fits._verify import _ErrList  # internal API
+
+  class MyImageHDU(ImageHDU):
+      def _verify(self, option="warn"):
+          errs = _ErrList(unit="Image data")
+          if self.data is None:
+              errs.append((True, "Image data is missing (None)."))
+          else:
+              expected_shape = (self.header.get("NAXIS2"), self.header.get("NAXIS1"))
+              if self.data.shape[-2:] != expected_shape:
+                  errs.append((True, f"Data shape {self.data.shape[-2:]} does not match header NAXIS1,NAXIS2 {expected_shape}."))
+          return errs
+
+      # The public verify() method can be used as usual:
+      # hdulist = fits.HDUList([fits.PrimaryHDU(), MyImageHDU(data)])
+      # hdulist[1].verify("warn")
+
+End of documentation
+- This section covers the Data component in an ImageHDU, including its representation, access patterns, verification framework, and practical usage considerations for developers working with FITS image data.

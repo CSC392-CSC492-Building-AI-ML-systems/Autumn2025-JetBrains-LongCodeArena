@@ -1,0 +1,56 @@
+File Objects
+============
+
+Overview
+--------
+
+In h5py, high-level wrappers around HDF5 objects (files, groups, datasets, etc.) are represented by Python objects that hold an underlying HDF5 identifier (hid_t). The base class for these wrappers is ObjectID, which encapsulates the raw HDF5 id and provides common lifecycle and utility features used by all file-related objects.
+
+Key concepts
+------------
+
+- Underlying identifier: Each ObjectID wraps an HDF5 identifier (self.id) and exposes object-state information to Python code.
+- Registry: A module-level registry tracks all live ObjectID instances via a weak reference keyed by the Python object id. This enables nonlocal cleanup of stale identifiers when HDF5 invalidates ids.
+- Locking: Access to the low-level HDF5 API is serialized with a global lock to prevent races in multi-threaded contexts. Locking behavior is controlled by the USE_LOCKING flag and managed via the _phil lock and the with_phil decorator.
+
+Locking model
+-------------
+
+- USE_LOCKING is set to True, enabling a global recursive lock (_phil) to guard interactions with the HDF5 library.
+- The with_phil decorator wraps functions/methods to ensure execution within the lock, preventing concurrent manipulation of internal identifiers.
+
+Registry and nonlocal invalidation
+----------------------------------
+
+- registry: A dict mapping Python id(obj) to a weak reference to the ObjectID instance. Objects are added during __cinit__ and removed during __dealloc__.
+- nonlocal_close(): Iterates all live ObjectID instances and, for those that are not locked, invalidates stale IDs by setting obj.id = 0 if the underlying HDF5 id has become invalid.
+- This mechanism helps avoid “zombie” identifiers when HDF5 reuses ids after close events.
+
+ObjectID API
+------------
+
+- Attributes
+  - id: The underlying HDF5 identifier (hid_t) for the object.
+  - locked: Integer flag indicating whether the object is protected from being closed automatically.
+  - _pyid: Internal Python-id used as the registry key; used for debugging and lifecycle tracking.
+
+- Properties
+  - fileno: Returns a tuple (fileno_major, fileno_minor) obtained from H5Gget_objinfo(self.id, '.', 0, &stat). This provides OS-level file sourcing information for the object.
+  - valid: Boolean indicating whether the Python-visible object is currently valid, per is_h5py_obj_valid(self).
+
+- Lifecycle
+  - __cinit__(self, id_): Acquire the lock, store the HDF5 id, initialize flags, and register the instance in registry with the key self._pyid.
+  - __dealloc__(self): Acquire the lock, and if the object is valid and not locked, decrement the HDF5 reference count via H5Idec_ref(self.id). Debug prints may be emitted if DEBUG_ID is enabled.
+
+Notes
+-----
+
+- Subclasses of ObjectID (e.g., FileID, GroupID) inherit this behavior and represent specific kinds of HDF5 objects.
+- The module also includes debugging helpers such as print_reg() to inspect the state of the registry.
+- The code relies on integration with HDF5 through Cython imports (e.g., cimports from defs) and the locking helpers defined in _locks.pxi.
+
+See Also
+--------
+
+- FileID, GroupID, DatasetID and other wrappers derived from ObjectID (not shown here)
+

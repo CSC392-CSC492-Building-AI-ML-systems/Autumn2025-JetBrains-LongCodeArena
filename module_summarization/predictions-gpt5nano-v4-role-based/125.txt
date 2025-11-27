@@ -1,0 +1,128 @@
+FITS headers verification
+=========================
+
+This section documents the FITS header verification mechanism used by the header verification subsystem. It explains how header values are checked, how results are reported, and how fixable issues can be automatically corrected. The behavior is driven by a small, extensible verification framework implemented in the code module, with emphasis on FITS header cards and their constraints.
+
+Core concepts
+-------------
+
+- Verification framework
+  - Verifies values defined by a header object (or any object that implements the verification interface).
+  - Produces a hierarchical set of error messages that can be reported, warned, or raised as exceptions.
+  - Supports both reporting and automatic fixes for fixable issues.
+
+- Error representation
+  - Errors are collected in an _ErrList, a nested list structure that preserves the hierarchy of checks.
+  - Leaves of the structure are tuples: (fixable, message), where:
+    - fixable is a boolean indicating whether the issue can be fixed automatically.
+    - message is the human-readable description of the problem.
+  - The list can be iterated with indentation to reflect the hierarchical nature of checks.
+
+- Basic messaging semantics
+  - A verification run can return or raise messages depending on the chosen option.
+  - Throughout, there is a note that FITS (via astropy.io.fits) uses zero-based indexing for certain header references.
+
+Verification options
+--------------------
+
+Options are defined by VERIFY_OPTIONS and can be combined with a “+” to separate how to fix issues from how to report them.
+
+- ignore
+  - Do not perform verification for the object.
+
+- warn
+  - Emit warnings for found issues.
+
+- exception
+  - Raise an exception for found issues.
+
+- fix
+  - Attempt to auto-fix fixable issues.
+  - If unfixable issues remain, report or raise based on the reporting mode.
+
+- silentfix
+  - Auto-fixable issues are fixed silently (no immediate reporting).
+
+- fix+ignore, fix+warn, fix+exception
+  - split options: the part before “+” controls fixing (fix or silentfix), the part after “+” controls reporting (ignore, warn, or exception).
+
+- silentfix+ignore, silentfix+warn, silentfix+exception
+  - similar to silentfix, but with the chosen reporting behavior.
+
+Option behavior details
+-----------------------
+
+- When the option includes “warn” or “exception”, fixable status is false for those items (they are treated as reporting-only).
+- When fixes are attempted, the provided fix function is invoked and the message is augmented (e.g., “Fixed.”).
+- If an option leads to only silent behavior (silentfix with ignore), verification reports can be completely suppressed.
+- For silentfix, only unfixable issues are printed if reporting occurs; fixable items are hidden.
+- For fix with ignore reporting, only unfixable issues are printed according to the chosen filter.
+- After collecting messages, the framework prints a header, adds a note about zero-based indexing, and then either warns or raises an exception depending on the reporting mode.
+
+Error reporting and formatting
+------------------------------
+
+- Messages are collected from the _ErrList via iter_lines, with optional filtering to hide or show certain lines (e.g., hide fixable items when using silentfix).
+- The final output typically starts with:
+  - “Verification reported errors:”
+  - A list of indented messages describing each issue.
+  - A note: “Note: astropy.io.fits uses zero-based indexing.”
+- If reporting is set to warn, each line is emitted as a VerifyWarning.
+- If reporting is set to exception, a VerifyError is raised with the joined messages.
+
+Practical usage patterns
+------------------------
+
+To implement verification for FITS headers, subclass the verification class and implement a _verify(self, option) method that builds an _ErrList. Each error should be added as a leaf entry (fixable, message) or as a nested _ErrList for structured checks. Use run_option to produce per-error results (including optional fixes) and collect them into the _ErrList.
+
+Example (pseudo-code)
+- Define a header verifier that stores a reference to the header being checked.
+- Implement _verify(option) to perform checks such as:
+  - Ensure required keys exist (e.g., SIMPLE, NAXIS).
+  - Validate value ranges or formats.
+  - Provide a fix function to correct a value if possible.
+- Use self.run_option for each issue to obtain (fixable, text) and append to an _ErrList.
+
+Example (illustrative)
+- class HeaderVerifier(_Verify):
+    def __init__(self, header):
+        self.header = header
+    def _verify(self, option):
+        errs = _ErrList(unit="Header Card")
+        if self.header.get('SIMPLE') != 'T':
+            def fix():
+                self.header['SIMPLE'] = 'T'
+            errs.append(self.run_option(
+                option, "Header 'SIMPLE' must be 'T'.",
+                fix_text="Set 'SIMPLE' to 'T'.",
+                fix=fix, fixable=True
+            ))
+        # More checks...
+        return errs
+
+- ver = HeaderVerifier(header)
+- ver.verify("fix+warn")
+
+Note on FITS indexing
+---------------------
+
+- The verification output and messages often reference indexing relative to FITS header semantics.
+- A reminder in the messages: “Note: astropy.io.fits uses zero-based indexing.” This is important when interpreting which header cards or array indices are being discussed.
+
+Best practices
+--------------
+
+- Use fixable checks with a well-defined fix function to enable automatic remediation of header issues where safe.
+- Prefer combining fix and reporting options (e.g., fix+warn) to automatically correct issues while still notifying about any remaining problems.
+- Reserve exception-based reporting for truly critical or non-fixable problems that should halt processing.
+
+References
+----------
+
+- The verification mechanism is designed to work with FITS header cards and is used by astropy.io.fits to ensure header integrity before further processing. The behavior is implemented via:
+  - _Verify: common verification logic and option handling
+  - _ErrList: nested, readable error representations
+  - VERIFY_OPTIONS: supported verification modes and combinations
+  - Note about zero-based indexing in FITS headers
+
+This documentation covers the high-level design and practical usage of FITS header verification as implemented in the headers verification subsystem. For implementation details, see the source code responsible for _Verify, _ErrList, and their interaction with FITS header objects.

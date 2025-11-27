@@ -1,0 +1,137 @@
+Publishing for web review
+=========================
+
+Overview
+--------
+This document describes the components and usage for publishing content to a web review workflow via the ftrack server. It focuses on authentication, session management, and optional event hub integration that enables publishing and subscribing to events (local or non-local) as part of web-based review processes.
+
+Key Components
+--------------
+- SessionAuthentication
+  - A requests authentication class that attaches ftrack authentication headers to HTTP requests.
+  - Example behavior (from the source):
+    - Initializes with api_key and api_user.
+    - Adds headers to each request:
+      - ftrack-api-key: <api_key>
+      - ftrack-user: <api_user>
+
+  Code snippet (from source):
+  .. code-block:: python
+     class SessionAuthentication(requests.auth.AuthBase):
+         '''Attach ftrack session authentication information to requests.'''
+ 
+         def __init__(self, api_key, api_user):
+             '''Initialise with *api_key* and *api_user*.'''
+             self.api_key = api_key
+             self.api_user = api_user
+             super(SessionAuthentication, self).__init__()
+ 
+         def __call__(self, request):
+             '''Modify *request* to have appropriate headers.'''
+             request.headers.update({
+                 'ftrack-api-key': self.api_key,
+                 'ftrack-user': self.api_user
+             })
+             return request
+
+- Session
+  - An isolated session for interaction with an ftrack server.
+  - Manages core context for publishing, including server URL, credentials, caching, and optional embedded event hub.
+  - Key initialization parameters (from constructor signature):
+    - server_url, api_key, api_user
+    - auto_populate (default: True) controls lazy fetching of attributes
+    - plugin_paths, cache, cache_key_maker
+    - auto_connect_event_hub (controls whether an embedded event hub auto-connects)
+    - schema_cache_path (enables schema caching)
+    - plugin_arguments (optional mapping for plugin discovery)
+
+  Relevant behavior described in the source:
+  - If auto_connect_event_hub is True, the embedded event hub will be connected to publish/subscribe to non-local events. If False, only local events can be published/subscribed until explicitly connected.
+  - Event hub connection is performed in a background thread to improve startup time.
+  - Schema caching can be enabled by providing a folder path via schema_cache_path (or via FTRACK_API_SCHEMA_CACHE_PATH). Set to False to disable caching.
+  - The session supports a layered cache with MemoryCache at the top level; a user-provided cache is integrated into that structure.
+  - The session records pending operations for later execution when appropriate.
+
+  Example constructor usage (from source signature):
+  .. code-block:: python
+     session = Session(
+         server_url='https://ftrack.example.com',
+         api_key='YOUR_API_KEY',
+         api_user='your.username',
+         auto_populate=True,
+         auto_connect_event_hub=True,
+         schema_cache_path='/path/to/schema/cache',
+         plugin_arguments={'arg1': 'value1'}
+     )
+
+Usage
+-----
+Publishing for web review typically involves authenticating with the server, optionally enabling an embedded event hub for real-time or asynchronous publishing, and performing operations that are recorded and sent to the ftrack server.
+
+Prerequisites
+- Obtain server_url, api_key, and api_user. If not provided directly, they can be sourced from environment variables:
+  - FTRACK_SERVER
+  - FTRACK_API_KEY
+  - FTRACK_API_USER
+- If any required value is missing, the Session constructor raises a TypeError.
+
+Basic usage
+- Create a session (with optional web-publish support via the event hub) and use it to interact with the server.
+
+.. code-block:: python
+   from web_review import Session
+   session = Session(
+       server_url='https://ftrack.example.com',
+       api_key='YOUR_API_KEY',
+       api_user='your.username',
+       auto_connect_event_hub=True
+   )
+
+HTTP requests with direct authentication
+- Use the SessionAuthentication helper to attach credentials to HTTP requests when talking to the server outside of the high-level session API.
+
+.. code-block:: python
+   from web_review import SessionAuthentication
+   import requests
+   auth = SessionAuthentication('YOUR_API_KEY', 'your.username')
+   response = requests.get('https://ftrack.example.com/api/path', auth=auth)
+
+Environment-based setup
+- If you prefer environment-based configuration, you can construct the session using environment variables:
+
+.. code-block:: python
+   import os
+   from web_review import Session
+   session = Session(
+       server_url=os.environ['FTRACK_SERVER'],
+       api_key=os.environ['FTRACK_API_KEY'],
+       api_user=os.environ['FTRACK_API_USER']
+   )
+
+Details
+-------
+- Environment integration:
+  - The following environment variables are used as fallbacks if explicit values are not provided:
+    - FTRACK_SERVER
+    - FTRACK_API_KEY
+    - FTRACK_API_USER
+- Authentication headers:
+  - Publishing requests to the web review system can use the SessionAuthentication header scheme:
+    - ftrack-api-key: <api_key>
+    - ftrack-user: <api_user>
+- auto_populate:
+  - When enabled, accessing entity attributes may fetch data from the server automatically if not already loaded.
+- Event hub:
+  - If auto_connect_event_hub is True, an embedded event hub is connected in the background to support publishing and subscribing to non-local events. Without this, only local events are available until manual connection.
+- Schema caching:
+  - Enable with schema_cache_path to a directory; can also be controlled via FTRACK_API_SCHEMA_CACHE_PATH. Disable with False.
+- Plugin argument handling:
+  - plugin_arguments is a mapping of keyword arguments passed to plugin registration functions. If a plugin’s signature does not accept a provided argument, the system will attempt to reduce the arguments to those accepted, emitting a warning if needed.
+- Caching:
+  - The session integrates a provided cache into a layered cache with MemoryCache at the top level, simplifying typical usage.
+- Operations:
+  - The session tracks pending operations via self.recorded_operations and self.record_operations, enabling controlled execution of actions against the server.
+
+See Also
+--------
+- ftrack_api Session and event hub concepts for further details on publishing and subscribing to events in the web review workflow.

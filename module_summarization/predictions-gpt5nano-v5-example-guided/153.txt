@@ -1,0 +1,116 @@
+# geometry.subpix.rst
+
+Geometric image transformations
+
+## Overview
+This module provides sub-pixel accurate geometric image transformation utilities built around a Pinhole Camera model. It exposes a PinholeCamera class to encapsulate camera intrinsics and extrinsics (as 4x4 matrices) along with image dimensions, and it leverages sub-pixel operations (e.g., via transform_points and inverse_transformation) to perform coordinate transformations and projections between world, camera, and image spaces.
+
+Key operations include:
+- Representing a camera with batched intrinsics (K) and extrinsics ([R|t]).
+- Transforming 3D points between world and camera coordinates.
+- Projecting 3D points onto the image plane using camera intrinsics.
+- Back-projecting 2D points to 3D given depth, using inverse transformations.
+
+The module emphasizes batch processing for performance in PyTorch environments.
+
+## Key Components
+- PinholeCamera
+  - Attributes:
+    - intrinsics: tensor of shape (B, 4, 4) representing the full camera calibration matrix.
+    - extrinsics: tensor of shape (B, 4, 4) representing the full rotation-translation matrix.
+    - height: tensor of shape (B,) image height.
+    - width: tensor of shape (B,) image width.
+  - Properties:
+    - batch_size: int, batch size B.
+    - fx, fy: focal lengths in x and y (shape (B,)).
+    - cx, cy: principal point coordinates (shape (B,)).
+    - tx, ty, tz: translation components from the extrinsics (shape (B,)).
+    - rt_matrix: 3x4 rotation-translation matrix (shape (B, 3, 4)).
+    - camera_matrix: 3x3 intrinsic matrix (shape (B, 3, 3)).
+    - rotation_matrix: 3x3 rotation component from extrinsics (shape (B, 3, 3)).
+    - translation_vector: translation component from extrinsics (shape (B, 3, 1)).
+- Helper utilities (from Kornia):
+  - transform_points: apply a transformation to 3D points.
+  - inverse_transformation: compute the inverse of a 4x4 transformation matrix.
+
+Notes:
+- Validation utilities ensure compatibility of batched inputs. Some internal checks assume batch form and shapes (e.g., (B, 4, 4) for intrinsics/extrinsics, (B,) for height/width).
+
+## Usage
+- Instantiate a batched PinholeCamera and access its properties.
+- Transform 3D points from world to camera coordinates and project to the image plane.
+- Back-project 2D points to 3D space given depth, using the inverse of extrinsics.
+
+Code examples below illustrate typical workflows.
+
+- Creating a camera and querying basic properties
+```python
+import torch
+from geometry.subpix import PinholeCamera  # or appropriate import path
+from kornia.geometry.linalg import inverse_transformation, transform_points
+
+# Example batched camera with batch size B=1
+intrinsics = torch.tensor([[
+    [1000.,   0., 320., 0.],
+    [0., 1000., 240., 0.],
+    [0.,    0.,   1., 0.],
+    [0.,    0.,   0., 1.]
+]], dtype=torch.float32)  # shape (1, 4, 4)
+
+extrinsics = torch.eye(4).unsqueeze(0)  # shape (1, 4, 4)
+height = torch.tensor([480], dtype=torch.float32)  # (B)
+width  = torch.tensor([640], dtype=torch.float32)  # (B)
+
+cam = PinholeCamera(intrinsics, extrinsics, height, width)
+
+print("Batch size:", cam.batch_size)
+print("Camera matrix shape:", cam.camera_matrix.shape)
+print("Rotation matrix shape:", cam.rotation_matrix.shape)
+```
+
+- Projecting 3D world points to image coordinates
+```python
+# Points in world coordinates: (B, N, 3)
+points_world = torch.tensor([[[0.0, 0.0, 5.0],
+                              [1.0, 0.0, 5.0],
+                              [0.0, 1.0, 5.0]]], dtype=torch.float32)
+
+# Transform to camera coordinates
+points_cam = transform_points(points_world, cam.extrinsics)  # (B, N, 3)
+
+# Simple pinhole projection: u = fx * X/Z + cx, v = fy * Y/Z + cy
+Xc, Yc, Zc = points_cam[..., 0], points_cam[..., 1], points_cam[..., 2]
+u = cam.fx * (Xc / Zc) + cam.cx
+v = cam.fy * (Yc / Zc) + cam.cy
+
+points_image = torch.stack([u, v], dim=-1)  # (B, N, 2)
+print("Projected image points:", points_image)
+```
+
+- Back-projecting 2D points to 3D space given depth
+```python
+# Suppose we have image points (u, v) and depth D for each point
+points_image_2d = points_image  # (B, N, 2)
+D = Zc  # use same depth as a demonstration
+
+# Back-project to camera coordinates
+Xc_back = (points_image_2d[..., 0] - cam.cx) * D / cam.fx
+Yc_back = (points_image_2d[..., 1] - cam.cy) * D / cam.fy
+points_cam_back = torch.stack([Xc_back, Yc_back, D], dim=-1)  # (B, N, 3)
+
+# Convert back to world coordinates
+inverse_ext = inverse_transformation(cam.extrinsics)  # (B, 4, 4)
+points_world_back = transform_points(points_cam_back, inverse_ext)  # (B, N, 3)
+```
+
+- Notes on transforms
+  - To transform from world to image, use the extrinsics and intrinsics in sequence (R|t) followed by the camera projection.
+  - To go from image/world back to world, you can utilize inverse_transformation on the extrinsics and apply transform_points accordingly.
+
+## Details
+- Validation and shape handling ensure inputs are batched where appropriate:
+  - intrinsics and extrinsics must be (B, 4, 4).
+  - height and width must be 1D tensors with length B.
+- The PinholeCamera class provides helper properties to access common camera parameters directly (fx, fy, cx, cy, tx, ty, tz) and to obtain derived matrices (rt_matrix, camera_matrix, rotation_matrix, translation_vector).
+
+Important: The internal validation method _check_valid_params contains a comment about the logic for shape validation. The intended behavior expects either 3D (Bx4x4) or 4D (BxNx4x4) shapes for parameters, with a batch-dimension semantics enabling efficient batched computation.

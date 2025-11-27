@@ -1,0 +1,146 @@
+w_fluxanl.rst — Technical documentation for the w_fluxanl command
+
+Overview
+- Purpose: w_fluxanl extracts target-state flux measurements from a WEST HDF5 file, aggregates them over a user-specified iteration range, and prepares data suitable for Monte Carlo bootstrapping to estimate means and confidence intervals of fluxes and correlation lengths.
+- Output: For each target (by label when available, otherwise by index), an array of flux entries (fluxentry_dtype) containing:
+  - n_iter: iteration number
+  - flux: flux value (units depend on whether tau is unity; see notes)
+  - count: number of recycled entries contributing to this flux for that iteration
+- Post-processing: The tool is designed to be used in conjunction with bootstrapping to produce mean_flux, mean_flux_ci_lb, mean_flux_ci_ub, and mean_flux_correl_len per target. The internal data structures support a later step that computes these statistics.
+
+Key data structures (defined in the module)
+- fluxentry_dtype
+  - Fields: ('n_iter', n_iter_dtype), ('flux', weight_dtype), ('count', np.uint)
+  - Each entry corresponds to a single iteration for a given target.
+- target_index_dtype
+  - Fields: ('target_label', vstr_dtype), ('mean_flux', weight_dtype), ('mean_flux_ci_lb', weight_dtype), ('mean_flux_ci_ub', weight_dtype), ('mean_flux_correl_len', np.uintc)
+  - Used for output indexing of targets with their bootstrap-derived statistics.
+
+Flux extraction logic (high level)
+- The code handles two file-version families:
+  - File version < 7: Flux data is extracted from the old “recycling” table in each iteration.
+  - File version >= 7: Flux data is extracted from the “new_weights” group of the iteration following recycling events, using information about recycled weights.
+- Core entry points:
+  - extract_fluxes(iter_start, iter_stop, data_manager)
+    - Out-of-the-box wrapper that defaults iter_start to 1 and iter_stop to the current iteration if not provided.
+    - Delegates to either _extract_fluxes_fileversion_lt_7 or _extract_fluxes_fileversion_7 based on data_manager.we_h5file_version.
+- File version < 7 extraction (_extract_fluxes_fileversion_lt_7)
+  - Determines iter_count = iter_stop - iter_start.
+  - Determines target_count from the recycling table in the first iteration.
+  - Creates fluxdata as a dict mapping target index -> array of fluxentry_dtype, with appropriate initialization of fields.
+  - For each iteration:
+    - Reads recycling data for that iteration.
+    - Populates fluxdata for each target with:
+      - n_iter = current iteration
+      - flux = rdata[target]['flux_field'], where flux_field is 'weight' if file version < 5, else 'flux'
+      - count = rdata[target]['count']
+- File version >= 7 extraction (_extract_fluxes_fileversion_7)
+  - Iterates over iterations, gathering:
+    - target_states = data_manager.get_target_states(n_iter)
+    - new_weight_index = data_manager.get_iter_group(n_iter + 1)['new_weights']['index'] (present if recycling occurred)
+  - For each target state, builds or updates an entry in by_target keyed by target label:
+    - If first encounter, allocate an array of fluxentry_dtype with length iter_count, and set count to -1 where the target is not observed.
+    - recycled_from_tstate: boolean mask describing recycled entries that target the current state.
+    - recycle_count = sum(recycled_from_tstate)
+    - target_info['count'][iiter] = recycle_count
+    - If recycle_count > 0, accumulate target_info['flux'][iiter] as the sum of weights for recycled entries.
+  - After processing all iterations, trims each target’s fluxdata to the last contiguous run where the target exists (using a sentinel of 0 in 'count').
+- Return value of extract_fluxes
+  - A dictionary mapping:
+    - Key: target label (string) if available; otherwise, a numeric target index.
+    - Value: a 1-D numpy array of fluxentry_dtype with length equal to the number of iterations considered, containing per-iteration flux information.
+
+The w_fluxanl tool (WFluxanlTool)
+- Class: WFluxanlTool (subclass of WESTTool)
+- Purpose: Coordinate extraction, bootstrap analysis, and output formatting for flux data.
+- CLI structure (as inferred from code)
+  - Exposes standard WEST data reader integration:
+    - self.data_reader.add_args(parser)
+    - self.iter_range.add_args(parser)
+  - Output options group:
+    - -o … (output options, such as output file or group; exact usage is defined in the full argument parser)
+- Important attributes and flow
+  - data_reader: WESTDataReader instance to parse data-related arguments and load data
+  - iter_range: IterRangeSelection instance to select a subset of iterations
+  - output_h5file / output_group / target_groups: placeholders for HDF5 output and grouping
+  - fluxdata: in-memory storage for per-target flux arrays produced by extract_fluxes
+  - alpha / autocorrel_alpha / n_sets / do_evol / evol_step: control bootstrap and evolution options (used by the statistical analysis portion of the tool)
+- Output semantics
+  - Non-graphical outputs assume tau = 1. To convert to physical units, scale fluxes and correlation lengths by tau as needed.
+  - After bootstrapping, per-target statistics (mean_flux, CI bounds, correl_len) are produced and likely stored in target_index_dtype-like structures for downstream consumption.
+
+CLI usage and options (practical guidance)
+- Basic usage
+  - w_fluxanl collects fluxes for the default iteration range (1 to current iteration) from the active WEST data store.
+- Specifying iteration ranges
+  - Use the iter_range integration to limit iterations (e.g., 1..100 or 50..150).
+- Output destinations
+  - The -o option group configures where the tool writes its results (file, group, and naming). Exact syntax is determined by the full CLI in the present codebase.
+- Target handling
+  - If targets have labels (preferred), the tool keys per-target results by label; otherwise, numeric indices are used.
+
+Examples
+
+1) Basic extraction for all iterations (default)
+- Purpose: produce flux data for all iterations from the current data manager state.
+- Pseudocode:
+  - flux_dict = extract_fluxes()
+  - For each target_label, flux_array in flux_dict.items():
+    - Access flux_array['n_iter'], flux_array['flux'], flux_array['count']
+
+2) Extraction for a specific iteration window
+- Purpose: limit analysis to iterations 100 through 200.
+- Pseudocode:
+  - flux_dict = extract_fluxes(iter_start=100, iter_stop=201)
+  - Process as in example 1
+
+3) Bootstrapped statistics workflow (conceptual)
+- Steps:
+  - Use extract_fluxes to obtain per-iteration flux data for all targets over the desired iterations.
+  - Apply bootstrap resampling (MC) across the per-iteration flux samples to estimate mean_flux and confidence intervals per target.
+  - Store results in target_index_dtype-compatible structure for downstream reporting or plotting.
+
+Notes on compatibility and data formats
+- File version handling
+  - The flux extraction path diverges based on data_manager.we_h5file_version:
+    - < 7: older recycling structure
+    - >= 7: new_weights-derived recycling information
+- Missing recycling data
+  - In v7 mode, if a target has no recycling data in the iteration, it is simply skipped for that iteration (sentinel -1 counts indicate non-availability). The last contiguous run is retained for each target.
+- Units and tau
+  - Non-graphical outputs assume tau = 1. If tau ≠ 1, scaling is required to obtain physically meaningful units: fluxes multiplied by tau, correlation lengths divided by tau, etc.
+
+Implementation notes for developers
+- Extensibility
+  - The flux extraction logic is split into two dedicated helpers to isolate backward-compatibility concerns (lt_7 vs >=7). Future formats can be added by implementing a new extractor and updating extract_fluxes to dispatch accordingly.
+- Data integrity
+  - In the v7 path, careful management of per-target arrays and sentinel values is crucial to avoid misalignment between iterations and target entries.
+- Testing considerations
+  - Tests should cover:
+    - File version < 7 extraction with several targets across multiple iterations
+    - File version >= 7 extraction with recycling in multiple targets, including cases where a target first appears mid-range or disappears after recycling stops
+    - Correct handling of missing recycling data (count = -1 sentinel and array trimming)
+    - Consistency of returned dict keys: strings for target labels when available; numeric indices otherwise
+
+References to code elements (for developers)
+- Public API:
+  - extract_fluxes(iter_start=None, iter_stop=None, data_manager=None)
+- Internal helpers:
+  - _extract_fluxes_fileversion_lt_7(iter_start, iter_stop, data_manager)
+  - _extract_fluxes_fileversion_7(iter_start, iter_stop, data_manager)
+- Data structures:
+  - fluxentry_dtype = np.dtype([('n_iter', n_iter_dtype), ('flux', weight_dtype), ('count', np.uint)])
+  - target_index_dtype = np.dtype([('target_label', vstr_dtype), ('mean_flux', weight_dtype), ('mean_flux_ci_lb', weight_dtype), ('mean_flux_ci_ub', weight_dtype), ('mean_flux_correl_len', np.uintc)])
+- Tool class:
+  - WFluxanlTool(WESTTool)
+  - CLI integration points:
+    - self.data_reader.add_args(parser)
+    - self.iter_range.add_args(parser)
+    - output options grouping with -o
+
+Caveats and troubleshooting
+- Ensure West HDF5 file version is properly detected; the correct extraction path depends on data_manager.we_h5file_version.
+- If a target has no recycling data in the chosen iterations (especially in v7), its flux entries may be sparse or missing; the code handles this by skipping non-existent entries and trimming to contiguous runs per target.
+- When interpreting results, always apply tau-based scaling if necessary to convert to physical units.
+
+This documentation captures the core behavior and structure of w_fluxanl as implemented in the provided code, focusing on flux extraction, data formats, and the intended usage for developers extending or integrating this tool.

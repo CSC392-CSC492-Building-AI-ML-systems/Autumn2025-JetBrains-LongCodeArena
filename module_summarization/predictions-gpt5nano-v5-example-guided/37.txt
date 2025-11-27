@@ -1,0 +1,109 @@
+# w_trace: Trace trajectory segments back to origin
+
+## Overview
+The w_trace module provides functionality to reconstruct the trace of a trajectory segment back to its origin within the WestPA framework. It builds a summary of the trajectory by walking predecessor links, identifies the initial state and (when available) the basis state, and offers utilities to fetch data along the trace. This is encapsulated in the Trace class, which interacts with the WestPA data manager and HDF5 data files.
+
+## Key Components
+
+- Trace class
+  - Represents a trajectory trace from a final segment back to its origin.
+  - Core methods:
+    - from_data_manager(n_iter, seg_id, data_manager=None): Construct a Trace by walking backward from the given final segment (n_iter, seg_id) through its parents, collecting per-segment info and final pcoord values.
+    - get_segment_data_slice(datafile, dsname, n_iter, seg_id, slice_=None, index_data=None, iter_prec=None): Retrieve data for a specific dataset (dsname) for the given iteration and segment. Supports direct iteration-group access or indexed lookups via index_data, and optional slicing.
+    - trace_timepoint_dataset(dsname, slice_=None, auxfile=None, index_ds=None): Return a time-ordered trace of a dataset laid out as [seg_id][timepoint][...], along with the corresponding trajectory weights.
+  - Data/state handling:
+    - endpoint_type, basis_state, initial_state: Metadata and state information resolved during trace construction.
+    - data_manager: Uses the WestPA data manager (defaults to westpa.rc.get_data_manager()).
+  - Internal details:
+    - Efficient handling of auxiliary files via a cache (_auxfiles).
+    - Robust support for both current and older HDF5 layouts (with fallbacks for old versions when necessary).
+- Data model integration
+  - Interacts with HDF5 data structures:
+    - Iteration groups named iter_{n:0{d}d} (or a variant) containing pcoord and seg_index data.
+    - Fields such as weight, cputime, walltime, parent_id (or legacy parents) used to reconstruct the trace.
+  - Summary dtype includes:
+    - n_iter, seg_id, weight, walltime, cputime, final_pcoord
+  - final_pcoord shape/dtype inferred from the pcoord dataset.
+- Important attributes
+  - endpoint_type: Endpoint type of the final segment.
+  - basis_state: Basis state object for the initial segment (if available).
+  - initial_state: InitialState instance representing the trajectory origin.
+
+## Usage
+
+- Build a trace from a final segment identified by (n_iter, seg_id):
+  - Example:
+    trace = Trace.from_data_manager(n_iter, seg_id)
+
+- Inspect trace metadata and summary:
+  - trace.summary
+  - trace.endpoint_type
+  - trace.basis_state
+  - trace.initial_state
+
+- Retrieve a data slice for a specific dataset:
+  - Example:
+    import h5py
+    with h5py.File('west.h5', 'r') as datafile:
+        slice_ = trace.get_segment_data_slice(datafile, dsname='pcoord', n_iter=n_iter, seg_id=seg_id)
+
+- Get a data trace along the trajectory for a dataset:
+  - Example:
+    data_trace, weight_trace = trace.trace_timepoint_dataset(dsname='pcoord')
+
+Code references from the source:
+
+- Constructing a trace:
+  trace = Trace.from_data_manager(n_iter, seg_id)
+
+- Accessing summary and state:
+  trace.summary, trace.endpoint_type, trace.basis_state, trace.initial_state
+
+- Fetching a per-segment data slice:
+  with h5py.File(datafile_path, 'r') as df:
+      data_slice = trace.get_segment_data_slice(df, dsname='pcoord', n_iter=n_iter, seg_id=seg_id)
+
+- Getting a time-ordered trace for a dataset:
+  data_trace, weight = trace.trace_timepoint_dataset(dsname='pcoord')
+
+## Details
+
+- Trace.from_data_manager:
+  - Walks backward through parent segments starting from (n_iter, seg_id) to the initial segment.
+  - Collects for each segment: (n_iter, seg_id, weight, walltime, cputime, final_pcoord).
+  - Determines endpoint_type, pcoord data type and shape, and initial/basis state information.
+  - Handles both modern and older HDF5 layouts (with KeyError handling for legacy initial state retrieval).
+
+- Trace.get_segment_data_slice:
+  - If index_data is provided, searches for (n_iter, seg_id) in that iterable and uses the matched position to extract data.
+  - If not, locates the dataset within the iteration group corresponding to the given n_iter and uses a slice to retrieve data for seg_id.
+  - Supports optional iter_prec override via iter_prec or datafile attributes.
+
+- Trace.trace_timepoint_dataset:
+  - Returns a data trace along the trajectory for a dataset arranged as [seg_id][timepoint][...], accounting for overlaps at segment boundaries and returning the corresponding weights.
+
+- Data model considerations:
+  - Uses the WESTTool and WESTDataReader interfaces and the WestPA data manager to resolve states and segment data.
+  - Summary dtype fields (n_iter, seg_id, weight, walltime, cputime, final_pcoord) provide a compact representation of the trace.
+
+- Version compatibility:
+  - The implementation includes fallbacks for older HDF5 layouts (e.g., initial state retrieval) to maintain compatibility with legacy data files.
+
+```python
+# Example: build a trace for a final segment
+trace = Trace.from_data_manager(n_iter, seg_id)
+
+# Access core attributes
+endpoint = trace.endpoint_type
+initial = trace.initial_state
+basis = trace.basis_state
+
+# Retrieve a segment data slice
+with h5py.File('west.h5', 'r') as df:
+    seg_slice = trace.get_segment_data_slice(df, dsname='pcoord', n_iter=n_iter, seg_id=seg_id)
+
+# Retrieve a timepoint dataset trace along the trajectory
+time_trace, weight_trace = trace.trace_timepoint_dataset(dsname='pcoord')
+```
+
+This documentation covers the w_trace command’s core functionality as implemented in the provided code, focusing on the Trace class, its data handling, and its usage for reconstructing trajectory traces within WestPA.

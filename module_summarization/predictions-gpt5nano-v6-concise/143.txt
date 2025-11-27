@@ -1,0 +1,244 @@
+# Managing Memory
+
+This document explains how memory is managed in the distributed runtime, with a focus on how memory is accounted for, how data is spilled to disk, how eviction decisions are made under pressure, and how to configure and observe memory behavior. It is aimed at developers extending or debugging the memory subsystem in this codebase.
+
+---
+
+## Table of contents
+
+- [Overview](#overview)
+- [Memory model and terminology](#memory-model-and-terminology)
+- [Memory accounting and references](#memory-accounting-and-references)
+- [Spilling to disk and eviction](#spilling-to-disk-and-eviction)
+- [Memory thresholds and policy](#memory-thresholds-and-policy)
+- [Configuration and tuning](#configuration-and-tuning)
+- [Observability and debugging](#observability-and-debugging)
+- [Developer considerations](#developer-considerations)
+- [Examples](#examples)
+
+---
+
+## Overview
+
+Memory management in this environment centers on controlling RAM usage per worker, ensuring progress by spilling data to disk when possible, and evicting or pausing work to keep the cluster responsive under memory pressure. Data movements, references, and lifecycle events are tracked so that the system can determine where data lives, when it can be discarded, and how to reload it on demand.
+
+Key goals:
+- Prevent out-of-memory crashes on individual workers.
+- Maintain high throughput by allowing spill-to-disk workflows.
+- Provide predictable behavior under varying workloads and data sizes.
+- Offer observable metrics and traceability for debugging memory-related issues.
+
+---
+
+## Memory model and terminology
+
+- **Worker memory**: RAM available to a worker process. Each worker has a configured memory limit that constrains how much in-RAM data it may hold.
+- **Object store / managed memory**: In-memory representations of objects referenced by your computations. The system tracks what data is present on each worker.
+- **Spill to disk**: When RAM usage approaches configured thresholds, data can be serialized and stored on the local disk, freeing RAM while keeping the data addressable for reuse.
+- **Eviction policy**: The strategy used to decide which objects to remove from memory (and potentially spill to disk) when under pressure.
+- **Futures and keys**: A Future represents a result of a remote computation. The system tracks which keys (data) are present and where they reside across the cluster.
+- **HasWhat / WhoHas**: Metadata structures used to track data locality. HasWhat indicates what a worker currently holds; WhoHas maps keys to workers that hold them.
+
+These concepts underpin how memory pressure is detected, how data is released or retrieved, and how the scheduler coordinates data locality maintenance.
+
+---
+
+## Memory accounting and references
+
+- Each remote computation yields a Future that acts as a local proxy for a result living on the cluster.
+- Data is tracked by keys. The scheduler, workers, and clients maintain a coherent view of where keys live and how many references exist.
+- Reference counting and lifecycle management ensure that when a key is no longer referenced by any active computation, it becomes eligible for eviction or garbage collection.
+- When a Future is created or returned, the system informs the scheduler of the keys it depends on, enabling the scheduler to manage memory-aware scheduling decisions.
+
+Developer notes:
+- If you modify the object lifecycle, ensure that references to keys are updated consistently across the client and workers to avoid stale or phantom data.
+- Be mindful of scenarios where transient data is generated in a task; such data should be automatically released when the task completes or when no futures reference it.
+
+---
+
+## Spilling to disk and eviction
+
+- Spilling is the primary mechanism for freeing RAM while preserving data locality.
+- When memory usage crosses configured spill thresholds, the system serializes selected objects to disk and updates metadata to reflect their new storage location.
+- Eviction may be driven by:
+  - Memory target (a desired fraction of memory to keep in RAM)
+  - Spill threshold (when to start spilling)
+  - Pause threshold (when to pause scheduling new tasks to relieve pressure)
+- Re-fetching evicted data incurs serialization/deserialization costs, so eviction strategies balance immediacy of access against memory availability.
+
+Developer notes:
+- The eviction policy should be pluggable to support custom strategies (e.g., LFU, LRU, or domain-specific heuristics).
+- Ensure that evicted data can be safely reloaded given the current task graph and dependencies.
+
+---
+
+## Memory thresholds and policy
+
+Typical concepts you will configure or observe:
+- Memory limit per worker: absolute RAM cap for in-memory data (e.g., 8 GiB per worker).
+- Memory target: desired fraction of memory to keep in RAM (e.g., 0.6 means keep ~60% in RAM).
+- Spill threshold: RAM usage level at which data begins to spill to disk (e.g., 0.75 of the memory limit).
+- Pause threshold: RAM usage level at which the system stops scheduling new tasks to relieve pressure (e.g., 0.95).
+
+These thresholds create a graduated response to memory pressure:
+- As memory usage rises, the system starts spilling data.
+- Once a spillable portion is freed and RAM usage drops toward the target, normal operation resumes.
+- If usage continues to rise toward the pause threshold, scheduling slows or stops to prevent crashes.
+
+Configuring and tuning:
+- These thresholds are typically exposed via a per-worker or per-cluster configuration. They may be expressed as fractions (0–1) of the memory limit or as absolute byte values.
+- The exact configuration keys depend on the version and transport layer; consult the version-specific configuration schema for precise keys.
+
+Example (conceptual configuration):
+- Per-worker memory_limit: 8 GiB
+- memory.target: 0.6
+- memory.spill: 0.8
+- memory.pause: 0.95
+
+Code-style example (conceptual, for a Dask-like config system):
+- YAML-like
+  distributed:
+    worker:
+      memory_limit: 8 GiB
+      memory:
+        target: 0.6
+        spill: 0.8
+        pause: 0.95
+
+- Python API (conceptual)
+set_config({
+  "distributed": {
+    "worker": {
+      "memory_limit": "8 GiB",
+      "memory": {"target": 0.6, "spill": 0.8, "pause": 0.95},
+    }
+  }
+})
+
+Note: Exact keys and nesting depend on the version of the framework you are using. Refer to the version-specific configuration reference.
+
+---
+
+## Configuration and tuning
+
+- Per-worker memory_limit
+  - Sets the maximum RAM available to a worker for in-memory data.
+  - Examples: "4 GiB", "16 GiB".
+
+- Memory thresholds
+  - target: fraction of memory to keep in RAM under normal operation.
+  - spill: threshold to start spilling data to disk.
+  - pause: threshold to pause or throttle new task submissions.
+
+- Spill strategy
+  - Default heuristic-based eviction with spill to disk enabled when appropriate.
+  - Optional: custom eviction policy for advanced workloads.
+
+- Persisted data and object locality
+  - Spilled data remains addressable by its key.
+  - Reloading data from disk incurs serialization overhead; locality-aware scheduling minimizes reloads.
+
+- Compatibility and evolution
+  - Memory management configuration may evolve between versions. Always align config keys with the version you run.
+  - When upgrading, review release notes for any changes to memory thresholds or eviction semantics.
+
+---
+
+## Observability and debugging
+
+- Metrics to monitor
+  - RAM usage per worker
+  - Disk spill count and spilled bytes
+  - Number of evicted objects
+  - Pending and running tasks under memory pressure
+  - Data locality information (HasWhat / WhoHas)
+
+- Diagnostics
+  - Performance dashboards and memory-specific widgets
+  - Logging around eviction decisions and spill operations
+  - Traces of data movement between memory and disk
+
+- Debugging tips
+  - Reproduce memory pressure in a controlled environment (e.g., with a synthetic workload) to observe eviction behavior.
+  - Inspect HasWhat/WhoHas metadata to understand where data currently resides.
+  - Validate that futures and keys are released when no longer needed to avoid hidden memory leaks.
+
+---
+
+## Developer considerations
+
+- Extensibility
+  - The memory subsystem should expose hooks for custom eviction policies and spill strategies.
+  - Consider pluggable components for:
+    - Memory accounting backends
+    - Spill serialization formats
+    - Disk-backed object stores
+
+- Correctness
+  - Ensure memory accounting is consistent across the scheduler and workers.
+  - Maintain correct reference semantics so that data is not discarded while still in use.
+  - Be mindful of race conditions when multiple tasks and workers concurrently modify memory state.
+
+- Performance
+  - Favor locality-aware data placement to reduce reloads from disk.
+  - Minimize churn between memory and disk by tuning target/spill thresholds to workload characteristics.
+  - Provide fast-paths for common cases (e.g., small objects staying in RAM) to avoid unnecessary spill overhead.
+
+- Testing
+  - Include tests that simulate varying workloads and memory pressure.
+  - Validate eviction correctness under concurrent tasks and dynamic worker counts.
+  - Test behavior under node failures or network partitions to ensure memory accounting remains consistent.
+
+---
+
+## Examples
+
+- Example 1: Basic local cluster with a memory limit and sensible defaults
+  - Goal: Run a small cluster where each worker has a fixed RAM budget and memory pressure triggers spill.
+  - Code (conceptual):
+
+    from dask.distributed import LocalCluster, Client
+
+    cluster = LocalCluster(n_workers=4, threads_per_worker=1, memory_limit="6 GiB")
+    client = Client(cluster)
+
+    # Submit workload that uses substantial memory
+    future = client.submit(heavy_computation, data_chunk)
+
+- Example 2: Configuring memory thresholds explicitly
+  - Goal: Tune memory behavior to spill earlier and pause later to maintain steady throughput.
+  - Conceptual config (YAML-like):
+
+    distributed:
+      worker:
+        memory_limit: 8 GiB
+        memory:
+          target: 0.6
+          spill: 0.8
+          pause: 0.95
+
+  - Python API (conceptual):
+
+    from dask.config import set as set_config
+    set_config({
+      "distributed": {
+        "worker": {
+          "memory_limit": "8 GiB",
+          "memory": {"target": 0.6, "spill": 0.8, "pause": 0.95},
+        }
+      }
+    })
+
+- Example 3: Observing memory behavior during a run
+  - Goal: Collect basic memory metrics to diagnose behavior under load.
+  - Code (conceptual):
+
+    # Periodically fetch and log memory metrics from workers
+    metrics = client.run(lambda dask_worker: dask_worker.memory_usage())  # (pseudo)
+    log(metrics)
+
+Note: Specific APIs for fetching memory_usage, memory_spill_count, or per-worker metrics depend on the version of the distributed runtime. Use the version-specific observability points provided in your environment.
+
+---
+
+If you need, I can tailor this section to your exact version of the distributed framework, including precise configuration keys, API calls for memory metrics, and concrete code examples that align with your codebase.

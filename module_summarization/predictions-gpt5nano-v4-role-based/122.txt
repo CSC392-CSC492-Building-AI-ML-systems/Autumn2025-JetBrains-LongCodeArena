@@ -1,0 +1,191 @@
+Unified renderable interface
+============================
+
+This document describes the unified renderable interface implemented by the renderable module. It defines a small, consistent API for rendering objects into HTML templates, optionally with CSS class metadata and BEM-based naming support.
+
+Core concepts
+-------------
+
+- All renderables expose a rendering contract via:
+  - A template name (or a method to determine it)
+  - A context data provider
+  - A render method that produces HTML using Django’s render_to_string
+
+- The default rendering pattern makes the renderable itself available to the template as the key "me".
+
+- Optional enhancements include:
+  - CSS class handling (via AbstractRenderableWithCss)
+  - BEM-style naming for CSS classes (via AbstractBemRenderable)
+
+AbstractRenderable
+------------------
+
+Purpose
+- Provides the minimal, unified renderable interface used by the system.
+
+Key API
+- template_name (class attribute)
+  - Default: None
+  - If set, used as the template name by default.
+
+- get_template_names(self)
+  - Returns the template name(s) for rendering.
+  - Defaults to the value of template_name.
+  - If neither is set, raises NotImplementedError.
+
+- get_context_data(self, request=None)
+  - Returns the context dictionary used for rendering.
+  - Default implementation provides:
+    - {'me': self}
+  - Subclasses can override to enrich the context.
+
+- render(self, request=None, extra_context_data=None)
+  - Renders the template using render_to_string.
+  - Workflow:
+    - Merge extra_context_data (if any) with the context from get_context_data(request=request)
+    - Forward request (if provided) to render_to_string
+  - Result: rendered HTML as a string
+
+Usage example
+- Simple renderable with a fixed template:
+  - class MyRenderable(AbstractRenderable):
+      template_name = 'my_template.html'
+  - Rendering:
+      html = MyRenderable().render()
+
+- Providing extra context:
+  - class MyRenderable(AbstractRenderable):
+      template_name = 'my_template.html'
+      def get_context_data(self, request=None):
+          ctx = super().get_context_data(request=request)
+          ctx['extra'] = 'value'
+          return ctx
+  - html = MyRenderable().render(extra_context_data={'foo': 'bar'})
+
+AbstractRenderableWithCss
+-------------------------
+
+Purpose
+- Extends AbstractRenderable with a unified API for CSS classes, enabling consistent styling of renderables.
+
+Key API
+- get_base_css_classes_list(self)
+  - Returns a list of base CSS classes (default: []).
+- get_extra_css_classes_list(self)
+  - Returns a list of extra CSS classes (default: []).
+- get_css_classes_list(self)
+  - Combines base and extra CSS class lists into a single list.
+  - Default behavior concatenates the two lists in order.
+  - Subclasses may override to supply their own combined list.
+- get_test_css_class_suffixes_list(self)
+  - Returns a list of suffixes to generate test CSS classes for testing (default: []).
+- css_classes (property)
+  - Returns a single string of CSS classes joined with two spaces.
+  - If DJANGO_CRADMIN_INCLUDE_TEST_CSS_CLASSES is True, appends test CSS classes
+    generated from get_test_css_class_suffixes_list() using cradmin_test_css_class().
+  - Uses the helper join_css_classes_list to produce the final string.
+- get_css_classes_string(self)
+  - Deprecated alias for css_classes with a DeprecationWarning.
+  - Returns the same value as css_classes.
+
+Usage example
+- Define a renderable with CSS classes:
+  - class MyCssRenderable(AbstractRenderableWithCss):
+      def get_base_css_classes_list(self):
+          return ['block', 'component']
+      def get_extra_css_classes_list(self):
+          return ['is-visible']
+  - css = MyCssRenderable().css_classes
+  - This yields a string like: "block  component  is-visible"
+
+Notes on test CSS classes
+- If_TEST_CSS_CLASSES setting is enabled via crsettings, test CSS classes are included:
+  - Each suffix from get_test_css_class_suffixes_list() is converted to a test class
+    using cradmin_tags.cradmin_test_css_class(suffix).
+
+AbstractBemRenderable
+---------------------
+
+Purpose
+- Provides a BEM-oriented renderable base class, making CSS class naming align with BEM conventions.
+
+Initialization and validation
+- __init__(bem_block=None, bem_element=None, bem_variant_list=None, extra_css_classes_list=None)
+  - bem_block (str): BEM block name. Cannot be supplied together with bem_element.
+  - bem_element (str): BEM element name. Must contain '__' (e.g., 'block__element').
+  - bem_variant_list (list): List of BEM variants (suffixes after --) for the block/element.
+  - extra_css_classes_list (list): Additional CSS classes.
+  - Validation:
+    - If both bem_block and bem_element are provided, raises ValueError.
+    - If bem_element is provided and does not contain '__', raises ValueError.
+
+- Internal state:
+  - _bem_block
+  - _bem_element
+  - _bem_variant_list
+  - _extra_css_classes_list
+
+Key API
+- get_test_css_class_suffixes_list(self)
+  - Returns a list of suffixes for test CSS classes (default: []).
+- bem_block_or_element (property)
+  - Returns the bem_block if present; otherwise returns bem_element.
+- get_bem_block(self)
+  - Returns the BEM block name.
+- get_bem_element(self)
+  - Returns the BEM element name.
+
+Known issue
+- The implementation of get_bem_element currently returns self._b instead of self._bem_element, which appears to be a bug in the code. The intended behavior is to return self._bem_element.
+
+Usage example
+- A renderable using BEM naming:
+  - class MyBemRenderable(AbstractBemRenderable):
+      def __init__(self, bem_block='card', bem_element=None, **kwargs):
+          super().__init__(bem_block=bem_block, bem_element=bem_element, **kwargs)
+  - render = MyBemRenderable().render()
+  - bem_block_or_element would be 'card' if only block is provided, or the element name if provided.
+
+Inline helper
+- join_css_classes_list(css_classes_list)
+  - Utility to join a list of CSS class strings into a single string with two spaces between classes.
+  - Used by CSS-related properties to format final class strings.
+
+Practical guidance: using the unified interface
+------------------------------------------------
+
+- Prefer AbstractRenderable as the foundation for any renderable component.
+- Override get_template_names() or set template_name to specify templates clearly.
+- Provide a meaningful default context via get_context_data; keep a stable API by using the provided keys (notably, 'me': self).
+- If CSS is relevant, compose CSS classes by:
+  - Implementing get_css_classes_list() (or base/extra lists) in your subclass.
+  - Relying on the css_classes property for the final string, which may include test CSS classes in test mode.
+- If BEM naming helps your styling strategy, extend AbstractBemRenderable and supply bem_block or bem_element with proper validation.
+
+API reference (summary)
+-----------------------
+
+- join_css_classes_list(css_classes_list)
+  - Returns: string
+- AbstractRenderable
+  - template_name: class attribute
+  - get_template_names() -> str
+  - get_context_data(request=None) -> dict
+  - render(request=None, extra_context_data=None) -> str
+- AbstractRenderableWithCss(AbstractRenderable)
+  - get_base_css_classes_list() -> list
+  - get_extra_css_classes_list() -> list
+  - get_css_classes_list() -> list
+  - get_test_css_class_suffixes_list() -> list
+  - css_classes -> str (property)
+  - get_css_classes_string() -> str (deprecated; calls css_classes)
+- AbstractBemRenderable(AbstractRenderable)
+  - __init__(bem_block=None, bem_element=None, bem_variant_list=None, extra_css_classes_list=None)
+  - get_test_css_class_suffixes_list() -> list
+  - bem_block_or_element (property) -> str
+  - get_bem_block() -> str
+  - get_bem_element() -> str (note: current implementation returns an incorrect attribute in code)
+
+Notes
+- The render flow forwards the request to render_to_string when provided, enabling request-aware template rendering (e.g., Django templates that rely on request context).
+- The unified interface emphasizes predictable extension points (template, context, and optional CSS/BEM features) to keep renderables composable and testable.

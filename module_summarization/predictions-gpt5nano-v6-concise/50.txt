@@ -1,0 +1,226 @@
+# Generate example for smoothing basis in GAM (gam.rst)
+
+This page provides a concrete, reproducible example workflow for generating and using B-spline smoothing bases with the utilities in the smoothing module (as used by generalized additive models). It covers univariate and simple multivariate examples, including how to obtain knots, build bases, and fit a linear model as a demonstration of how the basis can be used in a GAM setting.
+
+---
+
+## Prerequisites
+
+- Python 3.7+
+- NumPy
+- pandas (optional, for data handling)
+- patsy
+- statsmodels
+
+Install via your preferred package manager if needed.
+
+---
+
+## Key functions
+
+- _equally_spaced_knots(x, df)
+  - Returns equally spaced interior knots for a given data vector x and desired degrees of freedom df.
+
+- _R_compat_quantile(x, probs)
+  - Helper to compute quantile-based knot positions consistent with R’s quantile behavior.
+
+- _eval_bspline_basis(x, knots, degree, deriv='all', include_intercept=True)
+  - Internal helper that evaluates B-spline basis (and optionally derivatives) for inputs x given knots and spline degree.
+
+- compute_all_knots(x, df, degree)
+  - Computes the full knot vector (including boundary repeats) for Patsy-style or P-spline-like smoothing based on df and degree.
+
+- make_bsplines_basis(x, df, degree)
+  - Convenience wrapper that returns the basis matrix and its first/second derivatives for x.
+
+- get_knots_bsplines(x=None, df=None, knots=None, degree=3, spacing='quantile', lower_bound=None, upper_bound=None, all_knots=None)
+  - Primary entry point to obtain knot vectors suitable for B-spline smoothing. Supports:
+    - quantile-based spacing (default, used by Patsy)
+    - equal spacing extended to boundary knots (P-splines)
+
+---
+
+## Example 1: Univariate B-spline basis and simple OLS fit
+
+This example demonstrates generating a univariate B-spline basis for a single predictor, then fitting a linear model using that basis as predictors. This mirrors how smoothing terms are constructed for GAMs.
+
+Code
+
+```python
+import numpy as np
+import statsmodels.api as sm
+
+# Generate synthetic data
+np.random.seed(0)
+n = 100
+x = np.linspace(0, 1, n)
+y = np.sin(2 * np.pi * x) + 0.5 * x + 0.1 * np.random.randn(n)
+
+# Spline configuration
+df = 8        # degrees of freedom for the spline (roughly sets number of basis functions)
+degree = 3    # cubic B-splines
+
+# Obtain knots suitable for B-splines
+knots = get_knots_bsplines(x=x, df=df, degree=degree, spacing='quantile')
+
+# Build the spline basis (basis, first_derivative, second_derivative)
+basis, der_basis, der2_basis = make_bsplines_basis(x, df=df, degree=degree)
+
+# Fit a simple linear model using the spline basis as predictors
+X = basis  # design matrix with spline basis columns
+X_with_intercept = sm.add_constant(X)
+
+model = sm.OLS(y, X_with_intercept)
+results = model.fit()
+
+print(results.summary())
+
+# (Optional) Predictions and plotting
+y_pred = results.predict(X_with_intercept)
+```
+
+Notes
+- The resulting coefficients correspond to the spline basis terms. In a GAM, these would be combined to form the smooth function s(x).
+- If you prefer to include the intercept explicitly with a separate term, adjust the design matrix accordingly (e.g., remove the constant in add_constant if your modeling framework already handles an intercept).
+
+Plotting suggestion (optional)
+
+```python
+import matplotlib.pyplot as plt
+
+plt.scatter(x, y, color='k', alpha=0.6, label='Data')
+plt.plot(x, y_pred, color='red', lw=2, label='Fitted smooth (via spline basis)')
+plt.legend()
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('Spline-based fit to univariate data')
+plt.show()
+```
+
+Interpretation
+- The smooth shape is captured by the combination of spline basis functions weighted by the estimated coefficients.
+- This workflow mirrors the initial steps inside GAM implementations where a smooth term for x is represented by a linear combination of spline basis functions.
+
+---
+
+## Example 2: Univariate spline with derivatives (for plotting or derivative-based features)
+
+You can also access the derivative bases to inspect or plot derivatives of the smooth function.
+
+Code
+
+```python
+# Using the same data and configuration as Example 1
+
+# basis (value of basis functions)
+basis, der1_basis, der2_basis = make_bsplines_basis(x, df=df, degree=degree)
+
+# Fit as before
+X = basis
+X_with_intercept = sm.add_constant(X)
+model = sm.OLS(y, X_with_intercept)
+results = model.fit()
+
+# Derivative of the fitted smooth (approximate)
+# If you want the derivative of the smooth term with respect to x at each x point:
+coeff = results.params[1:]  # exclude intercept
+smooth_values = basis @ coeff
+# First derivative approximation
+derivative_values = der1_basis @ coeff  # derivative of the smooth term with respect to x
+
+# Example usage: plot derivative
+import matplotlib.pyplot as plt
+plt.plot(x, derivative_values, label='d/dx of smooth s(x)')
+plt.xlabel('x')
+plt.ylabel('ds/dx')
+plt.title('Derivative of spline-based smooth')
+plt.legend()
+plt.show()
+```
+
+Notes
+- The derivative basis (der1_basis) is computed alongside the value basis. This enables simple, pointwise derivative evaluations of the smooth term.
+- For rigorous derivative calculations within a GAM framework, align the derivative handling with your modeling backend (e.g., explicit derivative terms in the design matrix if supported).
+
+---
+
+## Example 3: Multivariate smooth setup (two predictors)
+
+This example demonstrates constructing separate spline bases for two predictors and combining them into a single design matrix for a multivariate smoothing scenario.
+
+Code
+
+```python
+import numpy as np
+import statsmodels.api as sm
+
+# Generate synthetic data for two predictors
+np.random.seed(0)
+n = 120
+x1 = np.linspace(0, 1, n)
+x2 = np.linspace(0, 2*np.pi, n)  # second predictor with different scale
+y = np.sin(2 * np.pi * x1) + 0.5 * np.cos(0.5 * x2) + 0.2 * x1 * x2 + 0.1 * np.random.randn(n)
+
+# Spline configuration for each predictor
+df1 = 8
+df2 = 6
+degree = 3
+
+# Bases for each predictor
+basis_x1, _, _ = make_bsplines_basis(x1, df=df1, degree=degree)
+basis_x2, _, _ = make_bsplines_basis(x2, df=df2, degree=degree)
+
+# Combine bases into a single design matrix
+X = np.hstack([basis_x1, basis_x2])
+X_with_intercept = sm.add_constant(X)
+
+# Fit a simple model with both spline terms
+model = sm.OLS(y, X_with_intercept)
+results = model.fit()
+
+print(results.summary())
+```
+
+Notes
+- Coefficients correspond to the spline basis terms for both predictors. The combined smooth function is s1(x1) + s2(x2) (plus any linear terms if included).
+- In real GAM workflows, you would route each smooth term through the GAM framework (which typically handles term-specific constraints, penalties, and identifiability). This example focuses on constructing a joint design matrix from univariate spline bases.
+
+---
+
+## Example 4: Inspecting knot locations and basis structure
+
+Understanding the knot placement helps in diagnosing model flexibility and behavior.
+
+Code
+
+```python
+# Inspect knot configuration for x
+knots = get_knots_bsplines(x=x, df=df, degree=degree, spacing='quantile')
+print("Knots:", knots)
+
+# Inspect the shape of the basis
+basis, der1_basis, der2_basis = make_bsplines_basis(x, df=df, degree=degree)
+print("Basis shape:", basis.shape)
+print("Derivative basis shape (first derivative):", der1_basis.shape)
+```
+
+Notes
+- Knot placement affects smoothness and the ability to capture nonlinearity. Quantile-based spacing tends to place more flexibility where data are dense.
+- For P-splines or other regularized smoothers, you may adjust the knot spacing strategy and incorporate penalties as appropriate in your GAM backend.
+
+---
+
+## Additional notes and caveats
+
+- The internal functions _equally_spaced_knots, _R_compat_quantile, and _eval_bspline_basis are low-level helpers. Their direct use is typically replaced by get_knots_bsplines and make_bsplines_basis in higher-level GAM workflows, but they’re exposed here for advanced customizations and debugging.
+- Boundary handling and the inclusion of the intercept depend on the exact function arguments (e.g., include_intercept in _eval_bspline_basis). When building a model for GAM, ensure your design matrix aligns with how your GAM framework expects intercepts and constraints.
+- This documentation focuses on generating a reproducible example workflow. For full GAM fitting and smoothing parameter selection (e.g., penalties, cross-validation), integrate these bases into your GAM modeling class (e.g., GLMGam) or the specific GAM API you are using.
+
+---
+
+## References
+
+- Spline basis construction for GAMs via Patsy and custom smoothers.
+- Internal helpers for knot computation, basis evaluation, and derivative computation as used by the GAM smoothing module.
+
+If you need further examples (e.g., more complex cross-validation, integration with MultivariateGAMCVPath, or plotting utilities for smooths), let me know and I can add them to this page.

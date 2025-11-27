@@ -1,0 +1,286 @@
+# w_assign.rst – w_assign command
+
+ w_assign assigns walkers to bins (and optionally to macrostates) and writes an
+ assign.h5 file suitable for downstream analysis. It is implemented as a
+ WESTParallelTool and operates on per-iteration data provided from the WEST HDF5
+ file (west.h5) or from user-supplied data.
+
+- Authors: WESTPA project
+- Scope: internal tool for binning and macrostate labeling, intended for developers
+- Output: assign.h5 (default) containing per-iteration assignments, counts, and macrostate labels
+
+Contents
+- Overview
+- Source data
+- Specifying macrostates
+- Output format
+- How it works (internal implementation)
+- Command-line usage and options
+- Examples
+- Development notes and extensibility
+- Reading/wrapping up
+
+---
+
+## Overview
+
+- Purpose
+  - Map each walker at each timepoint to a bin (and optionally to a macrostate).
+  - Produce a complete assignment for every timepoint, ensuring consistent downstream analysis that relies on the origin of each trajectory.
+  - Produce labeled populations for each iteration, suitable for kinetics analysis (e.g., w_kintrace, w_kinmat).
+
+- Input sources
+  - Default: uses the progress coordinate dataset (pcoord) from the main WEST HDF5 file if no source is provided.
+  - Custom dataset: --construct-dataset MODULE.FUNCTION or --dsspecs to specify datasets (NAME[,file=FILENAME,slice=SLICE]).
+
+- Output
+  - assign.h5 (or a user-specified filename via -o/--output) with:
+    - nbins (attribute): number of valid bins
+    - nstates (attribute): number of defined macrostates
+    - /assignments[iteration][segment][timepoint]: per-segment/bin assignments
+    - /npts[iteration]: number of timepoints per iteration
+    - /nsegs[iteration]: number of segments per iteration
+    - /labeled_populations[iterations][state][bin]: per-iteration, per-state, per-bin populations
+    - /bin_labels[bin]: bin labeling (metadata)
+- Implementation notes
+  - The core logic for per-iteration assignment and population accumulation is in _assign_label_pop, which calls the shared routines assign_and_label and accumulate_labeled_populations.
+  - The pcoord parsing helper parse_pcoord_value supports reading coordinate specifications (e.g., from YAML) and converting them into numpy arrays with correct dimensions.
+
+---
+
+## Source data
+
+- Default behavior
+  - If neither --construct-dataset nor --dsspecs is provided, w_assign uses the pcoord dataset from the main WEST HDF5 file (west.h5).
+- Custom source data options
+  - --construct-dataset MODULE.FUNCTION
+    - The function is invoked as function(n_iter, iter_group) and must return data indexable as [segment][timepoint][dimension].
+  - --dsspecs
+    - Provide one or more data-set specifications in the form:
+      NAME[,file=FILENAME,slice=SLICE]
+    - Behaviors:
+      - Use the dataset called NAME in FILENAME (default: west.h5).
+      - Slice dataset with the Python slice expression SLICE (e.g., SLICE = "0:2" to select the first two elements along the first axis).
+    - This is most useful when you need to select a subset or specific column(s) of a multi-dimensional dataset (e.g., multi-dimension progress coordinates).
+
+---
+
+## Specifying macrostates
+
+Macrostates describe how trajectories are grouped into higher-level categories for kinetics analysis. There are three supported methods:
+
+1) States corresponding to single bins
+- Use --states with one coordinate per state.
+- Each state is specified as a coordinate tuple, optionally prefixed by a label:
+  - bound:1.0
+  - unbound:(2.5,2.5)
+- Unlabeled states are named stateN (N is the index in the provided list).
+
+2) States from a YAML file
+- Use --states-from-file to load a YAML file that defines states as:
+  - A list of states, each with a label and a coords list of coordinate tuples.
+  - Bins falling within those coordinates define the state.
+
+  Example YAML content:
+  ---
+  states:
+    - label: unbound
+      coords:
+        - [9.0, 1.0]
+        - [9.0, 2.0]
+    - label: bound
+      coords:
+        - [0.1, 0.0]
+
+3) States from a user function
+- Use --states-from-function=MODULE.FUNCTION
+- The function is called with the mapper as an argument and must return a list of dicts, each describing a state:
+  - Each dict must contain "coords": a list of coordinate tuples
+  - Optional "label": the name of the state
+  - The bins into which each tuple falls define the state
+
+Notes
+- The states concept is required for kinetics analyses such as w_kintrace and w_kinmat.
+- If no macrostates are provided, nbins can be defined, but nstates will be zero.
+
+---
+
+## Output format
+
+The output file (default: assign.h5) contains the following attributes and datasets:
+
+Attributes
+- nbins
+  - Integer. Number of valid bins. Assignments range from 0 to nbins-1.
+- nstates
+  - Integer. Number of defined macrostates. Trajectory assignments range from 0 to nstates-1 when macrostates exist.
+
+Datasets
+- /assignments [iteration][segment][timepoint]
+  - Integer. Per-segment and per-timepoint bin index assignments.
+- /npts [iteration]
+  - Integer. Number of timepoints in each iteration.
+- /nsegs [iteration]
+  - Integer. Number of segments in each iteration.
+- /labeled_populations [iterations][state][bin]
+  - Floating-point. Per-iteration and per-timepoint bin populations, labeled by the most recently visited macrostate.
+  - The last state entry (nstates-1) corresponds to trajectories initiated outside of a defined macrostate.
+- /bin_labels [bin]
+  - Metadata about bins (e.g., labels that describe each bin).
+  - Used to interpret the bin indices in /assignments and related datasets.
+
+Notes
+- All outputs are designed to be compatible with downstream WEST workflows and to enable consistent analyses across iterations and segments.
+- The labeling and population data can be used by kinetic analysis tools to compute traces, matrices, and other statistics.
+
+---
+
+## How it works (implementation notes for developers)
+
+Key components (as seen in the code):
+
+- parse_pcoord_value(pc_str)
+  - Helper to interpret progress-coordinate strings (e.g., from YAML). Produces a 2D array with appropriate shape, enabling multi-dimensional pcoords to be parsed robustly.
+
+- _assign_label_pop(...)
+  - Performs the per-iteration work:
+    - Reads parent_ids, weights, and pcoords for the current (lb, ub) slice of the batch.
+    - Calls assign_and_label(lb, ub, parent_ids, mapper.assign, nstates, state_map, last_labels, pcoords, subsample) to compute:
+      - assignments: per-segment-timepoint bin indices
+      - trajlabels: trajectory-level labels
+      - statelabels: macrostate labels
+    - Initializes pops and accrues labeled populations via accumulate_labeled_populations(weights, assignments, trajlabels, pops)
+  - Returns a tuple (assignments, trajlabels, pops, lb, ub, statelabels)
+
+- WAssign (WESTParallelTool)
+  - Entry point for the command-line tool.
+  - Handles:
+    - Parsing CLI options related to data sources and macrostates
+    - Construction of the bin mapper (state_map) and label assignments
+    - Parallel execution across iterations/segments
+    - Writing the resulting assign.h5 with the expected structure
+
+- Data flow
+  - Source data -> pcoord and optional weights, parent IDs
+  - Bin mapping (mapper.assign, state_map) -> per-timepoint bin assignments
+  - Trajectory labeling -> per-trajectory macrostate labels
+  - Population accumulation -> per-iteration, per-state, per-bin populations
+  - Output writes to /assignments, /labeled_populations, /npts, /nsegs, /bin_labels
+
+---
+
+## Command-line usage and options
+
+Basic usage
+- w_assign [options]
+
+Key options (as described in the command’s documentation):
+
+- -o, --output <filename>
+  - Output file name (default: assign.h5)
+
+- --construct-dataset MODULE.FUNCTION
+  - Specify a Python function to construct or extract the dataset(s) used for analysis.
+
+- --dsspecs NAME[,file=FILENAME,slice=SLICE]
+  - Data set specifications.
+  - NAME: dataset name inside FILENAME (default is west.h5 if FILENAME is omitted)
+  - file: optional HDF5 file name
+  - slice: Python slice expression to slice the dataset
+
+- --states STATE1 STATE2 ...
+  - Define macrostates as coordinate tuples with optional labels.
+  - Each state is specified as a coordinate tuple, with an optional label prepended:
+    - bound:1.0
+    - unbound:(2.5,2.5)
+
+- --states-from-file PATH
+  - YAML input file describing states, as shown in the example in the documentation.
+
+- --states-from-function MODULE.FUNCTION
+  - Custom function that returns a list of dictionaries describing states, including "coords" and optional "label".
+
+- Other options
+  - The tool is designed to run under WESTParallelTool, so it supports parallel execution in the typical MPI-enabled WEST workflow.
+
+Usage tips
+- If you only need to map to a single-bin macrostate or do not require kinetics analysis, you can define a minimal set of states or use the default behavior where nstates may be zero.
+- For multi-dimensional progress coordinates, use --dsspecs with slice expressions to select the desired dimensions.
+
+Examples (conventional usage)
+
+1) Minimal usage with two simple macrostates (2D pcoord) using inline state definitions
+- Command:
+  - w_assign --output assign.h5 --states unbound:(9.0,1.0) bound:(0.1,0.0)
+- Notes:
+  - Uses the default pcoord dataset from west.h5
+  - Creates two macrostates labeled "unbound" and "bound"
+
+2) States from a YAML file
+- Command:
+  - w_assign --output assign.h5 --states-from-file my_states.yaml
+- YAML file (example):
+  ---
+  states:
+    - label: unbound
+      coords:
+        - [9.0, 1.0]
+        - [9.0, 2.0]
+    - label: bound
+      coords:
+        - [0.1, 0.0]
+
+3) Data-set specifications for custom data sources
+- Command:
+  - w_assign --output assign.h5 --dsspecs pcoord --dsspecs pcoord_alt:file=west.h5,slice='0:2'
+- Notes:
+  - Demonstrates selecting specific coordinates from a dataset for the progress coordinate.
+
+4) Parallel execution with explicit states
+- Command:
+  - mpirun -np 4 w_assign --output assign.h5 --states unbound:(9.0,1.0) bound:(0.1,0.0)
+- Notes:
+  - Utilizes MPI to divide work across 4 processes.
+
+---
+
+## Examples (end-to-end)
+
+Example 1: Simple two-state mapping (2D pcoord) in a single WEST HDF5
+- west.h5 contains a 2D pcoord dataset.
+- Define two states directly on the command line:
+  - w_assign --output assign.h5 --states unbound:(9.0,1.0) bound:(0.1,0.0)
+- Result: assign.h5 with /assignments, /labeled_populations, etc., ready for kinetics analysis.
+
+Example 2: YAML-defined macrostates
+- my_states.yaml as in the YAML example above.
+- w_assign --output assign.h5 --states-from-file my_states.yaml
+- Result: macrostates named accordingly; bins are mapped to states based on coords.
+
+Example 3: Using a custom dataset in an alternate file
+- w_assign --output assign.h5 --dsspecs pcoord:file=mydata.h5,slice='0:2'
+- Result: pcoord is taken from mydata.h5 after applying the slice; macrostate mapping uses the spec’d states.
+
+---
+
+## Development notes and extensibility
+
+- The internal parser and data access utilities (parse_pcoord_value, WESTDataReader, WESTDSSynthesizer, BinMappingComponent, ProgressIndicatorComponent) are designed to support extension to alternate data sources and coordinate dimensions.
+- The assignment and labeling logic is encapsulated in _assign_label_pop, which is compatible with batching and parallel execution. Developers can swap in alternative mapping strategies by providing different mapper.assign logic or by extending the state_map creation process.
+- The output format is designed to be consumed by downstream WESTPA tools (kinetic analysis, kinetics tracing, etc.). If new datasets are required for future features, the output format can be extended with additional datasets while maintaining backward compatibility.
+
+---
+
+## Reading and validating the output
+
+- After running, load assign.h5 and inspect:
+  - nbins and nstates attributes
+  - /assignments shape: [iterations][segments][timepoints]
+  - /npts and /nsegs
+  - /labeled_populations structure: [iterations][nstates+1][nbins+1] (padded to include outside macrostate)
+  - /bin_labels: per-bin metadata for human-readable interpretation
+- Downstream, the data can be consumed by w_kintrace, w_kinmat, and other kinetics/ensemble analysis tools.
+
+---
+
+If you would like, I can tailor the examples to a specific dataset layout you use (e.g., a particular pcoord dimensionality or a specific YAML schema) or help draft a more complete YAML example compatible with your project conventions.

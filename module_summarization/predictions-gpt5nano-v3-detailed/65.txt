@@ -1,0 +1,185 @@
+Calibration of predicted probabilities
+======================================
+
+Overview
+--------
+
+Probability calibration adjusts the predicted scores of a classifier so that the resulting predicted probabilities reflect true frequencies. This module provides tools to calibrate probabilistic outputs using either a parametric approach (Platt scaling via logistic regression) or a non-parametric approach (isotonic regression), with cross-validation to avoid overfitting.
+
+Key concepts
+------------
+
+- CalibratedClassifierCV: wraps a base estimator and learns a calibration mapping from predicted scores to probabilities. Supports two calibration strategies:
+  - method='sigmoid': Platt scaling (logistic regression on the estimator’s scores)
+  - method='isotonic': isotonic regression (non-parametric calibration)
+
+- Cross-validation (cv): controls how the calibration data are generated. Options include integer folds, a CV splitter, or 'prefit' to calibrate a pre-fitted estimator.
+
+- ensemble vs non-ensemble:
+  - ensemble=True (default): calibrate a classifier for each CV split and average the predicted probabilities across splits.
+  - ensemble=False: use cross_val_predict to obtain unbiased predictions for calibration; prediction-time uses the estimator trained on all data.
+
+- Calibration targets the estimator’s decision function when available; otherwise it uses predict_proba.
+
+API highlights
+--------------
+
+- CalibratedClassifierCV
+  - estimator: base classifier to calibrate (default commonly a LinearSVC or any classifier exposing a decision_function or predict_proba).
+  - method: {'sigmoid', 'isotonic'}.
+  - cv: cross-validation strategy or 'prefit'.
+  - n_jobs: parallelism level for fitting base estimators across CV splits.
+  - ensemble: whether to ensemble across CV splits or calibrate on predictions from cross_val_predict.
+
+- Attributes
+  - classes_: class labels learned during fit
+  - n_features_in_: number of features seen during fit (if supported by the base estimator)
+  - feature_names_in_: feature names (if supported by the base estimator)
+  - calibrated_classifiers_: list of fitted (base estimator, calibrator) pairs per CV fold (or a single entry if cv='prefit' or ensemble=False)
+
+Usage pattern
+-------------
+
+Basic usage with a LinearSVC base estimator and sigmoid calibration:
+
+.. code-block:: python
+
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.svm import LinearSVC
+    from sklearn.datasets import load_iris
+    from sklearn.model_selection import train_test_split
+
+    X, y = load_iris(return_X_y=True)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+
+    base_clf = LinearSVC(C=1.0)
+    calib_clf = CalibratedClassifierCV(estimator=base_clf, cv=5, method='sigmoid', n_jobs=1)
+
+    calib_clf.fit(X_train, y_train)
+    probas = calib_clf.predict_proba(X_test)
+
+    # probas contains calibrated probabilities for each class
+    print(probas.shape)
+    print(calib_clf.score(X_test, y_test))  # optional: evaluate accuracy or use log_loss, etc.
+
+Alternative: isotonic calibration
+---------------------------------
+
+.. code-block:: python
+
+    calib_clf_iso = CalibratedClassifierCV(estimator=base_clf, cv=5, method='isotonic', n_jobs=1)
+    calib_clf_iso.fit(X_train, y_train)
+    probas_iso = calib_clf_iso.predict_proba(X_test)
+
+Prefit workflow
+---------------
+
+If you already trained a base estimator, you can calibrate it using cv='prefit'. Be sure that the data used for calibration are disjoint from data used to train the base estimator.
+
+.. code-block:: python
+
+    base_clf = LinearSVC(C=1.0)
+    base_clf.fit(X_train, y_train)
+
+    calib_clf_prefit = CalibratedClassifierCV(estimator=base_clf, cv='prefit', method='sigmoid')
+    calib_clf_prefit.fit(X_calib, y_calib)  # X_calib, y_calib are the calibration data
+    probas_prefit = calib_clf_prefit.predict_proba(X_test)
+
+Notes and considerations
+------------------------
+
+- Decision function vs probability estimates:
+  - If the base estimator implements decision_function, calibration uses that as input to the calibrator.
+  - Otherwise, calibrator uses the estimator’s predicted probabilities (predict_proba) if available.
+
+- Isotonic calibration caveats:
+  - Isotonic regression is non-parametric and can overfit with small calibration sets. Prefer sigmoid (Platt scaling) when calibration data are limited.
+
+- Multiclass calibration:
+  - The calibrator handles multiclass classification by calibrating probabilities per class (via pairwise or one-vs-rest strategies) as needed by the underlying implementation.
+
+- Cross-validation strategy:
+  - The default cv setting uses a reasonable cross-validated calibration split. If you need more control, pass a CV splitter or a specific number of folds.
+
+- Output interpretation:
+  - Calibrated probabilities aim to reflect true likelihoods. Use metrics like Brier score, log loss, or reliability diagrams to assess calibration quality in your domain.
+
+Parameters in detail
+--------------------
+
+- estimator: estimator instance to calibrate. Typically a classifier that can produce a decision_function or predict_proba.
+
+- method: 'sigmoid' (Platt scaling) or 'isotonic' (non-parametric isotonic regression).
+
+- cv: 
+  - int: number of folds (default 5 if None)
+  - CV splitter: custom cross-validation strategy
+  - 'prefit': calibrate a pre-fitted estimator; no cross-validation
+
+- n_jobs: number of parallel jobs for fitting across cross-validation folds.
+
+- ensemble: if True (default), fit and calibrate an ensemble of CV-trained classifiers and average their predicted probabilities. If False, calibrate using cross_val_predict predictions and use the estimator trained on all data for final predictions.
+
+- base_estimator: deprecated alias for estimator (replaced by estimator in newer versions).
+
+Edge cases and practical tips
+------------------------------
+
+- When using LinearSVC or other non-probabilistic classifiers, calibration with method='sigmoid' is a natural choice because it exploits the decision scores to produce calibrated probabilities.
+
+- For small datasets, prefer 'sigmoid' to avoid overfitting that isotonic regression can suffer from with limited calibration samples.
+
+- Ensure that y contains valid class labels and that cross-validation splits preserve class proportions when possible (stratified splits are typical).
+
+- When using cv='prefit', ensure the base estimator is trained on data disjoint from the calibration data to avoid information leakage.
+
+- If your application requires calibrated probabilities for ranking or thresholding, verify calibration with appropriate scores (e.g., reliability diagrams, Brier score, log loss).
+
+Attributes after fitting
+------------------------
+
+- classes_: array of class labels seen during fitting
+- n_features_in_: number of features observed in fit (if supported by the base estimator)
+- feature_names_in_: feature names seen during fit (if supported by the base estimator)
+- calibrated_classifiers_: list of per-fold (estimator, calibrator) pairs when ensemble is used; a single entry when cv='prefit' or ensemble=False
+
+Example: Iris dataset with sigmoid calibration
+----------------------------------------------
+
+.. code-block:: python
+
+    from sklearn.datasets import load_iris
+    from sklearn.model_selection import train_test_split
+    from sklearn.svm import LinearSVC
+    from sklearn.calibration import CalibratedClassifierCV
+
+    X, y = load_iris(return_X_y=True)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    base = LinearSVC(C=1.0)
+    clf = CalibratedClassifierCV(estimator=base, cv=5, method='sigmoid', n_jobs=1)
+    clf.fit(X_train, y_train)
+
+    probas = clf.predict_proba(X_test)
+    acc = clf.score(X_test, y_test)
+
+    print(probas.shape)
+    print(acc)
+
+Example: Isotonic calibration with a multiclass dataset
+-----------------------------------------------------
+
+.. code-block:: python
+
+    base = LinearSVC(C=1.0)
+    clf_iso = CalibratedClassifierCV(estimator=base, cv=5, method='isotonic', n_jobs=1)
+    clf_iso.fit(X_train, y_train)
+    probas_iso = clf_iso.predict_proba(X_test)
+
+Further reading
+---------------
+
+- Platt, J. C. "Probabilistic Outputs for Support Vector Machines and Comparisons to Other Classifiers." Advances in Large Margin Classifiers, 1999.
+- Isotonic regression calibration references and reliability assessment techniques.
+
+End of documentation

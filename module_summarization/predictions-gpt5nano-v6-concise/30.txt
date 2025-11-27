@@ -1,0 +1,203 @@
+# w_pdist (w_pdist.rst) — Developer Documentation
+
+A concise reference for developers implementing or extending the w_pdist command, which computes time-resolved, multi-dimensional probability distributions of WE datasets. This document mirrors the internal structure and behavior of the WPDist tool as implemented in the code.
+
+## Overview
+
+- w_pdist calculates normalized histograms of user-supplied data across time (iterations) in a WE simulation.
+- Supports multi-dimensional data (the data’s last axis corresponds to dimensions).
+- Per-iteration histograms are produced in a single, output HDF5 file, suitable for further plotting with plothist or downstream analysis.
+- Parallel processing is the default and can be switched to serial with a flag.
+
+Key class and helpers from the codebase:
+- `WPDist` (inherits from `WESTParallelTool`): main driver for the command-line tool.
+- `_remote_min_max(ndim, dset_dtype, n_iter, dsspec)`: computes per-dimension min/max across the dataset when bins are not explicitly provided.
+- `_remote_bin_iter(iiter, n_iter, dsspec, wt_dsspec, initpoint, binbounds, ignore_out_of_range)`: computes the per-iteration histogram by iterating over timepoints and segments, applying `histnd` and normalizing with `normhistnd`.
+- `histnd` and `normhistnd` (from `westpa.fasthist`): histogramming and normalization utilities.
+- `WESTParallelTool`, `WESTDataReader`, `IterRangeSelection`, `ProgressIndicatorComponent` (from `westpa.tools`): framework utilities for parallel execution, data access, and progress reporting.
+
+---
+
+## Source Data
+
+Data for the distribution can be supplied in two ways:
+
+- Custom extraction function (preferred for complex calculations):
+  - Use `--construct-dataset` with a Python module path and function name in the form `MODULE.FUNCTION`.
+  - The function is called as `function(n_iter, iter_group)` for each iteration.
+  - The function must return data indexable as `[segment][timepoint][dimension]`.
+
+- Dataset specifications (dsspecs):
+  - Use `--dsspecs` followed by one or more dataset specifications:
+    - Specification format: `NAME[,file=FILENAME,slice=SLICE]`
+    - `NAME` is the dataset name inside the HDF5 file.
+    - `FILENAME` defaults to the main WEST HDF5 file `west.h5`.
+    - `SLICE` is a Python slice expression (e.g., `[0:2]`) to select a subset along the dataset’s first axis; useful for selecting a single column or subsets of multi-column datasets.
+  - Data shape expectation per iteration: `[segments, timepoints, dimension]`.
+
+If neither custom function nor dsspecs is provided, the tool uses the default progress coordinate dataset `pcoord`.
+
+Notes:
+- The internal dataset access is performed via `dsspec.get_iter_data(n_iter)` or equivalent, per iteration.
+- The shape and dimensionality are critical for histogram computation: the last axis corresponds to the dataset’s dimensions.
+
+---
+
+## Data Shapes and Interpretation
+
+- Per-iteration data retrieved by the tooling is expected to be of shape:
+  - `[segments, timepoints, ndim]`
+- Histograms are computed across timepoints for each iteration, aggregating contributions from all segments.
+- The output histogram for an iteration has the shape:
+  - `[bin_count_per_dim... , ndim]` (flattened into the histogram data structure by the code in `histnd`/`normhistnd`).
+- The total output file contains:
+  - A dataset named `histograms` (time-resolved, per-iteration histograms).
+  - Per-dimension bin boundaries: `/binbounds_0`, `/binbounds_1`, ...
+  - Per-dimension midpoints: `/midpoints_0`, `/midpoints_1`, ...
+  - An array `n_iter` containing the iteration indices corresponding to the first axis of `histograms`.
+
+---
+
+## Histogram Binning
+
+By default, histograms use 100 bins per dimension.
+
+Binning can be customized via `-b/--bins`. Supported forms:
+
+- A single integer N:
+  - N uniformly spaced bins in every dimension.
+
+- A sequence of integers `N1,N2,...` (comma-separated):
+  - N1 bins for the first dimension, N2 for the second, etc.
+
+- A list of lists `[[B11, B12, B13,...], [B21, B22, B23,...], ...]`:
+  - Explicit bin boundaries for each dimension.
+  - Boundaries need not be uniformly spaced.
+  - These expressions are evaluated with Python’s `eval`, with `np` available (e.g., `[[0,1,2,3], [0,0.5,1.0]]`).
+
+Notes:
+- The first two forms (integer and integer-sequence) trigger a scan of all data to infer min/max per dimension, which can be expensive for large datasets.
+- The explicit list-of-lists form avoids the global min/max scan.
+- The specified bins are not related to WE sampling bins.
+
+Internally, if explicit bins are given, the code uses those boundaries directly; otherwise, it calls `_remote_min_max` to determine min/max per dimension and then constructs uniform bins accordingly.
+
+---
+
+## Output Format
+
+- Output file (default: `pdist.h5`, overridable with `-o/--output`):
+  - `histograms`: normalized histograms. The first axis corresponds to iteration; subsequent axes correspond to data dimensions.
+  - `/binbounds_0`, `/binbounds_1`, ...: bin boundaries per dimension.
+  - `/midpoints_0`, `/midpoints_1`, ...: bin midpoints per dimension.
+  - `n_iter`: vector of iteration numbers corresponding to histograms’ first axis.
+
+The produced file can be consumed by `plothist` to generate plots or used by downstream analysis tools that operate on HDF5 histogram data.
+
+---
+
+## Subsequent Processing
+
+- The `pdist.h5` output is designed to be compatible with `plothist` for visualization.
+- See `plothist --help` for plotting options and usage instructions.
+
+---
+
+## Parallelization
+
+- Parallel processing is enabled by default (via the West Parallel Tools framework).
+- For simple cases (reading pre-computed input data, modest numbers of segments), running serially can be more efficient.
+- Switch to serial mode with the appropriate flag (e.g., `--serial`).
+
+Notes:
+- Parallelization covers both data reading and histogram computation stages, enabling scalable processing of large datasets.
+
+---
+
+## Command-Line Options (Highlights)
+
+The tool inherits common WEST tool options and adds the following key features:
+
+- `-o/--output FILENAME`: specify output HDF5 file (default: `pdist.h5`).
+- `-b/--bins ARG`: bin specification (see above for accepted forms).
+- `--construct-dataset MODULE.FUNCTION`: Python function providing the dataset; the function must be callable as `function(n_iter, iter_group)` and return data with shape `[segment][timepoint][dimension]`.
+- `--dsspecs SPEC1 SPEC2 ...`: list of dataset specifications; see the dataset specification format above.
+- `--serial`: run in serial mode (disable parallel processing).
+- Other WEST tool options: logging, iteration range, progress indicators, etc., as provided by the framework (`WESTParallelTool`).
+
+Notes:
+- The code includes internal helpers and options for iteration-range selection and progress reporting (`IterRangeSelection`, `ProgressIndicatorComponent`).
+
+---
+
+## Examples
+
+1) Default usage with a built-in progress coordinate dataset:
+
+- Purpose: compute time-resolved distributions of the progress coordinate.
+- Command (illustrative):
+  - w_pdist --output pdist.h5
+  - This uses the default data source (pcoord) and 100-bin per dimension histogram unless overridden by `-b/--bins`.
+
+2) Custom dataset via a Python function:
+
+- Example function signature: `my_module.compute_pdist(n_iter, iter_group)` returning data shaped `[segment][timepoint][dimension]`.
+- Command (illustrative):
+  - w_pdist --construct-dataset my_module.compute_pdist --output pdist.h5
+
+3) Data from a specific HDF5 dataset with slices:
+
+- Data source format: `NAME[,file=FILENAME,slice=SLICE]`
+- Example:
+  - w_pdist --dsspecs mydata, file=mywest.h5, slice=[0:2] --output pdist.h5
+
+4) Custom bin boundaries (non-uniform):
+
+- Example bin specification:
+  - -b "[[0,1,2,3], [0,0.5,1.5,3]]"
+- Result: first dimension uses boundaries 0,1,2,3; second uses 0,0.5,1.5,3.
+
+5) Disable parallelism (serial run):
+
+- Command:
+  - w_pdist --serial --output pdist_serial.h5
+
+---
+
+## Developer Notes
+
+- Core logic flow:
+  - For each iteration (per `n_iter`), retrieve input data via `dsspec` (or construct-dataset path).
+  - If `initpoint` logic is used, skip initial timepoints accordingly (see `_remote_bin_iter` usage).
+  - For each timepoint, extract per-segment data across all dimensions and feed into `histnd` with the corresponding `binbounds` and `weights`.
+  - Normalize per-iteration histograms with `normhistnd`.
+  - Emit `(iiter, n_iter, iter_hist)` and aggregate across iterations to produce the `histograms` dataset.
+
+- Data access:
+  - `dsspec.get_iter_data(n_iter)` provides the data for a given iteration.
+  - `wt_dsspec.get_iter_data(n_iter)` provides per-segment weights for that iteration.
+
+- Internal helpers:
+  - `_remote_min_max` computes per-dimension min/max across the dataset when bins are not explicitly provided. This is essential for dynamic bin creation in the absence of explicit boundaries.
+  - `_remote_bin_iter` handles per-iteration histogram construction, including normalization.
+
+- Extensibility:
+  - To extend functionality, modify or replace the binning strategy (e.g., add logarithmic bins) and/or add support for additional per-dimension weightings.
+  - Consider exposing more advanced options to control the initial-point behavior, per-iteration weighting, or time-windowed histograms.
+
+- Dependencies:
+  - Ensure `westpa` components (`westpa.tools`, `westpa.fasthist`, `westpa.core.h5io`) are correctly imported and available in the runtime.
+  - The histogramming relies on `histnd` and normalization via `normhistnd`.
+
+---
+
+## References
+
+- histnd and normhistnd: multi-dimensional histogram construction and normalization routines (from `westpa.fasthist`).
+- Data I/O: `WESTDataReader`, dataset specifications (`dsspecs`), and the `get_iter_data` interface (from `westpa.tools` and HDF5 utilities in the WEST framework).
+- Parallelization utilities: `WESTParallelTool`, `IterRangeSelection`, and `ProgressIndicatorComponent`.
+
+For more detailed, code-level insights, refer to the WPDist implementation in the repository, including:
+- `_remote_min_max`
+- `_remote_bin_iter`
+- `WPDist` class (attributes like `prog`, `description`) and its initialization of the progress indicator and data readers.

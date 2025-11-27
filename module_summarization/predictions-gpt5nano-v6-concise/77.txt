@@ -1,0 +1,248 @@
+Transforms module (transforms.rst) — API reference, usage, and example
+
+Overview
+--------
+This section documents the core components provided by the transforms module (as implemented in the supplied code). The module focuses on bridging between PIL Images and PyTorch tensors, providing image information utilities and a small set of utilities used by higher-level transforms.
+
+Key concepts
+- InterpolationMode: Enum of supported interpolation methods (nearest, bilinear, bicubic, etc.) used by transforms that resample images.
+- get_dimensions / get_image_size / get_image_num_channels: helpers to query image metadata for tensors or PIL images.
+- to_tensor: convert a PIL Image or numpy array to a PyTorch tensor, with proper handling of channel order (C x H x W) and data type ranges.
+- pil_to_tensor: convert a PIL Image to a tensor of the same type as the input (deep copy of underlying array).
+- Internal helpers (not typically used directly by end users): _interpolation_modes_from_int, pil_modes_mapping, _is_pil_image, _is_numpy, _is_numpy_image.
+
+API Reference
+-------------
+
+InterpolationMode
+^^^^^^^^^^^^^^^^^
+Enum of the supported interpolation methods. The available values are:
+- InterpolationMode.NEAREST ("nearest")
+- InterpolationMode.NEAREST_EXACT ("nearest-exact")
+- InterpolationMode.BILINEAR ("bilinear")
+- InterpolationMode.BICUBIC ("bicubic")
+- InterpolationMode.BOX ("box")
+- InterpolationMode.HAMMING ("hamming")
+- InterpolationMode.LANCZOS ("lanczos")
+
+Notes
+- This enum is designed to be compatible with PIL mappings via pil_modes_mapping.
+
+Function: _interpolation_modes_from_int
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Internal helper that maps an integer to an InterpolationMode.
+Signature:
+    _interpolation_modes_from_int(i: int) -> InterpolationMode
+
+Example:
+- 0 -> InterpolationMode.NEAREST
+- 2 -> InterpolationMode.BILINEAR
+- 3 -> InterpolationMode.BICUBIC
+
+Note: This is an internal utility; use InterpolationMode enum where possible.
+
+Dictionary: pil_modes_mapping
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Mapping from InterpolationMode values to PIL mode index integers used by PIL-based operations.
+
+Examples:
+- InterpolationMode.NEAREST maps to 0 (nearest)
+- InterpolationMode.BILINEAR maps to 2
+- InterpolationMode.BICUBIC maps to 3
+- InterpolationMode.NEAREST_EXACT maps to 0 (PIL compatibility)
+- InterpolationMode.BOX maps to 4
+- InterpolationMode.HAMMING maps to 5
+- InterpolationMode.LANCZOS maps to 1
+
+Alias/Helper: _is_pil_image
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Refer to the functional PIL module for details; this alias exposes whether an object is a PIL Image.
+
+Helper: _is_numpy
+^^^^^^^^^^^^^^^^^^^^
+Deprecated guard for NumPy arrays; returns True if the input is a NumPy ndarray.
+
+Helper: _is_numpy_image
+^^^^^^^^^^^^^^^^^^^^^^
+Returns True if a NumPy array represents a 2D or 3D image (ndim in {2, 3}).
+
+get_dimensions
+^^^^^^^^^^^^^^
+Returns the image dimensions as [channels, height, width].
+
+Signature:
+    get_dimensions(img: Tensor) -> List[int]
+
+- If img is a torch.Tensor, delegates to F_t.get_dimensions.
+- If img is a PIL Image, delegates to F_pil.get_dimensions.
+
+get_image_size
+^^^^^^^^^^^^^^
+Returns the image size as [width, height].
+
+Signature:
+    get_image_size(img: Tensor) -> List[int]
+
+- If img is a torch.Tensor, delegates to F_t.get_image_size.
+- If img is a PIL Image, delegates to F_pil.get_image_size.
+
+get_image_num_channels
+^^^^^^^^^^^^^^^^^^^^^^
+Returns the number of channels in the image.
+
+Signature:
+    get_image_num_channels(img: Tensor) -> int
+
+- If img is a torch.Tensor, delegates to F_t.get_image_num_channels.
+- If img is a PIL Image, delegates to F_pil.get_image_num_channels.
+
+to_tensor
+^^^^^^^^^
+Convert a PIL Image or numpy array to a PyTorch tensor.
+
+Signature:
+    to_tensor(pic) -> Tensor
+
+Key behavior
+- Logs API usage (when not scripted/traced).
+- Accepts PIL Images or NumPy arrays.
+- For NumPy arrays:
+  - If 2D, adds a channel dimension, converts to CHW, and scales to [0,1] if input dtype is uint8.
+  - For other dtypes, preserves values if not uint8; otherwise scales.
+- For PIL Images:
+  - Converts to a NumPy array, then to a tensor in CHW order.
+  - Handles grayscale ("1") mode as 255 scaling.
+  - Returns a float tensor in [0,1] for uint8 inputs; preserves other dtypes.
+
+Examples:
+- PIL image to tensor:
+  from PIL import Image
+  from torchvision.transforms import to_tensor
+  img = Image.open("path/to/image.jpg")
+  t = to_tensor(img)  # CHW, float in [0,1]
+
+- NumPy array to tensor:
+  import numpy as np
+  a = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+  t = to_tensor(a)  # CHW, float in [0,1]
+
+- Tensor input path is supported by the internal dispatch:
+  t = to_tensor(tensor)  # If already a Tensor, returned as-is
+
+pil_to_tensor
+^^^^^^^^^^^^^
+Convert a PIL Image to a tensor of the same type (deep copy).
+
+Signature:
+    pil_to_tensor(pic: Any) -> Tensor
+
+Notes
+- Performs a deep copy of the underlying image data.
+- Returns a tensor with the same dtype as the input image when possible.
+- The exact behavior follows the code path that mirrors to_tensor but preserves the input dtype.
+
+Examples:
+- PIL Image to tensor:
+  from PIL import Image
+  from transforms import pil_to_tensor
+  img = Image.open("path/to/image.jpg")
+  t = pil_to_tensor(img)
+
+Internal utilities and notes
+- _is_pil_image is sourced from F_pil._is_pil_image
+- _is_numpy and _is_numpy_image are marked with @torch.jit.unused (not intended for TorchScript use)
+- This module is designed for integration with other functional transforms in the package, including _functional_pil and _functional_tensor.
+
+Usage Examples
+--------------
+
+Basic usage with a PIL image
+- Convert to tensor and inspect shape and dtype
+  from PIL import Image
+  from transforms import to_tensor, get_dimensions
+
+  img = Image.open("example.jpg")
+  t = to_tensor(img)
+  dims = get_dimensions(t)
+  size = get_image_size(t)
+
+NumPy array usage
+- Convert a NumPy array to a tensor and verify channels
+  import numpy as np
+  from transforms import to_tensor, get_dimensions
+
+  arr = np.random.randint(0, 256, (64, 64, 3), dtype=np.uint8)
+  t = to_tensor(arr)
+  dims = get_dimensions(t)
+
+InterpolationMode and mappings (usage in higher-level transforms)
+- Use InterpolationMode to select a method for resize-like operations, and locate the PIL mapping via pil_modes_mapping
+  from transforms import InterpolationMode, pil_modes_mapping
+
+  mode = InterpolationMode.BILINEAR
+  pil_index = pil_modes_mapping[mode]  # 2 for bilinear
+
+Generate documentation
+----------------------
+How to generate HTML (Sphinx)
+- Prerequisites: Python, Sphinx, and the project’s doc requirements
+- Basic commands:
+  - Install Sphinx (and optional extensions):
+    pip install sphinx
+  - Create or update a Sphinx project (example):
+    sphinx-quickstart
+  - Enable autodoc for the module:
+    In your index.rst, include:
+      .. automodule:: transforms
+         :members:
+         :undoc-members:
+         :show-inheritance:
+  - Build the HTML docs:
+    make html
+    or
+    sphinx-build -b html sourcedir build/html
+- Tips:
+  - Enable autosummary to generate summary tables for API entries.
+  - Use .. automodule:: with :members: to ensure all functions/classes are documented.
+  - For docstrings in this module, ensure comprehensive descriptions for parameters, return values, and behavior as shown above.
+
+Examples: End-to-end snippet
+- A small script demonstrating typical usage:
+  from PIL import Image
+  import numpy as np
+  from transforms import to_tensor, get_dimensions, InterpolationMode
+
+  # PIL image path
+  img = Image.open("image.jpg")
+  t = to_tensor(img)
+  print("Tensor shape:", t.shape)            # e.g., torch.Size([3, H, W])
+  print("Dimensions:", get_dimensions(t))    # [3, H, W]
+
+  # NumPy array
+  a = np.random.randint(0, 256, (120, 80, 3), dtype=np.uint8)
+  t2 = to_tensor(a)
+  print("Tensor dtype:", t2.dtype)
+
+  # Interpolation mode mapping
+  mode = InterpolationMode.LANCZOS
+  pil_idx = pil_modes_mapping[mode]
+  print("PIL index for mode LANCZOS:", pil_idx)
+
+Notes
+- The exact behavior may depend on how the surrounding functional modules (e.g., _functional_pil, _functional_tensor) are implemented in your project.
+- This documentation reflects the public-facing aspects of the module; internal helpers are primarily intended for internal use and compatibility.
+
+Appendix: Exported symbols
+- InterpolationMode
+- _interpolation_modes_from_int
+- pil_modes_mapping
+- _is_pil_image
+- _is_numpy
+- _is_numpy_image
+- to_tensor
+- pil_to_tensor
+- get_dimensions
+- get_image_size
+- get_image_num_channels
+
+If you want the documentation to auto-generate from docstrings, enable Sphinx autodoc and include the automodule directives as shown in the “Generate documentation” section.

@@ -1,0 +1,182 @@
+Introduction
+
+This module provides the impurity criteria framework used by decision trees to evaluate splits. It defines a Cython-based base class, Criterion, which encapsulates the logic for computing impurities, evaluating potential splits, and updating statistics as the tree grows. Subclasses implement specific impurity measures (e.g., Gini, entropy, MSE) and concrete node/value calculations.
+
+Overview
+
+- Purpose: Facilitate efficient, extensible computation of split quality in decision trees by abstracting impurity calculations and update logic.
+- Core abstraction: Criterion is a cdef class that stores and operates on statistics for a node, including target values, sample weights, and the distribution of samples across potential splits.
+- Extensibility: Subclasses implement concrete impurity measures and node value computations. The base class defines the required interface and provides common utilities.
+- Performance: Many methods are declared nogil to enable release of the Python GIL for performance-critical operations over large datasets.
+
+Key Concepts and Relationships
+
+- Criterion (base class)
+  - Interface for impurity calculation and split evaluation.
+  - Methods include initialization, updates when moving samples between child nodes, impurity computations, and node value calculations.
+  - Designed to be subclassed for specific impurity definitions (e.g., classification vs. regression criteria).
+- Subclasses
+  - Implement the actual impurity measure (e.g., left/right impurities, parent impurity, node value).
+  - Provide concrete behavior for:
+    - reset, reverse_reset
+    - update
+    - node_impurity, children_impurity
+    - node_value, clip_node_value
+    - middle_value (used for monotonicity constraints in some criteria)
+- Utilities and constants
+  - EPSILON: Used by Poisson-based impurity criteria.
+  - WeightedMedianCalculator: Helper for weighted medians (imported utility).
+
+Important Parameters and Return Values
+
+- y: Target values for all samples in the node. Provided as a numpy array exposed to Cython as a memoryview (DOUBLE_t[:, ::1]).
+- sample_weight: Per-sample weights (DOUBLE_t[:]).
+
+- weighted_n_samples: Total weight of the samples considered in the current node (float).
+- sample_indices: Indices of samples in X/y used for the node. This is a 1D array of indices; start and end delimit the subset denoting the current node.
+- start, end: Bounds into sample_indices defining the range of samples used for the current node.
+
+- n_missing: Number of missing values for a given feature when initializing missing value handling.
+
+- impurity_parent, impurity_left, impurity_right: Numeric impurity values used to compute split quality and to decide on the best split.
+
+- Proxy impurity improvement: A fast-scoring heuristic used during search for the best split, independent of constant terms in the impurity decrease.
+
+Usage and Typical Workflow
+
+- Subclass Definition: Implement a concrete impurity criterion by deriving from Criterion and implementing the required methods (reset, reverse_reset, update, node_impurity, etc.).
+- Initialization: For a given node, initialize the criterion with the node’s data (y, sample weights, sample_indices, and the range [start, end)).
+- Missing Values: If features contain missing values, initialize missing-value handling via init_missing(n_missing). The documentation assumes missing samples are placed at the end of sample_indices.
+- Splitting: Use the criterion to compute parent impurity, and for candidate split positions, compute left/right impurities and the overall impurity improvement. Update the criterion as the potential split position moves.
+- Node Value: Use node_value to determine the predicted value for the node (for regression-like targets) or class probabilities (for classification-like targets), depending on the subclass implementation.
+- Edge Conditions: Ensure proper handling of weights (weighted_n_samples) and the case where there are missing values. The framework uses nogil methods for performance-critical code paths, so careful attention to memory and indexing is required.
+
+Code Snippet: Typical Subclass Outline
+
+```python
+# Pseudo-Python outline; actual implementation is in Cython/extension
+class MyCriterion(Criterion):
+    def __init__(self):
+        super().__init__()
+        # allocate internal buffers as needed
+
+    cdef int init(self,
+                 const DOUBLE_t[:, ::1] y,
+                 const DOUBLE_t[:] sample_weight,
+                 double weighted_n_samples,
+                 const SIZE_t[:] sample_indices,
+                 SIZE_t start,
+                 SIZE_t end) except -1 nogil:
+        # Initialize buffers, counts, sums, etc.
+        return 0
+
+    cdef void init_missing(self, SIZE_t n_missing) noexcept nogil:
+        # Initialize missing-value statistics if needed
+        pass
+
+    cdef int reset(self) except -1 nogil:
+        # Reset statistics for the left-right split consideration
+        pass
+
+    cdef int reverse_reset(self) except -1 nogil:
+        # Reset statistics for the opposite direction
+        pass
+
+    cdef int update(self, SIZE_t new_pos) except -1 nogil:
+        # Move samples from right to left as we sweep split positions
+        pass
+
+    cdef double node_impurity(self) noexcept nogil:
+        # Compute impurity of the current node
+        pass
+
+    cdef void children_impurity(self, double* impurity_left,
+                                double* impurity_right) noexcept nogil:
+        # Compute left/right child impurities
+        pass
+
+    cdef void node_value(self, double* dest) noexcept nogil:
+        # Compute and store the node value
+        pass
+
+    cdef void clip_node_value(self, double* dest, double lower_bound, double upper_bound) noexcept nogil:
+        pass
+
+    cdef double middle_value(self) noexcept nogil:
+        # Optional: compute a middle value used for monotonicity constraints
+        pass
+
+    cdef double proxy_impurity_improvement(self) noexcept nogil:
+        # Fast proxy for impurity improvement
+        cdef double impurity_left
+        cdef double impurity_right
+        self.children_impurity(&impurity_left, &impurity_right)
+        return (- self.weighted_n_right * impurity_right
+                - self.weighted_n_left * impurity_left)
+
+    cdef double impurity_improvement(self, double impurity_parent,
+                                     double impurity_left,
+                                     double impurity_right) noexcept nogil:
+        # Compute full impurity improvement for a given split
+        # N_t: samples in current node, N_t_L, N_t_R: samples in left/right
+        # impurity_parent is the impurity before split
+        pass
+```
+
+Important Considerations and Edge Cases
+
+- Missing values: Use init_missing to allocate and initialize structures for missing data. The design assumes missing samples are appended at the end of sample_indices.
+- Weights: The framework supports sample weights. weighted_n_samples must reflect the sum of weights for the samples currently considered in the node.
+- Numerical stability: EPSILON is defined to assist Poisson-based criteria and to guard numerical stability in impurity calculations.
+- Memory management: The criterion’s methods are nogil; ensure allocations occur before releasing the GIL and that no Python objects are used inside nogil blocks.
+- Monotonicity: middle_value is intended for use in criteria that impose monotonicity constraints. Implementations are deferred to concrete subclasses (ClassificationCriterion and RegressionCriterion).
+- Extensibility: The base class defines the contract for impurity computation and split evaluation. New impurity measures can be added by implementing the required methods in a subclass.
+
+Usage Examples
+
+- Inspecting a subclass API and implementing a concrete criterion
+  - Review the methods in Criterion to understand the required behavior.
+  - Implement a subclass for your specific impurity (e.g., Gini, Entropy, MSE) by providing concrete logic for node_impurity, impurity_improvement, and node_value.
+
+- Using a concrete criterion in a tree builder
+  - Prepare y, sample_weight, and sample_indices for the node.
+  - Create an instance of the concrete Criterion subclass.
+  - Call init(y, sample_weight, weighted_n_samples, sample_indices, start, end) to initialize.
+  - If missing values exist for the feature being evaluated, call init_missing(n_missing).
+  - Iterate over potential split positions, calling reset, update, and impurity_improvement as appropriate to identify the best split.
+  - After choosing a split, use node_value to obtain the node’s predicted value.
+
+Code Snippet: Minimal Lifecycle (Conceptual)
+
+```python
+# Conceptual usage outline (actual code lives in Cython extension)
+criterion = MyConcreteCriterion()
+criterion.init(y, sample_weight, weighted_n_samples, sample_indices, start, end)
+
+# If there are missing values for the feature being tested
+criterion.init_missing(n_missing)
+
+# Sweep possible split positions
+criterion.reset()
+for pos in range(start + 1, end):
+    criterion.update(pos)
+    imp = criterion.proxy_impurity_improvement()
+    # track best split based on impurity_improvement or proxy
+
+# After selecting best split
+best_left_imp, best_right_imp = 0.0, 0.0
+criterion.children_impurity(&best_left_imp, &best_right_imp)
+# Use impurity_improvement with actual impurity_parent/left/right to finalize decision
+```
+
+Edge Case Considerations
+
+- When there are no samples in a child after a split, ensure the implementation handles zero counts gracefully (implicit impurity values should reflect the absence of data).
+- If sample_weights sum to zero, guard against division by zero and define behavior (often treated as zero-weighted samples).
+- When features contain many missing values, ensure init_missing and subsequent statistics maintain correctness.
+
+End Notes
+
+The Criterion class and its subclasses provide a structured and efficient foundation for evaluating splits in decision trees. By isolating impurity calculations and split-update logic, developers can implement a variety of impurity measures while reusing a consistent, high-performance core.
+
+Usage examples and subclass templates above illustrate how developers extend the framework to support different learning objectives (classification or regression) and how to integrate the criterion into a larger tree-building pipeline.

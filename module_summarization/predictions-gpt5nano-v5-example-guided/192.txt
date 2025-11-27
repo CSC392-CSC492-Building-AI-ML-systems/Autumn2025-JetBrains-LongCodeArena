@@ -1,0 +1,123 @@
+# Manifold learning approach to non-linear dimensionality reduction
+
+## Overview
+
+Manifold learning aims to uncover low-dimensional, non-linear structures embedded in high-dimensional data. The SMACOF-based Multidimensional Scaling (MDS) implementation provides a flexible, non-linear dimensionality reduction technique that preserves pairwise dissimilarities in a lower-dimensional embedding.
+
+Key ideas:
+- Convert pairwise dissimilarities (distances) into a low-dimensional configuration X in n_components dimensions.
+- Support both metric MDS (preserving the raw dissimilarities) and non-metric MDS (preserving the rank order of dissimilarities).
+- Use the SMACOF algorithm with the Guttman transform to iteratively improve the embedding.
+- In non-metric mode, estimate the monotone disparities via isotonic regression.
+- Optionally return a normalized stress (Stress-1) for non-metric MDS.
+
+The core routine in the implementation is the SMACOF solver, which iteratively updates the embedding to minimize stress between the input dissimilarities and the pairwise distances in the embedding space.
+
+Key components from the implementation:
+- Static solver _smacof_single that computes an embedding X, the final stress, and the number of iterations.
+- Metric vs non-metric behavior:
+  - metric=True uses the provided dissimilarities directly as disparities.
+  - metric=False uses isotonic regression to derive disparities from a monotone transformation of the dissimilarities.
+- Isotonic Regression for non-metric MDS.
+- Guttman transform update: X = (1/n_samples) B X, where B encodes the disparity-to-distance ratios.
+- Stress computation: stress = sum((disparities - distances)^2) / 2 (with optional normalization to Stress-1).
+
+The following code excerpt illustrates the key SMACOF workflow and updates:
+- The solver initializes X (random or provided).
+- Computes pairwise distances in the embedding space.
+- In non-metric mode, derives disparities via isotonic regression.
+- Computes stress and updates X using the Guttman transform.
+- Iterates until convergence criteria are met.
+
+Code reference (conceptual excerpt from the implementation):
+- SMACOF solver entry
+  def _smacof_single(
+      dissimilarities,
+      metric=True,
+      n_components=2,
+      init=None,
+      max_iter=300,
+      verbose=0,
+      eps=1e-3,
+      random_state=None,
+      normalized_stress=False,
+  ):
+      """Computes multidimensional scaling using SMACOF algorithm."""
+      ...
+      for it in range(max_iter):
+          dis = euclidean_distances(X)
+          if metric:
+              disparities = dissimilarities
+          else:
+              # non-metric: isotonic regression to compute disparities
+              disparities = ir.fit_transform(sim_flat_w, dis_flat_w)
+          stress = ((dis.ravel() - disparities.ravel()) ** 2).sum() / 2
+          X = 1.0 / n_samples * np.dot(B, X)
+          ...
+
+## Key Components
+
+- SMACOF SMACOF solver (_smacof_single)
+  - Computes a low-dimensional embedding by minimizing stress between input dissimilarities and embedding distances.
+  - Supports metric and non-metric MDS.
+  - Handles optional normalization of stress (Stress-1) for non-metric MDS.
+- Isotonic Regression
+  - Used in non-metric MDS to derive a monotone relationship (disparities) from the observed dissimilarities.
+- Guttman Transform
+  - Core update step: X is updated using a linear transformation derived from the ratio of disparities to distances.
+- Stress and Convergence
+  - Stress quantifies the mismatch between observed dissimilarities and embedding distances.
+  - Convergence is determined by a tolerance eps and a maximum number of iterations.
+- Input Validation
+  - Dissimilarities must be symmetric.
+  - Parameter validation ensures sensible types and ranges (e.g., n_components, max_iter, eps).
+
+## Usage
+
+- Typical usage follows the public API for manifold learning: MDS (from scikit-learn) or equivalent interface that relies on the SMACOF solver.
+- Example with a precomputed dissimilarity matrix:
+
+  - Metric MDS (preserves dissimilarities directly)
+    - Input: symmetric dissimilarities matrix D
+    - Command:
+      - X = MDS(n_components=2, metric=True, dissimilarity='precomputed').fit_transform(D)
+      - stress can be accessed via the estimator’s attributes (e.g., stress_)
+  - Non-metric MDS (preserves rank order of dissimilarities)
+    - Input: symmetric dissimilarities matrix D
+    - Command:
+      - X = MDS(n_components=2, metric=False, dissimilarity='precomputed').fit_transform(D)
+      - stress can be accessed via the estimator’s attributes (e.g., stress_)
+
+- Example (conceptual, using a public API like scikit-learn’s MDS):
+  - from sklearn.manifold import MDS
+  - D = your_pairwise_dissimilarities_matrix  # shape (n_samples, n_samples), symmetric
+  - mds = MDS(n_components=2, metric=True, dissimilarity='precomputed', random_state=42)
+  - X = mds.fit_transform(D)
+  - print("Embedding shape:", X.shape)
+  - print("Stress:", mds.stress_)
+
+- Non-metric example:
+  - mds_nm = MDS(n_components=2, metric=False, dissimilarity='precomputed', random_state=42)
+  - X_nm = mds_nm.fit_transform(D)
+  - print("Stress (non-metric):", mds_nm.stress_)
+
+Note: The internal implementation exposes the SMACOF solver behavior, including the option to compute a normalized stress (Stress-1) for non-metric MDS and the ability to provide an initial embedding or rely on a random initialization.
+
+## Details
+
+- Input requirements
+  - Dissimilarities must form a symmetric matrix with shape (n_samples, n_samples).
+  - For non-metric MDS, 0 entries in the dissimilarities can be treated as missing values, depending on the mode.
+- Algorithm flow
+  - Initialize X (randomly or from a provided init).
+  - Compute embeddings distances in the current space.
+  - If metric, use the provided dissimilarities as disparities; otherwise, derive disparities via isotonic regression.
+  - Compute stress and apply the Guttman transform to update X.
+  - Check convergence using the change in stress relative to the scale of the embedding (eps) and stop when convergence criteria are met or max_iter is reached.
+- Normalization
+  - If normalized_stress is True (only for non-metric MDS), the reported stress is normalized by the magnitude of the disparities, yielding Stress-1.
+- Performance considerations
+  - The solver iterates up to max_iter times; the convergence criterion incorporates a relative improvement threshold.
+  - The computation relies on pairwise distances and matrix operations, with complexity influenced by n_samples and n_components.
+
+If you need a minimal, self-contained example of running SMACOF-based MDS on a small dataset or a longer reference to the exact parameter names and validation rules, see the provided source snippet for _smacof_single and its docstring.

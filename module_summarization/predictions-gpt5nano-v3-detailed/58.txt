@@ -1,0 +1,186 @@
+Introduction
+------------
+This module provides a general-purpose optimization helper that can fit any model given an objective function and (optionally) its gradient. The design decouples the optimization logic from any specific model (e.g., LikelihoodModel) so the same machinery can be reused across different fitting problems.
+
+Overview
+--------
+- Purpose: Provide a flexible wrapper around SciPy optimization routines to minimize or maximize a user-supplied objective function.
+- Core components:
+  - _check_method(method, methods): Validates the requested optimization method.
+  - Optimizer: Encapsulates a generic fitting routine via the _fit method, enabling reuse with arbitrary objective functions.
+
+API Reference
+-------------
+- _check_method(method, methods)
+  - Purpose: Ensure that the chosen optimization method is supported.
+  - Parameters:
+    - method: str, the requested optimization method.
+    - methods: iterable of str, the supported methods.
+  - Returns: None
+  - Raises: ValueError if method is not in methods.
+  - Notes: Internal helper used by the Optimizer to guard against unsupported solvers.
+
+- Optimizer
+  - Purpose: A general-purpose optimizer wrapper capable of fitting any model given an objective function and (optionally) its gradient.
+  - Key method: _fit(...)
+    - Signature:
+      - _fit(self, objective, gradient, start_params, fargs, kwargs,
+              hessian=None, method='newton', maxiter=100, full_output=True,
+              disp=True, callback=None, retall=False)
+    - Parameters:
+      - objective: callable
+        The objective function to be optimized. Typically the log-likelihood or equivalent to be maximized/minimized.
+      - gradient: callable or None
+        The gradient (score) function of the objective. If None, a numerical gradient may be used by the solver depending on the backend.
+      - start_params: array_like, optional
+        Initial guess for the parameters. Default described as zeros in its documentation.
+      - fargs: tuple
+        Extra arguments to pass to the objective function, i.e., objective(x, *fargs).
+      - kwargs: dict
+        Additional keyword arguments to pass to the objective function.
+      - hessian: callable or None
+        The Hessian (second-derivative) of the objective, if available. Used by certain solvers; otherwise can be None.
+      - method: str, default 'newton'
+        Optimization method to use. Options typically include:
+        - 'newton', 'nm', 'bfgs', 'powell', 'cg', 'ncg', 'basinhopping', 'minimize'
+        The exact explicit arguments depend on the solver chosen.
+      - maxiter: int, default 100
+        Maximum number of iterations. Note: basinhopping may ignore this argument.
+      - full_output: bool, default True
+        If True, return a dictionary of solver-specific information in the retvals output.
+      - disp: bool, default True
+        If True, display convergence messages.
+      - callback: callable or None
+        Called after each iteration with the current parameter vector xk.
+      - retall: bool, default False
+        If True, return the history of solutions at each iteration.
+    - Returns:
+      - xopt: array
+        The optimized parameter vector.
+      - retvals: dict or None
+        Additional information returned by the solver when full_output is True. None if full_output is False.
+      - optim_settings: dict
+        A dictionary containing the solver arguments used during optimization.
+    - Notes:
+      - The 'basinhopping' solver ignores maxiter, retall, and full_output explicit arguments.
+      - The exact contents of retvals and optim_settings depend on the solver used.
+    - Usage considerations:
+      - Provide a valid gradient if available to improve convergence, especially for Newton-type methods.
+      - If gradient or Hessian is not available, prefer gradient-free solvers (e.g., 'nm', 'powell', 'basinhopping' where applicable).
+      - The API is designed to be solver-agnostic, meaning you can swap solvers as needed without changing your objective.
+
+Usage Examples
+--------------
+Example 1: Basic quadratic objective with gradient (BFGS)
+- Goal: Minimize (1/2) x^T A x - b^T x
+- A is positive definite; gradient is A x - b
+
+```python
+import numpy as np
+from optimization import Optimizer  # assuming the module is named optimization
+
+# Define a simple quadratic objective
+A = np.array([[3.0, 0.0],
+              [0.0, 2.0]])
+b = np.array([1.0, 0.0])
+
+def objective(x):
+    return 0.5 * x.T @ A @ x - b.T @ x  # scalar
+
+def gradient(x):
+    return A @ x - b  # vector
+
+# Optimization setup
+opt = Optimizer()
+start_params = np.zeros(2)
+
+# Run optimizer (minimize the objective; gradient provided)
+xopt, retvals, optim_settings = opt._fit(
+    objective=objective,
+    gradient=gradient,
+    start_params=start_params,
+    fargs=(),
+    kwargs={},
+    hessian=None,
+    method='bfgs',
+    maxiter=100,
+    full_output=True,
+    disp=True,
+    callback=None,
+    retall=False
+)
+
+print("Optimal x:", xopt)
+print("Return values:", retvals)
+print("Solver settings:", optim_settings)
+```
+
+Example 2: Using Nelder–Mead (gradient-free)
+- Useful if the gradient is unavailable or unreliable.
+
+```python
+xopt, retvals, optim_settings = opt._fit(
+    objective=objective,
+    gradient=None,            # No gradient provided
+    start_params=start_params,
+    fargs=(),
+    kwargs={},
+    hessian=None,
+    method='nm',                # Nelder-Mead
+    maxiter=200,
+    full_output=True,
+    disp=True,
+    callback=None,
+    retall=False
+)
+```
+
+Example 3: Basinhopping (global optimization)
+- Demonstrates usage of a global optimization strategy.
+- Note: basinhopping ignores some explicit arguments like maxiter, retall, and full_output in practice.
+
+```python
+xopt, retvals, optim_settings = opt._fit(
+    objective=objective,
+    gradient=gradient,
+    start_params=start_params,
+    fargs=(),
+    kwargs={},
+    hessian=None,
+    method='basinhopping',
+    maxiter=10,
+    full_output=True,
+    disp=True,
+    callback=None,
+    retall=False
+)
+```
+
+Important Considerations and Edge Cases
+---------------------------------------
+- Gradient availability
+  - If the gradient (gradient) is omitted, solvers that require derivatives may fail or perform poorly. Prefer providing gradient for efficiency and reliability.
+- Hessian usage
+  - If your problem benefits from second-order information, supply a hessian function. Some solvers leverage it to improve convergence.
+- Solver choice
+  - Choose solvers based on smoothness and dimensionality:
+    - Newton-type (e.g., 'newton') for smooth problems with good gradient/hessian information.
+    - Gradient-free (e.g., 'nm', 'powell') for nondifferentiable or noisy objectives.
+    - Global methods (e.g., 'basinhopping') for escaping local minima.
+- Basinhopping caveats
+  - Basinhopping may ignore maxiter, retall, and full_output. Expect different behavior and verify retvals if needed.
+- Return values
+  - xopt contains the optimized parameters.
+  - retvals contains solver-specific information when full_output is True; otherwise, None.
+  - optim_settings documents the solver arguments used during optimization.
+- Default behavior
+  - The documentation notes a default start_params as zeros; in practice, you must supply a suitable start_params compatible with your objective’s scale and domain.
+- Interface scope
+  - This module is designed to be model-agnostic. It intentionally decouples the optimization process from a specific model type so that it can be reused across different fitting problems.
+
+See Also
+--------
+- SciPy optimize: https://docs.scipy.org/doc/scipy/reference/optimize.html
+- LikelihoodModel and related result handling (in the broader codebase that uses this Optimizer)
+
+End of Documentation

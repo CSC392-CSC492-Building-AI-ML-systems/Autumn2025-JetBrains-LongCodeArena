@@ -1,0 +1,179 @@
+# Data component (ImageHDU) in an image FITS HDU
+
+This section documents how the Data component of an ImageHDU behaves, how to access and manipulate it, and common patterns when working with image data in FITS files using Astropy's io.fits.
+
+Note: In FITS, an ImageHDU consists of a Header and a data array. The data array is the pixel data for the image (or a data cube for multi-dimensional images). The header contains metadata (NAXIS, NAXIS1, NAXIS2, BUNIT, BSCALE, BZERO, etc.) that describes the data.
+
+---
+
+## Overview
+
+- The Data component is the actual pixel array stored in the extension (or primary HDU if it is an image).
+- Data is exposed in Python as a NumPy ndarray (or a NumPy MemoryMap when memory-mapped I/O is used).
+- The shape follows FITS convention for image-like data: typically (NAXIS2, NAXIS1) for 2D images, with additional axes appended for higher-dimensional data cubes.
+- Values can be scaled at read time using BSCALE and BZERO (unless you disable scaling).
+- The Data component is mutable when the HDU is opened in a writeable mode (e.g., mode='update').
+
+---
+
+## Accessing the Data
+
+- Access the de-scaled (physical) data by default:
+  - hdu.data gives you a NumPy array with BSCALE/BZERO applied (if you opened with default scaling).
+- Access the raw (pixel) data without scaling:
+  - Use fits.getdata('file.fits', ext=0, do_not_scale_image_data=True) or open with do_not_scale_image_data and read hdu.data.
+
+Examples:
+
+- Open a FITS file and inspect the image data:
+  - from astropy.io import fits
+  - with fits.open('image.fits') as hdul:
+  -     hdu = hdul[0]  # PrimaryHDU or ImageHDU
+  -     data = hdu.data
+  -     shape = data.shape
+  -     dtype = data.dtype
+
+- Read raw (unscaled) data:
+  - raw_data = fits.getdata('image.fits', ext=0, do_not_scale_image_data=True)
+
+---
+
+## Data Shape, Axes, and Ordering
+
+- For a 2D image:
+  - data.shape is typically (NAXIS2, NAXIS1).
+  - data[y, x] accesses the pixel at column x and row y.
+- For higher-dimensional images (data cubes), the shape follows the FITS axes: (NAXISn, ..., NAXIS1) in NumPy’s returned array, with Python indexing applying the same semantics as NumPy.
+- In practice, you often index as data[y, x, z, ...] depending on the number of axes.
+
+Note: The mapping between FITS axis order and NumPy memory layout is handled by Astropy; when in doubt, inspect data.shape and experiment with small subarrays to confirm indexing.
+
+---
+
+## Data Types and Scaling
+
+- Data dtype depends on the FITS data type in the pixel array (e.g., uint8, int16, float32, etc.).
+- BSCALE and BZERO in the header describe a linear transformation to convert stored pixel values to physical values:
+  - physical_value = BSCALE * stored_value + BZERO
+- By default, Astropy applies this scaling when reading the data (unless you disable scaling).
+- The BUNIT header key indicates the physical units of the data (e.g., 'Jy/beam', 'K', 'DN', etc.).
+
+Examples:
+
+- Read scaled data (default):
+  - with fits.open('image.fits') as hdul:
+  -     data = hdul[0].data  # scaled by BSCALE/BZERO if present
+
+- Read unscaled data:
+  - with fits.open('image.fits', do_not_scale_image_data=True) as hdul:
+  -     data_raw = hdul[0].data
+
+- Check units:
+  - with fits.open('image.fits') as hdul:
+  -     units = hdul[0].header.get('BUNIT', None)
+
+---
+
+## Memory Mapping and In-Place Editing
+
+- Memory-mapped I/O allows working with very large images without loading the entire array into memory.
+- Open in update mode with mmap enabled to modify data in place and flush back to disk.
+
+Examples:
+
+- Updating data in place with memory mapping:
+  - from astropy.io import fits
+  - with fits.open('image.fits', mode='update', memmap=True) as hdul:
+  -     data = hdul[0].data
+  -     data[100, 100] = 1234
+  -     hdul.flush()  # or let the context manager close to flush
+
+- Reading with memory map (read-only or update):
+  - with fits.open('image.fits', memmap=True) as hdul:
+  -     data = hdul[0].data
+  -     # data may be a memory-mapped array, depending on mode
+
+Notes:
+- Using memory mapping is efficient for large images but may have different performance characteristics depending on access patterns.
+- Writability depends on the file mode you pass to fits.open.
+
+---
+
+## Creating and Writing Image Data
+
+You can create a new ImageHDU from a NumPy array and write it to disk, or modify an existing ImageHDU and save.
+
+Examples:
+
+- Create a new 2D image and write:
+  - import numpy as np
+  - from astropy.io import fits
+  - data = np.random.random((1024, 1024)).astype(np.float32)
+  - hdu = fits.ImageHDU(data)
+  - hdu.writeto('new_image.fits', overwrite=True)
+
+- Modify an existing image and save:
+  - with fits.open('image.fits', mode='update') as hdul:
+  -     data = hdul[0].data
+  -     data[10:20, 10:20] = 0
+  -     hdul.flush()
+
+- Set header metadata for the data:
+  - with fits.open('image.fits', mode='update') as hdul:
+  -     hdr = hdul[0].header
+  -     hdr['BUNIT'] = 'MJy/sr'
+  -     hdul.flush()
+
+---
+
+## Practical Examples
+
+1) 2D grayscale image read and basic processing
+- from astropy.io import fits
+- with fits.open('image.fits') as hdul:
+-     data = hdul[0].data  # scaled by BSCALE/BZERO
+-     mean = float(np.mean(data))
+-     std = float(np.std(data))
+
+2) 3D data cube access
+- with fits.open('cube.fits') as hdul:
+-     cube = hdul[0].data  # shape (NAXIS3, NAXIS2, NAXIS1) or similar
+-     # Access a slice along the third axis
+-     slice0 = cube[0, :, :]  # depends on axis ordering
+
+3) Working with raw pixel values
+- raw = fits.getdata('image.fits', ext=0, do_not_scale_image_data=True)
+- # Now raw is the unscaled pixel values
+
+4) Writing and updating an existing file
+- with fits.open('image.fits', mode='update') as hdul:
+-     data = hdul[0].data
+-     data[50, 50] = 9999
+-     hdul.flush()
+
+---
+
+## Common Pitfalls and Tips
+
+- Indexing: For 2D images, data[y, x] is the common indexing pattern. Always verify the shape to confirm axis order.
+- Scaling: If you need raw pixel values, disable scaling when reading or use fits.getdata with do_not_scale_image_data.
+- Units: Always check BUNIT if physical interpretation is required.
+- In-place edits: To save changes after modifying data, ensure you flush the HDU or close the file with the appropriate mode (e.g., mode='update' and hdul.flush()).
+- Large files: Prefer memory-mapped access (memmap=True) for large images to avoid loading the entire dataset into memory.
+
+---
+
+## API References (Key Points)
+
+- hdu.data
+  - Returns the image data as a NumPy ndarray (scaled by BSCALE/BZERO by default).
+- hdu.header
+  - Access to the FITS header with metadata like NAXIS, NAXIS1, NAXIS2, BUNIT, BSCALE, BZERO, etc.
+- fits.open(...)
+  - Open a FITS file; options include mode='update', memmap=True, and do_not_scale_image_data.
+- fits.ImageHDU
+  - Class representing an image extension; commonly accessed as hdul[0] or extracted via fits.ImageHDU(data, header, ...).
+
+---
+
+This documentation provides a thorough overview of the Data component for an image HDU, including how to access, interpret, modify, and write image data, along with representative code examples.

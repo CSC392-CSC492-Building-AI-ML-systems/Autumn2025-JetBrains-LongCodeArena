@@ -1,0 +1,121 @@
+Parallel Random Number Generation
+================================
+
+Overview
+--------
+
+Parallel random number generation (RNG) involves producing independent streams of random data across multiple workers (processes or threads) in parallel simulations or analyses. NumPy’s random system supports this through multiple Bit Generators (BGs) and the high-level Generator API. By creating separate Generator instances (each backed by a distinct BG) or by deriving independent seeds from a common entropy source, you can achieve reproducible, non-overlapping random sequences across parallel tasks.
+
+Key concepts
+------------
+
+- Bit Generators (BGs): low-level RNG engines that produce raw random bits. Examples include MT19937, Philox, PCG64, and SFC64.
+- Generator: a high-level interface built on top of a BG that provides a rich set of random distributions and convenience methods.
+- SeedSequence: a principled way to derive multiple independent seeds from a single entropy source. Ideal for parallel work where you need many independent RNG streams.
+- Parallel strategies:
+  - Process-based parallelism: give each process its own Generator with a distinct seed.
+  - Thread-based parallelism: use separate Generators per thread (or a per-thread RNG with proper isolation) to avoid contention.
+
+Recommended approach for parallel usage
+---------------------------------------
+
+- Derive independent seeds using SeedSequence and spawn child seeds for each worker.
+- Create a separate Generator per worker using a distinct BG (PCG64, Philox, SFC64, etc.).
+- Do not share a single Generator across processes or across parallel threads without synchronization.
+
+Getting started
+---------------
+
+The modern NumPy RNG API makes parallel usage straightforward: create independent Generator instances for parallel workers, each with its own seed chain.
+
+Example: derive independent streams with SeedSequence
+----------------------------------------------------
+
+This example shows how to create four independent RNG streams using SeedSequence, suitable for parallel workers.
+
+```python
+from numpy.random import Generator, PCG64, SeedSequence
+
+# Derive independent seeds from a single entropy source
+base_seed = SeedSequence(12345)
+child_seeds = base_seed.spawn(4)  # create 4 independent seeds
+
+# Create a Generator for each parallel worker
+generators = [Generator(PCG64(s)) for s in child_seeds]
+
+# Example usage: each generator produces its own random numbers
+for i, g in enumerate(generators, start=1):
+    print(f"Stream {i}: {g.integers(0, 100, size=5)}")
+```
+
+Example: parallel execution with ProcessPoolExecutor
+--------------------------------------------------
+
+Use a separate Generator per worker in a multiprocessing context.
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+from numpy.random import Generator, PCG64, SeedSequence
+import numpy as np
+
+def worker(seed_seq):
+    rng = Generator(PCG64(seed_seq))
+    return rng.integers(0, 10, size=5)
+
+if __name__ == '__main__':
+    base = SeedSequence(42)
+    seeds = base.spawn(4)
+
+    with ProcessPoolExecutor(max_workers=4) as ex:
+        results = list(ex.map(worker, seeds))
+
+    for idx, arr in enumerate(results, 1):
+        print(f"Worker {idx}: {arr}")
+```
+
+Choosing a BG for parallel RNG
+------------------------------
+
+- PCG64 is a popular, modern choice with excellent statistical properties and fast performance.
+- Philox and SFC64 are also supported and suitable for various workloads.
+- MT19937 (Mersenne Twister) remains available but is generally slower and has different statistical characteristics; consider it when migrating legacy code.
+
+Seed management and reproducibility
+-----------------------------------
+
+- Reproducibility is achieved by using fixed seeds or SeedSequence seeds.
+- Independent streams ensure that parallel tasks do not produce overlapping sequences.
+- If you need repeatable results across runs, fix the base seed and ensure all derived seeds are consistently derived.
+
+API overview (Generator-based RNG)
+----------------------------------
+
+- numpy.random.Generator(bit_generator)
+  - bit_generator: an instance of a BG such as PCG64, Philox, SFC64, or MT19937.
+- numpy.random.default_rng(seed=None)
+  - Returns a Generator seeded with a high-entropy source (or a provided seed). For parallel usage, pass a SeedSequence or an integer seed for deterministic streams.
+- SeedSequence
+  - Seed management primitive to derive multiple independent seeds via spawn(n).
+
+Notes and best practices
+------------------------
+
+- Do not share a single Generator across processes. Create one per process or per worker.
+- For multi-threaded code, consider per-thread Generators or synchronized access to a single Generator (less efficient and more complex).
+- When porting from legacy code, MT19937-based workflows can be migrated to the Generator API with a BG replacement, keeping seed management consistent.
+
+API references (conceptual)
+----------------------------
+
+- Bit Generators: PCG64, Philox, SFC64, MT19937
+- High-level API: numpy.random.Generator
+- Seed management: numpy.random.SeedSequence, numpy.random.default_rng
+
+See also
+--------
+
+- NumPy Random Generators (Generator, default_rng)
+- SeedSequence documentation for advanced seed management
+- Parallel computing guidelines for multiprocessing and multithreading with NumPy RNGs
+
+This documentation describes how to implement robust and reproducible parallel RNG workflows using multiple independent Generator instances and SeedSequence-based seed derivation.

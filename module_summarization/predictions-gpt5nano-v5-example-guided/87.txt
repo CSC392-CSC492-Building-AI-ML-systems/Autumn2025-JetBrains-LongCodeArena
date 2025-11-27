@@ -1,0 +1,192 @@
+# Running Migrations (Backwards) and Migration Status
+
+## Overview
+
+This module provides the ability to reverse previously run migrations for Piccolo apps. It includes:
+
+- A BackwardsMigrationManager to orchestrate reversing migrations for a single app.
+- Top-level helpers to run backwards for a single app or all apps.
+- A CheckMigrationManager to query migration statuses.
+
+Key functionality includes selecting which migrations to reverse, optionally previewing SQL, optionally cleaning up migration files, and handling multi-app reversals in a safe, user-confirmed manner.
+
+## Key Components
+
+- BackwardsMigrationManager
+  - Purpose: Orchestrates backwards migrations for a single app.
+  - Constructor:
+    ```
+    class BackwardsMigrationManager(BaseMigrationManager):
+        def __init__(
+            self,
+            app_name: str,
+            migration_id: str,
+            auto_agree: bool = False,
+            clean: bool = False,
+            preview: bool = False,
+        ):
+            self.migration_id = migration_id
+            self.app_name = app_name
+            self.auto_agree = auto_agree
+            self.clean = clean
+            self.preview = preview
+            super().__init__()
+    ```
+  - Core method:
+    ```
+    async def run_migrations_backwards(self, app_config: AppConfig):
+        ...
+    ```
+    - Determines which ran migrations exist, selects the range to reverse, and performs the backwards migrations in reverse order.
+    - Supports preview mode, automatic agreement, cleaning of migration files, and deletion of migration records.
+  - Entry point:
+    ```
+    async def run(self) -> MigrationResult:
+        await self.create_migration_table()
+        app_config = self.get_app_config(self.app_name)
+        return await self.run_migrations_backwards(app_config=app_config)
+    ```
+
+- run_backwards
+  - Top-level helper to perform backwards migrations.
+  - Signature:
+    ```
+    async def run_backwards(
+        app_name: str,
+        migration_id: str = "1",
+        auto_agree: bool = False,
+        clean: bool = False,
+        preview: bool = False,
+    ) -> MigrationResult:
+        ...
+    ```
+  - Behavior:
+    - If app_name == "all", reverses migrations for all apps in reverse order.
+    - Otherwise creates a BackwardsMigrationManager and runs it.
+
+- backwards
+  - Public wrapper function with documentation string.
+  - Signature:
+    ```
+    async def backwards(
+        app_name: str,
+        migration_id: str = "1",
+        auto_agree: bool = False,
+        clean: bool = False,
+        preview: bool = False,
+    ):
+        """
+        Undo migrations up to a specific migration.
+        ...
+        """
+        ...
+    ```
+  - Uses run_backwards and exits with a non-zero status if the result indicates failure.
+
+- MigrationStatus
+  - Dataclass used with status queries:
+    ```
+    @dataclasses.dataclass
+    class MigrationStatus:
+        app_name: str
+        migration_id: str
+        description: str
+        has_ran: bool
+    ```
+
+- CheckMigrationManager
+  - Purpose: Retrieve migration statuses for an app.
+  - Signature:
+    ```
+    class CheckMigrationManager(BaseMigrationManager):
+        def __init__(self, app_name: str):
+            self.app_name = app_name
+            super().__init__()
+
+        async def get_migration_statuses(self) -> t.List[MigrationStatus]:
+            # Make sure the migration table exists
+            ...
+    ```
+
+## Usage
+
+- Revert the most recent migration for a single app:
+  ```
+  import asyncio
+  from piccolo.migrations.running import backwards
+
+  async def main():
+      result = await backwards(app_name="my_app")
+      print(result)
+
+  asyncio.run(main())
+  ```
+
+- Revert all migrations for a single app up to a specific id with auto-confirm:
+  ```
+  import asyncio
+  from piccolo.migrations.running import backwards
+
+  async def main():
+      result = await backwards(
+          app_name="my_app",
+          migration_id="all",
+          auto_agree=True
+      )
+      print(result)
+
+  asyncio.run(main())
+  ```
+
+- Revert migrations across all apps (with confirmation):
+  ```
+  import asyncio
+  from piccolo.migrations.running import backwards
+
+  async def main():
+      result = await backwards(app_name="all", migration_id="1", auto_agree=True)
+      print(result)
+
+  asyncio.run(main())
+  ```
+
+- Preview the reversal without executing:
+  ```
+  import asyncio
+  from piccolo.migrations.running import backwards
+
+  asyncio.run(backwards(app_name="my_app", migration_id="1", preview=True))
+  ```
+
+- Clean (delete) migration files after reversal:
+  ```
+  import asyncio
+  from piccolo.migrations.running import backwards
+
+  asyncio.run(backwards(app_name="my_app", migration_id="1", clean=True))
+  ```
+
+- Check migration statuses for an app:
+  ```
+  import asyncio
+  from piccolo.migrations.running import CheckMigrationManager
+
+  async def main():
+      m = CheckMigrationManager(app_name="my_app")
+      statuses = await m.get_migration_statuses()
+      for s in statuses:
+          print(s)
+
+  asyncio.run(main())
+  ```
+
+## Details
+
+- Migration tracking: The module relies on the Migration table to determine which migrations have run for an app (via Migration.get_migrations_which_ran).
+- Range selection: When reversing, the code computes the range from earliest to latest ran migrations and reverses that subset in reverse order.
+- User confirmation: By default, the script prompts for confirmation to proceed. If auto_agree is True, it proceeds automatically.
+- Preview mode: In preview mode, the actual migrations are not executed; instead, SQL is prepared and reported.
+- Cleaning behavior: If clean is True, after successful reversal, corresponding migration files may be deleted from disk.
+- All-app reversals: When reversing across all apps, app names are sorted and processed in reverse order to respect the chronological sequence of migrations.
+- Status querying: CheckMigrationManager provides a way to inspect which migrations have run for a given app.
+

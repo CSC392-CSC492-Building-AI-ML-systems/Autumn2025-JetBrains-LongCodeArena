@@ -1,0 +1,189 @@
+# Using SQLite and asyncio effectively
+
+## Overview
+This module provides an asyncio-friendly way to work with SQLite using a batch-oriented approach. It registers type adapters and converters to make SQLite behave more like Postgres in terms of data types, and it exposes an asynchronous batch helper (AsyncBatch) that yields results in configurable chunks. It also employs a lazy loader for aiosqlite to avoid heavy imports unless async usage is required.
+
+Key ideas:
+- Consistent type handling between SQLite and Postgres via adapters and converters.
+- AsyncBatch enables streaming query results in batches, suitable for large result sets.
+- Lazy loading of aiosqlite to keep import time light when async usage is not needed.
+
+## Key Components
+
+- Type adapters and converters
+  - Inbound converters (values passed to SQLite):
+    - Decimal -> float
+    - UUID -> str
+    - datetime.time/date/datetime/timedelta
+    - list (Array) -> JSON string
+  - Outbound converters (values coming from SQLite):
+    - float -> Decimal
+    - int from numeric/integers
+    - UUID -> uuid.UUID
+    - Date/Time/Timestamp/Timestamptz -> corresponding Python types
+    - Array/M2M -> Python list
+- sqlite3.register_converter and sqlite3.register_adapter
+  - Ensures SQLite stores and returns values in expected formats
+  - Examples from the module:
+    - sqlite3.register_converter("Numeric", convert_numeric_out)
+    - sqlite3.register_adapter(Decimal, convert_numeric_in)
+
+Code excerpt (definition only):
+```python
+def convert_numeric_in(value):
+    """Convert any Decimal values into floats."""
+    return float(value)
+
+def convert_uuid_in(value) -> str:
+    """Converts the UUID value being passed into sqlite."""
+    return str(value)
+
+def convert_date_in(value: datetime.date):
+    """Converts the date value being passed into sqlite."""
+    return value.isoformat()
+
+def convert_datetime_in(value: datetime.datetime) -> str:
+    """Converts the datetime into a string, UTC if timezone aware."""
+    if value.tzinfo is not None:
+        value = value.astimezone(datetime.timezone.utc)
+    return str(value)
+
+def convert_array_in(value: list):
+    """Converts a list value into a string."""
+    if value and type(value[0]) not in [str, int, float]:
+        raise ValueError("Can only serialise str, int and float.")
+    return dump_json(value)
+```
+
+```python
+sqlite3.register_converter("Numeric", convert_numeric_out)
+sqlite3.register_converter("Integer", convert_int_out)
+sqlite3.register_converter("UUID", convert_uuid_out)
+sqlite3.register_converter("Date", convert_date_out)
+sqlite3.register_converter("Time", convert_time_out)
+sqlite3.register_converter("Seconds", convert_seconds_out)
+sqlite3.register_converter("Boolean", convert_boolean_out)
+sqlite3.register_converter("Timestamp", convert_timestamp_out)
+sqlite3.register_converter("Timestamptz", convert_timestamptz_out)
+sqlite3.register_converter("Array", convert_array_out)
+sqlite3.register_converter("M2M", convert_M2M_out)
+
+sqlite3.register_adapter(Decimal, convert_numeric_in)
+sqlite3.register_adapter(uuid.UUID, convert_uuid_in)
+sqlite3.register_adapter(datetime.time, convert_time_in)
+sqlite3.register_adapter(datetime.date, convert_date_in)
+sqlite3.register_adapter(datetime.datetime, convert_datetime_in)
+sqlite3.register_adapter(datetime.timedelta, convert_timedelta_in)
+sqlite3.register_adapter(list, convert_array_in)
+```
+
+- AsyncBatch (asynchronous batch iterator)
+  - Purpose: iterate over large query results in chunks without loading all rows into memory.
+  - Key features:
+    - Maintains an asynchronous cursor
+    - next() fetches a batch via fetchmany and processes results
+    - Supports async iteration via __aiter__ and __anext__
+    - Can be used as an async context manager to ensure resources are released
+  - Important behavior:
+    - __aenter__ compiles the first QueryString from the provided Query
+    - __aexit__ closes the cursor and the connection
+    - Each iteration yields a list of result dictionaries (a batch)
+
+Code excerpt (class outline):
+```python
+@dataclass
+class AsyncBatch(Batch):
+
+    connection: Connection
+    query: Query
+    batch_size: int
+
+    _cursor: t.Optional[Cursor] = None
+
+    @property
+    def cursor(self) -> Cursor:
+        if not self._cursor:
+            raise ValueError("_cursor not set")
+        return self._cursor
+
+    async def next(self) -> t.List[t.Dict]:
+        data = await self.cursor.fetchmany(self.batch_size)
+        return await self.query._process_results(data)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        response = await self.next()
+        if response == []:
+            raise StopAsyncIteration()
+        return response
+
+    async def __aenter__(self):
+        querystring = self.query.querystrings[0]
+        template, template_args = querystring.compile_string()
+        self._cursor = await self.connection.execute(template, *template_args)
+        return self
+
+    async def __aexit__(self, exception_type, exception, traceback):
+        await self._cursor.close()
+        await self.connection.close()
+        return exception is not None
+```
+
+- LazyLoader for aiosqlite
+  - The module uses a LazyLoader to import aiosqlite only when async functionality is used.
+
+- TransactionType (enum)
+  - A small placeholder enumeration for transaction types, included for completeness:
+    - Represents potential SQLite transaction categories (currently defined but not actively used in the snippet)
+
+## Usage
+
+- Typical async streaming pattern
+  - Build a Query using your piccolo models
+  - Acquire an async SQLite connection (e.g., via aiosqlite)
+  - Iterate over results in batches for memory efficiency
+
+Example:
+```python
+import aiosqlite
+from your_project.models import User  # examplePiccolo model
+from using_sqlite_and_asyncio_effectively import AsyncBatch
+
+async def stream_users():
+    async with aiosqlite.connect("db.sqlite3") as conn:
+        query = User.select()  # construct your piccolo query
+        async with AsyncBatch(connection=conn, query=query, batch_size=1000) as batcher:
+            async for batch in batcher:
+                for row in batch:
+                    print(row)  # row is a dict representing a record
+```
+
+- Adapters and converters in practice
+  - When you write inbound data (e.g., Decimal, UUID, dates, times, arrays), the adapters convert Python values into SQLite-friendly representations.
+  - When you read data back, the converters turn bytes from SQLite into Python types (Decimal, UUID, date/time, etc.), ensuring consistency with Postgres-like behavior.
+
+## Details
+
+- Why adapters and converters?
+  - SQLite stores data in a flexible, typeless manner. Aligning its behavior with Postgres reduces surprises when porting logic between databases and ensures more natural Python types are used in your application.
+
+- Data type handling highlights
+  - Decimal values stored as Numeric come back as Decimal on outbound (via convert_numeric_out) and accept Decimal input (via convert_numeric_in).
+  - UUIDs are stored as strings and converted back to uuid.UUID on read, when configured.
+  - Dates and times are serialized to ISO formats and parsed back into Python datetime/date/time objects.
+  - Timestamps and timestamptz are handled with timezone awareness kept consistent (UTC for timestamptz).
+  - Arrays are serialized to JSON for storage and deserialized back to Python lists on read.
+
+- Async iteration semantics
+  - The AsyncBatch yields batches as lists of dictionaries.
+  - Each iteration returns a batch until there are no more results, at which point StopAsyncIteration is raised.
+
+- Resource management
+  - The AsyncBatch context manager ensures the underlying cursor and connection are closed when exiting the block. Exceptions are propagated to the caller.
+
+- Integration tip
+  - Use the LazyLoader for aiosqlite to avoid importing async dependencies in code paths that don’t require async DB access.
+
+This module provides a practical, asyncio-friendly approach to working with SQLite, with thoughtful type handling to keep your data consistent with other backends and an efficient batched retrieval mechanism for large datasets.

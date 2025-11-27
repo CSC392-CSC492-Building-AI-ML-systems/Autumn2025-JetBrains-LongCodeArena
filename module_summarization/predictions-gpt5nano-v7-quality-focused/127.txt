@@ -1,0 +1,135 @@
+Convolution module built-in kernels
+====================================
+
+This document describes the built-in kernel objects used by the convolution machinery in the Convolution module. It covers the Kernel base, 1D and 2D kernels, how to create and use them, and relevant internal helpers that affect performance and behavior.
+
+Overview
+--------
+
+The convolution system exposes lightweight, array-backed kernels that represent finite impulse responses used by the Convolution model. The core kernel classes are:
+
+- Kernel: base container for kernel weights (multidimensional). It exposes the underlying array via the .array attribute.
+- Kernel1D: concrete 1D kernel, backed by a 1D NumPy array.
+- Kernel2D: concrete 2D kernel, backed by a 2D NumPy array.
+
+Kernels are used with the Convolution model to apply filtering to data. A kernel is created from a Python list or NumPy array and then passed to Convolution to perform the operation.
+
+Public kernel types
+-------------------
+
+- Kernel
+  - General-purpose container for kernel data.
+  - Access the weights via the .array attribute.
+  - Suitable when you want to build custom, arbitrary-shaped kernels.
+
+- Kernel1D
+  - Represents a 1D kernel (shape: (N,)).
+  - Used with 1D data or as a column/row filter in higher-dimensional operations.
+
+- Kernel2D
+  - Represents a 2D kernel (shape: (M, N)).
+  - Used for 2D image-like data.
+
+Creating kernels
+----------------
+
+Kernels are created from Python lists or NumPy arrays and can be used directly with Convolution.
+
+Examples
+--------
+
+- 1D kernel
+
+  from astropy.modeling.convolution import Kernel1D, Convolution
+
+  k1d = Kernel1D([1, 2, 1])
+  conv1d = Convolution(k1d)
+
+  # Apply to a 1D array
+  data1d = np.arange(10)
+  result1d = conv1d(data1d)
+
+- 2D kernel
+
+  from astropy.modeling.convolution import Kernel2D, Convolution
+
+  k2d = Kernel2D([[0, 1, 0], [1, 4, 1], [0, 1, 0]])
+  conv2d = Convolution(k2d)
+
+  # Apply to a 2D array
+  data2d = np.zeros((10, 10))
+  data2d[5, 5] = 1
+  result2d = conv2d(data2d)
+
+FFT-friendly sizes and performance
+----------------------------------
+
+Convolution uses FFT-based methods for large inputs. To maximize performance, it pads inputs to optimal sizes before performing the FFT.
+
+- If SciPy is available, the optimal padded lengths are computed via scipy.fft.next_fast_len.
+- If SciPy is not available, an internal lookup table is used to choose padding sizes. The function responsible for this is _next_fast_lengths(shape).
+
+Internal helper for size optimization
+------------------------------------
+
+- _next_fast_lengths(shape)
+  - Returns an array of padded lengths that are optimized for fast FFTs.
+  - Tries to use scipy.fft.next_fast_len when SciPy is installed.
+  - When SciPy is unavailable, uses a predefined list of good sizes scaled to the input shape.
+
+Handling of NaN and masks
+-------------------------
+
+Inputs may be masked or contain NaN values. The internal helper _copy_input_if_needed handles these cases to avoid side effects and to ensure correct interpolation and convolution results. In particular:
+
+- If nan_treatment is "fill" or the input is masked, a copy is created and filled as appropriate.
+- Masked input is converted to NaNs for interpolation purposes.
+
+Boundary handling
+-----------------
+
+Convolution supports several boundary handling options that control how values outside the input boundary are treated during convolution:
+
+- None
+- "fill"
+- "wrap"
+- "extend"
+
+These options influence the effective boundary conditions applied during the FFT-based convolution.
+
+Doctest and SciPy requirement
+-----------------------------
+
+Some doctests require SciPy. In particular, doctests for the convolution path that uses FFT (convolve_fft) require SciPy’s scipy.fft package.
+
+Internal constants
+------------------
+
+- BOUNDARY_OPTIONS = [None, "fill", "wrap", "extend"]
+  - Enumerates supported boundary handling modes.
+
+- _good_sizes
+  - A precomputed set of good FFT sizes used when SciPy is not available.
+
+- _good_range
+  - Helper derived from _good_sizes, used in size calculations for non-SciPy paths.
+
+- MAX_NORMALIZATION
+  - A constant used by the internal normalization logic (available to developers; affects how normalization is applied in certain operations).
+
+Notes for developers
+--------------------
+
+- Kernel objects expose their underlying data via the .array attribute. When you pass a Kernel to Convolution, the Convolution model internally uses this array as the kernel weights.
+- The Convolution class leverages a C-accelerated routine (_convolveNd_c) for ND convolutions when available, improving performance on large data.
+- The module is careful to preserve input data integrity when dealing with masked arrays and NaNs, using _copy_input_if_needed to create safe copies when necessary.
+
+Practical tips
+--------------
+
+- For custom filters, create a Kernel1D or Kernel2D from your weight array and feed it to Convolution.
+- When working with large images, rely on the FFT path for speed; ensure SciPy is available to maximize performance.
+- If you need to enforce a boundary condition, pass an appropriate boundary option (e.g., boundary="extend") to the Convolution call, if supported by your usage pattern.
+- Validate shape and dimensionality of your kernel (1D vs 2D) to match your input data.
+
+If you need more advanced examples or a reference of all constructors and methods for Kernel, Kernel1D, and Kernel2D, see the API reference for astropy.modeling.convolution.

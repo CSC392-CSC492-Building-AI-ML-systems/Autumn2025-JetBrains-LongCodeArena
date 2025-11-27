@@ -1,0 +1,189 @@
+# piccolo_apps.rst — Generate documentation for this module
+
+## Overview
+This module defines the core scaffolding for Piccolo apps, including:
+- MigrationModule and PiccoloAppModule as specialized ModuleType placeholders
+- table_finder for dynamically discovering Table subclasses in modules
+- Command and AppConfig for app configuration and command registration
+- AppRegistry to collect and organize multiple Piccolo apps
+
+Key concepts:
+- Tag-based discovery of Table subclasses with include/exclude filters
+- Per-app configuration including migrations path, table registrations, and dependencies
+- Cached resolution of migration dependency AppConfig instances
+
+## Key Components
+
+### MigrationModule
+A specialized ModuleType that represents a migration module for an app.
+
+- Attributes (expectations):
+  - ID: str
+  - VERSION: str
+  - DESCRIPTION: str
+- API:
+  - forwards(): an asynchronous static method that applies migrations
+
+Example (structure only):
+```python
+class MigrationModule(ModuleType):
+    ID: str
+    VERSION: str
+    DESCRIPTION: str
+
+    @staticmethod
+    async def forwards() -> None:
+        pass
+```
+
+### PiccoloAppModule
+A specialized ModuleType that links to an app configuration.
+
+- API:
+  - APP_CONFIG: AppConfig
+
+Example (structure only):
+```python
+class PiccoloAppModule(ModuleType):
+    APP_CONFIG: AppConfig
+```
+
+### table_finder(modules, include_tags=None, exclude_tags=None, exclude_imported=False)
+Discover Table subclasses by importing the specified modules and filtering by tags.
+
+- modules: Sequence[str]
+  Module paths to inspect (e.g. ['blog.tables']). The path should be from the project root.
+- include_tags: Sequence[str]
+  Tags that a Table subclass must have to be included. The special tag '__all__' includes all found subclasses.
+- exclude_tags: Sequence[str]
+  Tags that, if present on a subclass, will exclude it. Takes precedence over include_tags.
+- exclude_imported: bool
+  If True, only Table subclasses defined in the specified module are considered (imports from other modules are ignored).
+
+Usage reminder:
+- A subclass must be a Table and not equal to the base Table class
+- If exclude_imported is True, only local definitions in the target module are used
+- The function returns a list of Table subclasses
+
+Example:
+```python
+tables = table_finder(['blog.tables'], include_tags=['__all__'])
+```
+
+### Command
+A simple data structure to hold a callable and its aliases.
+
+- callable: t.Callable
+- aliases: List[str] (default: [])
+
+Example:
+```python
+@dataclass
+class Command:
+    callable: t.Callable
+    aliases: t.List[str] = field(default_factory=list)
+```
+
+### AppConfig
+Represents the configuration for a single Piccolo app.
+
+- app_name: str
+  The app name (e.g. 'article').
+- migrations_folder_path: str
+  Path to the folder containing the app's migration files.
+- table_classes: List[Type[Table]]
+  Tables registered for auto migrations.
+- migration_dependencies: List[str]
+  Other app module paths that must run migrations before this app.
+- commands: List[Callable | Command]
+  Functions or coroutines registered as CLI commands for this app.
+
+Key behaviors:
+- __post_init__ converts raw command callables into Command instances
+- migrations_folder_path can be a pathlib.Path or str
+- _migration_dependency_app_configs caches resolved AppConfig instances
+- register_table(table_class) appends a Table subclass to table_classes
+- migration_dependency_app_configs resolves and caches AppConfig instances for dependencies
+- get_table_with_name(table_class_name) returns a Table subclass by class name or raises ValueError if not found
+
+Example:
+```python
+config = AppConfig(
+    app_name='article',
+    migrations_folder_path='/path/to/migrations',
+    table_classes=[],
+    migration_dependencies=['piccolo.apps.user.piccolo_conf'],
+    commands=[]
+)
+
+# Register a new table
+class Article(Table):
+    ...
+
+config.register_table(Article)
+
+# Access dependency app configs
+deps = config.migration_dependency_app_configs
+```
+
+### AppRegistry
+Records all Piccolo apps in the project, typically configured in piccolo_conf.py.
+
+- __init__(apps: List[str] = None)
+  Initialize with a list of app module paths (e.g. ['blog.piccolo_app']).
+- Attributes:
+  - apps: List[str]
+  - app_configs: Dict[str, AppConfig] (populated from the apps)
+
+Usage:
+- Collect and manage multiple apps, enabling coordinated migrations and table registrations.
+
+Example:
+```python
+registry = AppRegistry(['blog.piccolo_app', 'shop.piccolo_app'])
+```
+
+## Usage
+
+- Discover tables across modules:
+```python
+from piccolo_apps.rst import table_finder  # path may vary by project
+tables = table_finder(['blog.tables', 'shop.tables'], include_tags=['__all__'])
+```
+
+- Create and register an AppConfig:
+```python
+config = AppConfig(
+    app_name='article',
+    migrations_folder_path='/path/to/article/migrations',
+    table_classes=[],
+    migration_dependencies=['piccolo.apps.user.piccolo_conf'],
+    commands=[]
+)
+```
+
+- Resolve dependency AppConfigs for an app:
+```python
+deps = config.migration_dependency_app_configs
+```
+
+- Register a table with an app:
+```python
+class Article(Table):
+    ...
+
+config.register_table(Article)
+```
+
+- Initialize an AppRegistry with multiple apps:
+```python
+registry = AppRegistry(['blog.piccolo_app', 'article.piccolo_app'])
+```
+
+## Details
+
+- The table_finder is designed to simplify dynamic discovery of Table subclasses by module scanning and tag-based filtering. If include_tags contains '__all__', all discovered subclasses are included unless excluded by exclude_tags.
+- AppConfig.migration_dependency_app_configs caches results to improve efficiency and to facilitate unit testing by allowing mocks to override the cached value.
+- MigrationModule and PiccoloAppModule act as placeholder interfaces for integrating runtime migration logic and app-specific configuration, respectively.
+- AppRegistry centralizes app configuration, enabling Piccolo to orchestrate multi-app migrations and table registrations in a predictable manner.
+

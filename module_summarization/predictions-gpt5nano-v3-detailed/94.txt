@@ -1,0 +1,134 @@
+# scale_schedule.md
+
+Introduction
+------------
+This module provides stateless learning rate schedulers that integrate with Composer’s Time abstraction. Stateless schedulers enable explicit control over scheduling using arbitrary time units, decoupled from PyTorch’s built-in schedulers. They can be used directly as Composer schedulers or converted into PyTorch-compatible schedulers for integration with standard training loops.
+
+Overview
+--------
+- Stateless scheduler concept: A ComposerScheduler is a pure function that, given the current trainer state, returns a learning-rate multiplier alpha to apply to the optimizer’s base learning rate.
+- Time units and SSR: Schedulers can operate on explicit time units (epochs, batches, duration) and support a scale-schedule ratio (SSR) to stretch or compress the schedule across time.
+- Conversion to PyTorch schedulers: The function compile_composer_scheduler converts a stateless ComposerScheduler into a PyTorch-compatible scheduler (e.g., a LambdaLR-like object) that binds to the current State and can be stepped via PyTorch training loops.
+- Available schedulers: The module exposes a family of stateless schedulers (e.g., Step, MultiStep, Constant, Linear, Exponential, CosineAnnealing, Polynomial, and their Warmup variants). These are designed to be used with the Time abstraction and can be stacked multiplicatively.
+
+Core concepts
+-------------
+- ComposerScheduler (Protocol)
+  - Signature: __call__(state: State, ssr: float = 1.0) -> float
+  - Return value: a multiplier alpha to apply to the optimizer’s base learning rate
+  - ssr: scale schedule ratio. The effective multiplier should satisfy alpha_sigma(t) = alpha(t / sigma)
+  - Multiple schedulers can be used together; their effects stack multiplicatively.
+
+- Time conversion helper
+  - _convert_time(time, state, ssr=1.0) -> Time[int]
+  - Accepts a time specification (string or Time[int]/Time[float]) and converts it into an absolute Time with respect to the current State and SSR.
+  - Handles conversions between TimeUnit.DURATION, TimeUnit.EPOCH, and TimeUnit.BATCH.
+  - Important edge cases:
+    - If time.unit is DURATION and state.max_duration.unit is EPOCH, requires state.dataloader_len to convert to BATCHs; otherwise raises RuntimeError.
+    - If time.unit is EPOCH, epochs are converted to batches using state.dataloader_len; requires state.dataloader_len to be available.
+    - SSR scales the resulting time value.
+  - Assertion: state.max_duration must be set when schedulers are invoked.
+
+- Compilation to PyTorch scheduler
+  - compile_composer_scheduler(scheduler: ComposerScheduler, state: State, ssr: float = 1.0) -> PyTorchScheduler
+  - Converts a stateless scheduler into a PyTorch-compatible scheduler object.
+  - The returned object provides a .step() interface similar to PyTorch schedulers and holds a bound reference to the provided State, allowing internal state updates within .step() to be ignored by external users.
+  - Typical usage is to integrate the returned scheduler with a PyTorch optimizer, letting it drive LR updates via PyTorch’s scheduler API.
+
+Usage patterns
+--------------
+1) Simple function-based stateless scheduler (no warmup)
+- Define a scheduler function that inspects the trainer State and returns a multiplier.
+- Option A: Pass the function directly to the Trainer (as a ComposerScheduler).
+- Option B: Convert to a PyTorch scheduler for direct use with PyTorch training loops.
+
+Code example (Option B: convert to PyTorch scheduler)
+```python
+from composer.core import State
+
+# A simple stateless scheduler: keep LR for first 10 epochs, then halve
+def ten_epoch_decay(state: State, ssr: float = 1.0) -> float:
+    return 1.0 if state.timestamp.epoch < 10 else 0.5
+
+# Assuming you have a current trainer state available as `trainer.state`
+py_torch_scheduler = compile_composer_scheduler(ten_epoch_decay, trainer.state, ssr=1.0)
+
+# Use with PyTorch's training loop
+# optimizer = torch.optim.SGD(model.parameters(), lr=base_lr)
+# for epoch in range(num_epochs):
+#     train(...)
+#     py_torch_scheduler.step()
+```
+
+2) Using the scheduler with a Trainer (Composer API)
+- Pass a ComposerScheduler (the function or a callable class implementing __call__) to the Trainer via the schedulers argument.
+- The scheduler will be invoked against the evolving State, with SSR support.
+
+Code example (Composer API)
+```python
+def ten_epoch_decay(state: State) -> float:
+    if state.timestamp.epoch < 10:
+        return 1.0
+    return 0.5
+
+# Trainer accepts ComposerScheduler instances
+trainer = Trainer(
+    model=model,
+    optimizer=optimizer,
+    schedulers=[ten_epoch_decay],  # Stateless function-based scheduler
+    ...
+)
+```
+
+3) Multiple schedulers
+- Multiple schedulers multiply their outputs to form the final alpha.
+- Example: two schedulers s1 and s2 contribute multiplicatively: alpha = s1(state) * s2(state)
+
+4) Time specification and SSR
+- Time can be specified using strings or Time objects; _convert_time handles conversion to a concrete Time value, taking SSR into account.
+- Example usage inside a scheduler (conceptual):
+  - If you want a duration-based schedule that scales with SSR, you can express that using a Time object, and _convert_time will compute the corresponding number of batches or epochs.
+
+Important considerations and edge cases
+---------------------------------------
+- max_duration must be set when schedulers are invoked; otherwise an assertion will fail.
+- Converting epoch-based times to concrete steps requires knowing the dataloader length (state.dataloader_len); if unavailable, a RuntimeError is raised.
+- When using TimeUnit.EPOCH, SSR does not have fine-grained effect unless you convert to batches; _convert_time handles this by converting epochs to batches when necessary.
+- SSR (scale schedule ratio) allows scheduling to be stretched or compressed in time. All schedulers exposed by this module support the ssr parameter, and multiple schedulers multiply their effects.
+- The provided classes (StepScheduler, MultiStepScheduler, ConstantScheduler, LinearScheduler, ExponentialScheduler, CosineAnnealingScheduler, CosineAnnealingWarmRestartsScheduler, PolynomialScheduler, and their Warmup variants) are designed to be stateless and interface with the Time abstraction. They can be used directly or wrapped with compile_composer_scheduler for PyTorch compatibility.
+
+Available schedulers
+--------------------
+- StepScheduler
+- MultiStepScheduler
+- ConstantScheduler
+- LinearScheduler
+- ExponentialScheduler
+- CosineAnnealingScheduler
+- CosineAnnealingWarmRestartsScheduler
+- PolynomialScheduler
+- MultiStepWithWarmupScheduler
+- ConstantWithWarmupScheduler
+- LinearWithWarmupScheduler
+- CosineAnnealingWithWarmupScheduler
+- PolynomialWithWarmupScheduler
+
+Notes
+-----
+- The design intentionally decouples the scheduling logic from PyTorch’s internal schedulers, enabling explicit, time-unit-driven scheduling.
+- Schedulers can be composed; their alpha outputs multiply to produce the final learning rate multiplier.
+- Using compile_composer_scheduler provides a straightforward path to leverage existing stateless schedulers within a PyTorch-based training loop.
+
+Edge cases
+----------
+- If a time request requires knowledge of state.dataloader_len and it is not yet available, a RuntimeError will be raised.
+- If state.max_duration is not set, the time conversion logic cannot proceed; an assertion will fail.
+
+Usage summary
+-------------
+- Use stateless ComposerScheduler implementations for clear, explicit scheduling based on your Time abstraction.
+- Convert to a PyTorch scheduler with compile_composer_scheduler when integrating with PyTorch’s LR scheduling flow.
+- Stack multiple schedulers multiplicatively to achieve composite schedules.
+- Rely on _convert_time to interpret user-provided time specifications under SSR and state constraints.
+
+End of documentation.

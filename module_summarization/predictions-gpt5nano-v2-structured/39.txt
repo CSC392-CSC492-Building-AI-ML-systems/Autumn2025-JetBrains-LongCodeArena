@@ -1,0 +1,190 @@
+Model usage
+=============
+
+This document describes how to define and work with models using the core Model class and its Meta options, as implemented in the file that provides model support (models.rst). It covers defining fields, relationships, query usage, and common patterns for working with models in an asynchronous context.
+
+Overview
+--------
+A model represents a database table and is defined by subclassing the base Model class. Each model declares its fields and optional metadata (Meta) to control table naming, behavior, and constraints. Relationships between models (foreign keys, one-to-one, and many-to-many) are expressed via specialized field types.
+
+Key concepts:
+- Fields map to database columns.
+- Meta controls configuration (table name, app, ordering, indexing, etc.).
+- Relationships enable navigation between related objects.
+- Queries are performed asynchronously via QuerySet and related helpers.
+
+Defining a model
+----------------
+Define a model by subclassing Model and declaring fields as instances of field types provided by the library (e.g., IntField, CharField, TextField, etc.). The primary key is typically declared with pk=True on an integer field, or the ORM may generate a default primary key.
+
+Example
+-------
+```python
+from tortoise.models import Model
+from tortoise import fields
+
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=50, unique=True)
+    is_active = fields.BooleanField(default=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+class BlogPost(Model):
+    id = fields.IntField(pk=True)
+    author = fields.ForeignKeyField('models.User', related_name='blog_posts')
+    title = fields.CharField(max_length=255)
+    content = fields.TextField()
+    created_at = fields.DatetimeField(auto_now_add=True)
+```
+
+Meta options
+------------
+Meta options control how a model behaves at the database level and how queries are formed.
+
+Common Meta attributes:
+- table or db_table: explicit database table name.
+- app: application label (used for organizing models).
+- abstract: if True, the model is an abstract base class (no table created).
+- unique_together: composite unique constraints.
+- indexes: additional indexes on fields.
+- ordering: default ordering for queries.
+
+Example
+-------
+```python
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=50, unique=True)
+
+    class Meta:
+        table = "auth_user"
+        app = "auth"
+        ordering = (("username", Order.ASC),)
+        unique_together = (("username", "created_at"),)
+        indexes = (("username",), ("created_at",))
+```
+
+Notes:
+- Ordering is parsed via a helper that resolves strings such as "-created_at" into proper ordering directives.
+- unique_together and indexes are tuples of field names; complex or multiple constraints are supported as shown.
+
+Relations and navigation
+------------------------
+Models support several types of relationships:
+
+- ForeignKeyField: many-to-one relation to another model.
+- OneToOneField: one-to-one relation.
+- ManyToManyField: many-to-many relation.
+
+Access patterns generally allow both forward and backward traversal:
+- Forward: post.author fetches the related User.
+- Backward: user.blog_posts fetches related BlogPost items (via related_name).
+
+Example
+-------
+```python
+# Foreign key
+class Comment(Model):
+    id = fields.IntField(pk=True)
+    post = fields.ForeignKeyField('models.BlogPost', related_name='comments')
+    author = fields.ForeignKeyField('models.User', related_name='comments')
+    text = fields.TextField()
+
+# Many-to-many
+class Tag(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=30)
+
+class PostTag(Model):
+    post = fields.ForeignKeyField('models.BlogPost', related_name='tags_through')
+    tag = fields.ForeignKeyField('models.Tag', related_name='posts_through')
+# or, if supported directly:
+# posts = fields.ManyToManyField('models.Tag', related_name='posts')
+```
+
+Accessing related objects (examples)
+```python
+# Forward relation
+post = await BlogPost.get(id=1)
+author = await post.author  # User instance
+
+# Backward relation (reverse lookups by related_name)
+user = await User.get(id=2)
+posts = await user.blog_posts all()  # list of BlogPost instances
+
+# Many-to-many (through) relation
+post = await BlogPost.get(id=1)
+tags = await post.tags.all()
+```
+Note: The exact API may vary slightly depending on the version; the general pattern is forward access via the field and backward access via the related_name.
+
+Querying and basic operations
+-----------------------------
+Queries are performed asynchronously using a QuerySet. Common operations include create, get, filter, all, first, update, and delete.
+
+Examples
+--------
+```python
+# Create
+u = await User.create(username='alice')
+
+# Query
+recent_users = await User.filter(is_active=True).order_by('-created_at').limit(10)
+post = await BlogPost.get(id=1)
+
+# Update
+await User.filter(id=2).update(is_active=False)
+
+# Delete
+await post.delete()
+```
+
+Transactions
+------------
+Use the transaction helpers to ensure atomic operations.
+
+Example
+-------
+```python
+from tortoise.transactions import in_transaction
+
+async with in_transaction() as connection:
+    user = await User.create(username='bob')
+    post = await BlogPost.create(author=user, title='Update', content='...')
+    # If an exception occurs, the transaction will be rolled back
+```
+
+Field comments (documentation)
+------------------------------
+Field documentation can be provided via inline comments preceding the field definitions. The system can extract and substitute the model name in multiline comments using a particular syntax (see internal _get_comments helper). This helps generate user-facing documentation for fields.
+
+Errors and validation
+---------------------
+Common exceptions you may encounter:
+- ConfigurationError
+- IncompleteInstanceError
+- IntegrityError
+- OperationalError
+- TransactionManagementError
+
+When modeling relationships and constraints, ensure that:
+- Foreign keys reference valid target models.
+- Unique constraints and indexes align with your queries.
+- Transactions wrap critical multi-step operations.
+
+Best practices
+--------------
+- Use meaningful field names and appropriate field types for data correctness.
+- Define unique constraints and indexes where needed to optimize lookups.
+- Favor explicit table names via Meta.table if you plan a stable database schema.
+- Leverage ordering in Meta to provide sensible default sort orders.
+
+Advanced usage (optional)
+-------------------------
+- Abstract base models for shared fields and logic.
+- Complex unique_together/indexes for multi-column constraints.
+- Custom application-level behavior via signals and hooks (e.g., pre- and post-save).
+
+Conclusion
+----------
+Model definitions in this system provide a clean, asynchronous-friendly API for representing and querying your database schema. By combining well-chosen field types, clear Meta configurations, and robust relation definitions, you can model complex data structures and perform efficient, expressive queries with ease.

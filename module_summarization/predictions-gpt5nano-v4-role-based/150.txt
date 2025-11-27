@@ -1,0 +1,117 @@
+plot_data.md
+
+PlotData: Flexible data containers for plotting in multiple data sources
+
+Overview
+- PlotData is a lightweight helper that makes plotting functions data-agnostic.
+- It lets you provide data from different containers (dicts, pandas DataFrames, or Bokeh ColumnDataSource) and define what to plot via keys.
+- It supports multiple “plot sets” in one configuration, using a simple expansion mechanism when you pass lists of keys.
+
+Supported data sources (data)
+- Single data container
+  - dict
+  - pandas.DataFrame
+  - Bokeh ColumnDataSource (only if Bokeh is installed)
+- A list of data containers (e.g., [dict, DataFrame, CDS]) to represent multiple data sources or plot sets
+- Internal helpers
+  - _is_bokeh_cds(data): detects a ColumnDataSource (when Bokeh is installed)
+  - _copy_bokeh_cds(data): creates a safe copy of a CDS
+  - If Bokeh is not installed, CDS-related features are unavailable
+
+Key concepts
+- data: The input data source(s). Can be a single container or a list of containers.
+- kwargs (plot keys): Keyword arguments that specify which data to plot. Each keyword becomes a field in a per-plot-set record.
+- data_keys: The set of data keys currently registered (the fields of the internal Columns namedtuple).
+
+Plot sets and multi-source support
+- PlotData groups columns into one or more “plot sets.” Each plot set is represented as a namedtuple with fields corresponding to the provided keys (x, y, z, color, size, etc.).
+- If all kwargs values are scalars (not lists), there is a single plot set.
+- If any kwargs value is a list, PlotData expands into multiple plot sets:
+  - num_sets = max(len(val) for val in kwargs.values() if isinstance(val, list))
+  - For each key:
+    - If the value is a list, use value[index] for the set at position index
+    - If the value is a scalar, duplicate it across all sets
+  - If data is a list, its length must match num_sets
+- This mechanism enables plotting multiple series or configurations (e.g., multiple y-columns, multiple color maps, etc.) without manual data copying.
+
+Iteration behavior
+- PlotData is iterable. Each iteration yields a per-set entry (a namedtuple) containing the requested data for that plot set.
+- Typical usage:
+  - You define x='x' and y=['y1', 'y2', 'y3']
+  - Iterating yields entries where entry.x contains the x data and entry.y contains the corresponding y data for each of 'y1', 'y2', 'y3' in turn.
+
+Data keys and access
+- data_keys property returns the list of current data keys (the fields of the internal Columns namedtuple).
+- Access pattern:
+  - For a single set: entry.x, entry.y, entry.z, etc.
+  - For multiple sets: each iteration yields a similarly structured entry with the corresponding values for that set.
+
+Data validation and normalization
+- same_length option (same_length=True) enforces length consistency when the input data is dict-like.
+  - If data is a list of dicts, each dict is normalized to have compatible entries (via _normalize_dict_entries, see note below).
+- strict_data_keys option (strict_data_keys=True) prevents adding new data keys after initialization.
+  - If you attempt to add_data_key with a new key, an error is raised.
+
+Copying data
+- copy_data option (copy_data=True) creates shallow copies of the input data to avoid mutating originals.
+  - For dict-like data and DataFrames, a shallow copy is made.
+  - For ColumnDataSource, a dedicated copy is performed via _copy_bokeh_cds.
+
+use_column_source flag
+- use_column_source controls how data is interpreted with respect to ColumnDataSource.
+- It is available for compatibility with workflows that prefer CDS-like access patterns, though its exact effect depends on the rest of the plotting code (in the provided snippet it is stored but not otherwise acted upon).
+
+Adding data keys after initialization
+- add_data_key(data_key, keys=None) allows extending the data keys after creation.
+  - If strict_data_keys is True, this is not allowed.
+  - If data_key already exists, a ValueError is raised.
+  - The internal Columns namedtuple is extended with the new key.
+  - If keys is provided as a list, it should align with the number of existing plot sets. Each set receives the corresponding value for the new key.
+  - If keys is not provided or is a scalar, the new key is initialized across all sets (behavior implied by typical usage; see code for exact handling in your environment).
+
+Practical examples
+
+1) Simple dict data with a single x and multiple y series
+- Goal: plot y1, y2, y3 against a common x
+- Code:
+  - data = {'x': x, 'y1': y1, 'y2': y2, 'y3': y3}
+  - p = PlotData(data, x='x', y=['y1', 'y2', 'y3'])
+  - for entry in p:
+      print(entry.x)  # x data
+      print(entry.y)  # y1, then y2, then y3
+
+2) DataFrame input
+- DataFrame columns can be referenced by name in kwargs (e.g., x='time', y=['p1', 'p2'])
+- p = PlotData(df, x='time', y=['p1', 'p2'])
+
+3) Multiple plot sets via list-valued keys
+- data = {'x': x, 'y1': y1a, 'y2': y2a, 'y3': y3a}
+- p = PlotData(data, x='x', y=['y1','y2','y3'])  # creates 3 sets
+- If you pass y=['y1','y2','y3'] and x is a scalar or a list with suitable length, you can produce aligned configurations across sets
+
+4) Copying behavior
+- data = {'x': x, 'y': y}
+- p = PlotData(data, x='x', y='y', copy_data=True)
+- Original data remains unchanged after plots that may mutate internal structures
+
+5) Bokeh ColumnDataSource (when Bokeh is installed)
+- If Bokeh is installed, you can pass a CDS (or a list of CDS) as data
+- _copy_bokeh_cds ensures safe copying when requested
+- Use with build pipelines that feed directly into Bokeh plots
+
+6) Enforcing key discipline
+- strict_data_keys=True prevents adding new, undefined keys after initialization
+- Use this to prevent accidental typos or drift in data keys in larger plotting workflows
+
+Notes and caveats
+- The function _normalize_dict_entries is invoked when same_length is requested for dict-like data. This helper ensures that dictionary entries align in length across keys. The exact normalization behavior is defined elsewhere in the codebase.
+- The add_data_key implementation in this snippet is partial. The documented behavior reflects the intended design: extending the key set while optionally initializing per-set values.
+- The use of use_column_source is currently a flag in the class; its practical effect depends on the broader plotting codebase that consumes PlotData.
+
+API surface (summary)
+- Class: PlotData
+  - __init__(data, use_column_source=False, same_length=False, strict_data_keys=False, copy_data=False, **kwargs)
+  - data_keys (property)
+  - add_data_key(data_key, keys=None)
+
+This documentation summarizes how PlotData enables supporting plotting data from multiple sources and configurations in a consistent, iteration-friendly manner. It emphasizes the ability to drive plotting from dictionaries, DataFrames, or CDS data, and to express multiple plot sets in a compact, declarative way.

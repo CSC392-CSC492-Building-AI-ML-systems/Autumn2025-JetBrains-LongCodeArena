@@ -1,0 +1,135 @@
+w_select
+========
+
+Overview
+--------
+
+w_select selects dynamics segments that satisfy a user-supplied predicate
+function. It reads iterations from an input West data file and writes an
+output HDF5 file containing, for each processed iteration, the matching
+segment IDs and their weights.
+
+- By default, only segments matching the predicate are stored.
+- If -a/--include-ancestors is given, ancestors of matched segments are included
+  in the output (where supported by the data and predicate).
+
+Predicate function
+------------------
+
+- The predicate must be callable as predicate(n_iter, iter_group).
+- It must return a sequence (or iterable) of segment IDs that match the predicate in the given iteration.
+- The predicate can be inverted by passing -v/--invert, which flips the selection set.
+
+- The predicate is provided on the command line as MODULE.FUNCTION. The tool loads
+  the object using get_object and requires that it be callable.
+- Example (module mypred.py):
+
+  .. code-block:: python
+
+     def select_even_segments(n_iter, iter_group):
+         # iter_group['seg_index'] contains the segment IDs for this iteration
+         seg_ids = iter_group['seg_index'][:]
+         # return those seg_ids that satisfy a condition
+         return [sid for sid in seg_ids if sid % 2 == 0]
+
+  You can then invoke w_select as:
+  .. code-block:: shell
+
+     w_select -p mypred:select_even_segments -o select.h5
+
+Output format
+-------------
+
+The output file (-o/--output, defaults to "select.h5") stores the following datasets:
+
+  /n_iter [iteration]
+    (Integer) Iteration numbers for each entry in other datasets.
+
+  /n_segs [iteration]
+    (Integer) Number of segment IDs matching the predicate (or inverted
+    predicate, if -v/--invert is specified) in the given iteration.
+
+  /seg_ids [iteration][segment]
+    (Integer) Matching segments in each iteration. For an iteration
+    n_iter, only the first n_segs[n_iter] entries are valid. For example,
+    the full list of matching seg_ids in the first stored iteration is
+    seg_ids[0][:n_segs[0]].
+
+  /weights [iteration][segment]
+    (Floating-point) Weights for each matching segment in /seg_ids.
+
+Notes
+-----
+
+- The tool uses a parallel approach to evaluate the predicate across iterations.
+  Each iteration is processed by a separate task, and results are accumulated
+  into the output datasets.
+- The output datasets for seg_ids and weights are created with initial shape
+  (iter_count, 0) and maxshape (iter_count, None), enabling dynamic growth as
+  matching segments are discovered. They use chunking and compression for efficiency.
+
+Command-line arguments
+----------------------
+
+w_select offers the following options (in addition to common WestPA data options and
+progress reporting):
+
+- -p, --predicate-function MODULE.FUNCTION
+  Path to the predicate function used to select segments. The function must be
+  callable as predicate(n_iter, iter_group) and return a sequence of seg_ids
+  to keep in that iteration.
+
+- -v, --invert
+  Inverts the predicate result (selects segments not matching the predicate).
+
+- -a, --include-ancestors
+  Includes ancestors of matched segments in the output (if supported by the
+  data and predicate).
+
+- -o, --output OUTPUT
+  Output file name. Defaults to "select.h5".
+
+- Progress-related options (provided by the ProgressIndicatorComponent)
+  Allow you to configure progress reporting during long runs.
+
+Usage examples
+--------------
+
+- Basic usage with a predicate function defined in a module:
+
+  .. code-block:: shell
+
+     w_select -p mypred:select_even_segments -o select.h5
+
+- Invert the predicate:
+
+  .. code-block:: shell
+
+     w_select -p mypred:select_even_segments -v -o select.h5
+
+- Include ancestors in the output (if your predicate and data support this):
+
+  .. code-block:: shell
+
+     w_select -p mypred:select_even_segments -a -o select.h5
+
+Implementation notes
+--------------------
+
+- The tool reads from the input West data file using WESTDataReader and processes
+  iterations specified by IterRangeSelection.
+- For each iteration, it calls _find_matching_segments, which reads the iteration
+  group, collects matching segment IDs via the predicate, applies inversion if
+  requested, and returns (n_iter, matchvec) to be written to the output.
+- The predicate function is loaded once and validated to be callable before
+  processing begins.
+- The operation is performed in parallel using a work manager to speed up
+  processing across iterations.
+
+Related concepts
+----------------
+
+- Predicate-based selection provides flexible, user-defined criteria for
+  segment inclusion.
+- The resulting output can be used for focused analyses or downstream
+  processing in WestPA workflows.

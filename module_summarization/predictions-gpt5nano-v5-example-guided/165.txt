@@ -1,0 +1,166 @@
+PyTables File Format
+====================
+
+Overview
+--------
+This document describes the PyTables file format as it relates to indexing of table columns. It documents how Index objects are represented and stored within an HDF5 file, how they relate to their parent Table/Column, and the conventions used to locate and interpret index data on disk.
+
+Key Components
+--------------
+- Index class
+  - Represents the index of a column in a PyTables Table.
+  - Inherits from NotLoggedMixin, Group, and indexesextension.Index.
+  - Stored as an on-disk object with a class identifier _c_classid = 'INDEX'.
+  - Exposes properties to inspect and control index behavior such as kind, filters, and dirty state.
+  - Links to its associated Table and Column via path resolution.
+
+- Path and naming conventions
+  - Indexes are stored in the file with path components where a segment prefixed with _i_ denotes an index.
+  - A helper function extracts the table path and column path from an index path.
+
+- Default settings
+  - default_auto_index controls whether PyTables automatically updates indexes after table modifications.
+  - default_index_filters defines the I/O filters applied to index datasets by default.
+
+- Optimization and limits
+  - A set of optimized search types is defined to accelerate lookups.
+  - A maximum 32-bit integer value (max32) is defined for size-related constraints.
+
+Usage and Examples
+------------------
+Inspecting the index kind
+- The Index.kind property converts the internal index size to a human-friendly label.
+
+Example:
+.. code-block:: python
+
+    # Given an Index instance `idx`
+    idx.kind
+    # -> 'ultralight', 'light', 'medium', or 'full'
+
+Dirty state management
+- An index can be marked as dirty to indicate it is out of sync with the table data.
+- The dirty state is stored as a DIRTY attribute on the index, and updating it interacts with the condition cache.
+
+Example:
+.. code-block:: python
+
+    # Check if an index is dirty
+    idx.dirty
+    # True or False
+
+    # Mark as dirty
+    idx.dirty = True
+
+    # Mark as clean
+    idx.dirty = False
+
+Locating the related table and column
+- The internal helper used to derive the associated table and column from an index path is _table_column_pathname_of_index.
+
+Example:
+.. code-block:: python
+
+    from yourmodule import _table_column_pathname_of_index
+
+    index_path = "mytable/_i_idxtest/colname"
+    table_path, column_path = _table_column_pathname_of_index(index_path)
+    # table_path -> 'mytable/idxtest'
+    # column_path -> 'colname'
+
+    # Access the actual Table and Column objects (via PyTables API)
+    # table = file._get_node(table_path)
+    # column = table.cols._g_col(column_path)
+
+Internal Path Resolution
+------------------------
+- The function _table_column_pathname_of_index(indexpathname) parses the path as follows:
+  - Splits the path by '/' and locates the first element starting with '_i_'.
+  - tablepathname = "<prefix_before_i> + '/' + <index_name_without_prefix>"
+  - colpathname = the remaining path components after the index element
+
+    def _table_column_pathname_of_index(indexpathname):
+        names = indexpathname.split("/")
+        for i, name in enumerate(names):
+            if name.startswith('_i_'):
+                break
+        tablepathname = "/".join(names[:i]) + "/" + name[3:]
+        colpathname = "/".join(names[i + 1:])
+        return (tablepathname, colpathname)
+
+Details
+-------
+Index class and related constants
+- _c_classid = 'INDEX'
+  - Marks the on-disk class identifier for the index node.
+
+- kind property
+  - Maps internal index size (indsize) to human-friendly labels.
+  - Mapping: {1: 'ultralight', 2: 'light', 4: 'medium', 8: 'full'}.
+
+- filters property
+  - Returns the Filters instance describing I/O filters for the index.
+  - Default is defined as:
+    Filters(complevel=1, complib='zlib', shuffle=True, fletcher32=False)
+
+- dirty property
+  - Indicates whether the index is out of sync with the underlying data.
+  - Stored as a DIRTY attribute on the index node.
+  - Setter updates condition cache nails accordingly.
+
+- column and table properties
+  - Provide access to the associated Column and Table objects for the indexed column.
+  - Use path resolution via _table_column_pathname_of_index.
+
+- nblockssuperblock, nslicesblock, nchunkslice, nsuperblocks
+  - Derived from layout parameters such as superblock size, blocksize, and slicesize.
+  - Provide quick access to structural metrics of the index storage.
+
+Defaults and policies
+- default_auto_index = True
+  - Automatically keep indexes up to date after table modifications unless disabled.
+
+- default_index_filters
+  - Filters used by default for index datasets:
+    Filters(complevel=1, complib='zlib', shuffle=True, fletcher32=False)
+
+- opt_search_types
+  - A tuple of types for which optimized search implementations exist:
+    ("int8", "int16", "int32", "int64",
+     "uint8", "uint16", "uint32", "uint64",
+     "float32", "float64")
+
+- max32
+  - The upper limit for uint32 integers: 2**32
+
+Implementation notes
+- The Index class is designed to attach to a single column in a Table and to maintain its own on-disk representation under the table's path with a dedicated index segment.
+- The indexing mechanism supports multiple kinds of indices and provides a path-based API to map an index to its corresponding table and column.
+
+References to source code (highlights)
+- Kind mapping:
+  - return {1: 'ultralight', 2: 'light', 4: 'medium', 8: 'full'}[self.indsize]
+- Dirty state:
+  - self._v_attrs.DIRTY
+  - conditioncache.nail()/conditioncache.unnail()
+- Table/Column resolution:
+  - tablepath, columnpath = _table_column_pathname_of_index(self._v_pathname)
+  - table = self._v_file._get_node(tablepath)
+  - column = table.cols._g_col(columnpath)
+- Index path convention helper:
+  - See _table_column_pathname_of_index(indexpathname) for how tablepath and colpath are derived from an index path containing a segment starting with '_i_'.
+
+```python
+def _table_column_pathname_of_index(indexpathname):
+    names = indexpathname.split("/")
+    for i, name in enumerate(names):
+        if name.startswith('_i_'):
+            break
+    tablepathname = "/".join(names[:i]) + "/" + name[3:]
+    colpathname = "/".join(names[i + 1:])
+    return (tablepathname, colpathname)
+```
+
+Notes
+- This document focuses on the indexing aspect of the PyTables file format as evidenced by the Index class and its associated utilities found in the source.
+- For broader file format details (datasets, groups, attributes, and compression), refer to the PyTables documentation and the rest of the data model in the project.

@@ -1,0 +1,165 @@
+Verification Scheme for FITS Data
+==================================
+
+Overview
+--------
+
+This document describes the verification scheme used to validate FITS data structures
+in the codebase. The scheme provides a uniform mechanism to detect issues, report
+them to the user, optionally fix fixable problems, and control how severe issues are
+reported (warnings vs. exceptions). It is implemented by the _Verify helper and relies
+on a structured error list (_ErrList) to represent nested verification results.
+
+Key ideas
+
+- Verification is organized as a hierarchy of checks. Each top-level issue is represented
+  as a (fixable, message) pair. Sub-issues can be represented as nested _ErrList objects.
+- The verification result is consumed by the public verify(option=...) method, which
+  interprets the results, handles fixing, and controls reporting (ignore, warn, exception).
+- Fixability is determined per issue. Fixable issues can be repaired by providing a fix callback.
+- Reporting semantics are controlled by a combination of options. The scheme supports
+  fixed messages, warnings, or exceptions depending on the chosen option.
+
+Core components
+--------------
+
+- VERIFY_OPTIONS
+  A list of supported options that control reporting and fixing behavior:
+  - ignore, warn, exception, fix, silentfix
+  - fix+ignore, fix+warn, fix+exception
+  - silentfix+ignore, silentfix+warn, silentfix+exception
+
+- _Verify
+  A helper class that encapsulates the verification workflow:
+  - run_option(option="warn", err_text="", fix=None, fix_text="Fixed.", fixable=True)
+    Executes a single verification option. Returns a tuple (fixable, text) indicating
+    whether the issue is fixable and the message to report.
+  - verify(option="warn")
+    Orchestrates the overall verification:
+    - Validates the option against VERIFY_OPTIONS.
+    - Calls self._verify(opt) to obtain an _ErrList of issues.
+    - Splits the option into fixing vs reporting parts if a "+" is present (e.g., "fix+warn").
+    - Applies fix callbacks when requested and aggregates messages.
+    - Emits warnings or raises VerifyError based on the chosen option.
+    - Inserts a header and a note about zero-based indexing in the final report.
+
+- _ErrList
+  A nested list structure used to represent verification results. Each top-level item may be:
+  - A tuple (fixable: bool, message: str)
+  - A nested _ErrList representing a subgroup of related checks
+  The class provides:
+  - __str__ to render messages
+  - iter_lines(filter=None, shift=0) to iterate through messages with appropriate indentation
+    - Each yielded line is a tuple: (fixable, indented_message)
+    - Nested levels are printed with headers like "Header N:" to denote hierarchy
+  The unit attribute is used to label headers in nested sections.
+
+Usage pattern for implementing verification for FITS data
+---------------------------------------------------------
+
+- Implement a _verify(self, option) method on your FITS-related class (or mixin) that
+  returns an _ErrList describing all verification issues for that object.
+- Populate the _ErrList with a mixture of:
+  - Top-level messages as (True, "Descriptive message about the issue")
+  - Nested _ErrList objects for grouped checks (e.g., header fields, data arrays)
+- Each nested level can contain its own (fixable, message) items or further nested _ErrList objects.
+- Optionally supply fix callbacks in run_option when the issue is fixable.
+
+Example
+
+- A minimal example class that uses the verification scheme:
+
+  .. code-block:: python
+
+     from astropy.io.fits.verification import _Verify, _ErrList
+
+     class SimpleHDUStructure(_Verify):
+         def __init__(self, header, data=None):
+             self.header = header
+             self.data = data
+
+         def _verify(self, opt):
+             errs = _ErrList(unit="Header")
+             # Top-level checks
+             if "SIMPLE" not in self.header:
+                 errs.append((True, "Missing SIMPLE keyword in header"))
+             if self.header.get("SIMPLE") and self.header.get("BITPIX", None) is None:
+                 errs.append((True, "BITPIX keyword missing when SIMPLE is True"))
+
+             # Nested checks (example grouped under "Data" unit)
+             data_errs = _ErrList(unit="Data")
+             if self.data is not None and hasattr(self.data, "shape"):
+                 if getattr(self.data, "ndim", 0) == 0:
+                     data_errs.append((True, "Data has zero dimensions"))
+                 # add more data-related checks as needed
+             if len(data_errs) > 0:
+                 errs.append(data_errs)
+
+             return errs
+
+  - Usage:
+
+  .. code-block:: python
+
+     header = {"SIMPLE": True, "BITPIX": 8, "NAXIS": 0}
+     hdu = SimpleHDUStructure(header)
+     opt = "warn"  # or "fix", "fix+warn", "silentfix", etc.
+     hdu.verify(option=opt)
+
+  - Expected behavior:
+    - If issues exist, the verification will either warn or raise VerifyError depending on the option.
+    - If fixable issues are present and the option includes a fix component (e.g., "fix"),
+      the provided fix callbacks (if any) will be invoked and messages will be updated accordingly.
+
+Reporting and effects
+---------------------
+
+- ignore
+  Do not perform verification; no output and no exceptions.
+
+- warn
+  Emit VerifyWarning instances for each reported issue. No exception is raised.
+
+- exception
+  Raise a VerifyError for the aggregated verification report.
+
+- fix
+  Attempt to fix fixable issues. If unfixable issues exist, behavior follows the report option
+  (warnings or exceptions) depending on the remainder of the option string.
+
+- silentfix
+  Like fix, but do not emit any messages about fixable issues. Non-fixable issues are handled
+  according to the reporting sub-option (ignore/warn/exception).
+
+- Combinations
+  You can combine fixing with reporting, for example:
+  - "fix+warn": fixable issues are fixed and reported as warnings; unfixable issues are warned.
+  - "silentfix+exception": fixable issues are fixed silently; unfixable issues raise an exception.
+
+Notes and best practices
+------------------------
+
+- The verification results are expressed as a nested structure. When writing _verify,
+  think in terms of groups (headers, data, extensions) and subgroups to produce
+  readable, indented reports.
+- The message text should be explicit and actionable, indicating what is wrong and, if possible,
+  how to fix it or where to look.
+- The note about zero-based indexing is appended to the final report to help users map
+  to code-level indexing in FITS structures.
+
+Reference
+---------
+
+- VERIFY_OPTIONS: list of supported verification modes.
+- _Verify.run_option: execute a single check with a given option and optional fix callback.
+- _Verify.verify: orchestrates verification, reporting, and optional fixing.
+- _ErrList: nested error list structure used to describe verification results.
+
+See also
+---------
+
+- See the project’s general verification guidance for FITS in the documented ASTROPY
+  verification reference (See :ref:`astropy:verify` for more info).
+
+This scheme offers a uniform, extensible way to verify FITS data structures, with flexible
+control over how issues are reported and whether fixable problems can be automatically repaired.

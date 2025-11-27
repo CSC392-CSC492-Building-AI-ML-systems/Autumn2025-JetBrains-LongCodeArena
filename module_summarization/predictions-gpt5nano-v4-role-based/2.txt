@@ -1,0 +1,164 @@
+Encoding media
+==============
+
+Overview
+--------
+
+Encoding media refers to the server-side process of converting media assets into desired formats, resolutions or codecs. In the ftrack API, encoding is initiated by a client through authenticated REST requests to the encoding service exposed by the server. The client then receives a representation of an encoding job and can monitor its progress either by polling or via events (if the embedded event hub is connected).
+
+Key concepts
+------------
+
+- Encoding Job: a unit of work submitted to the server to encode a specific media asset.
+- Media Asset: a media item stored in ftrack that is subject to encoding (source format, resolution, etc.).
+- Status lifecycle: typically queued -> running -> finished or failed.
+- Authentication: requests to the encoding service must include ftrack authentication headers:
+  - ftrack-api-key
+  - ftrack-user
+- Event-driven updates (optional): when the event hub is connected, encoding status updates may be delivered as events.
+
+Prerequisites and environment
+-----------------------------
+
+- A functioning ftrack server URL (server_url).
+- Valid credentials:
+  - api_key
+  - api_user
+  These can be supplied directly or sourced from environment variables:
+  - FTRACK_SERVER for server_url
+  - FTRACK_API_KEY (or FTRACK_APIKEY for backwards compatibility)
+  - FTRACK_API_USER
+- Optional: enable the embedded event hub (auto_connect_event_hub) to receive encoding status events in real time.
+- Optional: caching and plugin infrastructure as used by the ftrack API session (for advanced usage).
+
+Authentication mechanism
+------------------------
+
+- The client attaches credentials to requests via the SessionAuthentication helper.
+- Headers added to every request:
+  - ftrack-api-key: <api_key>
+  - ftrack-user: <api_user>
+
+This mechanism ensures that encoding endpoints are invoked in the context of the authenticated user.
+
+REST API for encoding (illustrative)
+------------------------------------
+
+The encoding service is typically exposed as REST endpoints on the ftrack server. A common interaction pattern is:
+
+- POST /encode/media
+  - Purpose: create a new encoding job for a given media asset.
+  - Required payload (example):
+    {
+      "media_id": "MEDIA-12345",
+      "format": "mp4",
+      "resolution": "1920x1080",
+      "bitrate": 5000
+    }
+  - Response (example):
+    {
+      "job_id": "ENCODE-98765",
+      "status": "queued"
+    }
+
+- GET /encode/media/{job_id}
+  - Purpose: poll the status of a specific encoding job.
+  - Response (example):
+    {
+      "job_id": "ENCODE-98765",
+      "status": "running",
+      "progress": 42
+    }
+
+- GET /encode/media/{job_id}/result
+  - Purpose: retrieve results once encoding is finished.
+  - Response (example):
+    {
+      "job_id": "ENCODE-98765",
+      "status": "finished",
+      "output": {
+        "uri": "s3://bucket/path/file.mp4",
+        "size": 104857600
+      }
+    }
+
+Notes:
+- The exact endpoint paths and payloads may vary by server configuration. The above illustrates typical patterns aligned with the client authentication approach used by ftrack API.
+- All requests require authentication headers provided by SessionAuthentication.
+
+Python usage (example)
+----------------------
+
+The following demonstrates how to initiate encoding requests using the same session infrastructure that powers encode_media functionality in the library.
+
+- Create a session (credentials can come from arguments or environment variables as shown in the code base):
+  - server_url, api_key, api_user
+
+- Build an authenticated request to the encoding endpoint using the requests library and SessionAuthentication:
+
+  - Example (conceptual):
+
+    import requests
+    from ftrack_api.encode_media import SessionAuthentication  # if exposed similarly
+
+    # credentials (from arguments or environment)
+    api_key = "your_api_key"
+    api_user = "your_username"
+
+    # server URL (as configured in the session or environment)
+    server_url = "https://ftrack.example.com"
+
+    auth = SessionAuthentication(api_key, api_user)
+    url = server_url.rstrip('/') + "/encode/media"
+
+    payload = {
+        "media_id": "MEDIA-12345",
+        "format": "mp4",
+        "resolution": "1920x1080",
+        "bitrate": 5000
+    }
+
+    response = requests.post(url, json=payload, auth=auth)
+    # handle response: parse job_id, status, etc.
+
+- Polling example (simplified):
+    job_id = response.json().get("job_id")
+    status_url = server_url.rstrip('/') + f"/encode/media/{job_id}"
+    while True:
+        r = requests.get(status_url, auth=auth)
+        data = r.json()
+        if data.get("status") in ("finished", "failed"):
+            break
+        time.sleep(5)
+
+Operational considerations
+--------------------------
+
+- Asynchronous nature: encoding is typically an asynchronous operation on the server. Use polling or event-based updates to track progress.
+- Error handling: handle HTTP errors (unauthorized, bad request, server errors) and encoding-specific failures returned by the server.
+- Performance: large or many concurrent encodings should be managed by server-side resources; clients should rely on status updates rather than attempting to block on long-running requests.
+
+Best practices
+--------------
+
+- Prefer enabling the event hub (auto_connect_event_hub) if your workflow benefits from real-time status updates.
+- Reuse the existing SessionAuthentication mechanism to ensure consistent authentication across all encoding requests.
+- Do not rely on client-side retries for long-running encodes; implement robust backoff and error handling in your integration.
+
+Reference to server-side integration
+------------------------------------
+
+Encoding is performed by the server, orchestrated through the same session-based authentication and REST conventions used throughout the ftrack API. The client-side session class provides:
+- Secure credential handling via SessionAuthentication
+- Consistent server discovery through server_url
+- Optional event-driven status updates when the event hub is connected
+- Configurable environment-variable defaults for server and credentials
+
+Appendix: environment variables used by the session
+---------------------------------------------------
+
+- FTRACK_SERVER: default server URL if server_url is not provided.
+- FTRACK_API_KEY or FTRACK_APIKEY: API key for authentication.
+- FTRACK_API_USER: username associated with the API key.
+
+For further details, refer to the encoding-related usage within the broader ftrack API session implementation and the standard REST endpoints your server exposes for media encoding.

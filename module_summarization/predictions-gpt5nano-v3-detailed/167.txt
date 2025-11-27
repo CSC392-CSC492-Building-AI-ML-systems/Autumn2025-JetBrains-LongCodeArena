@@ -1,0 +1,144 @@
+Library Conventions
+===================
+
+This document describes the conventions and design choices used by the library for time-domain discretization utilities and optimization-based control components. It covers the dtime module (time discretization between continuous and discrete representations) and the optimal module (structure for optimization-based controllers), including key APIs, parameters, return values, and usage considerations.
+
+Overview
+--------
+
+- The library provides utilities to convert continuous-time LTI systems to discrete-time representations and to structure optimization-based control problems.
+- Public APIs are documented with numpy-style docstrings and follow consistent parameter naming, input validation, and return semantics.
+- Modules rely on well-defined LTI representations (e.g., StateSpace, TransferFunction) and integrate with common numerical routines (SciPy, NumPy).
+
+Time Discretization Utilities (dtime.py)
+----------------------------------------
+
+Purpose
+- Provide simple, well-documented methods to discretize continuous-time systems via sampling. The focus is on returning an equivalent discrete-time system with the specified sampling period.
+
+Key Functions
+- sample_system(sysc, Ts, method='zoh', alpha=None, prewarp_frequency=None)
+  - Purpose: Convert a continuous-time system to a discrete-time system by sampling.
+  - Parameters
+    - sysc: LTI (StateSpace or TransferFunction) in continuous time to convert.
+    - Ts: positive float, sampling period.
+    - method: string selecting the discretization method (e.g., 'zoh', 'bilinear', 'gbt', etc.). Default is 'zoh'.
+    - alpha: float in [0, 1], generalized bilinear transformation weighting (used only with method='gbt').
+    - prewarp_frequency: non-negative float, frequency for prewarping (used with method='bilinear').
+  - Returns: sysd, a discrete-time LTI system of the same class as the input (StateSpace or TransferFunction), with sampling rate Ts.
+  - Notes:
+    - Validates that the input is a continuous-time system.
+    - Delegates the actual work to the system’s own sample method (sysc.sample).
+    - See the corresponding StateSpace.sample and TransferFunction.sample implementations for details.
+  - Example:
+    ```python
+    from control import TransferFunction
+    sysc = TransferFunction([1], [1, 2, 1])
+    sysd = sample_system(sysc, 1.0, method='bilinear')
+    ```
+- c2d(sysc, Ts, method='zoh', prewarp_frequency=None)
+  - Purpose: Convenience wrapper to discretize a continuous-time system by sampling.
+  - Parameters
+    - sysc: continuous-time LTI (StateSpace or TransferFunction).
+    - Ts: positive float, sampling period.
+    - method: discretization method (default 'zoh').
+    - prewarp_frequency: non-negative float, prewarping frequency for bilinear method.
+  - Returns: sysd, a discrete-time LTI of the same class as sysc.
+  - Notes:
+    - Internally calls sample_system with the provided arguments.
+  - Example:
+    ```python
+    from control import TransferFunction
+    sysc = TransferFunction([1], [1, 2, 1])
+    sysd = c2d(sysc, 1.0, method='bilinear')
+    ```
+
+Design and Behavior Notes
+- Input validation: The module ensures the input system is continuous-time before discretization.
+- Interoperability: The discretized object preserves the input/output characteristics and remains in a consistent class (StateSpace or TransferFunction).
+- Documentation alignment: Parameters and returns are described to align with the rest of the library’s docstring conventions.
+
+Optimal Control Conventions (optimal.py)
+----------------------------------------
+
+Purpose
+- Provide scaffolding for optimization-based controllers for nonlinear systems with state and input constraints.
+- Define structures to express finite-horizon optimal control problems in a way compatible with SciPy optimization interfaces.
+
+Key Components
+- OptimalControlProblem
+  - Description: Encapsulates all information required to specify an optimal control problem, including system dynamics, cost function, and trajectory constraints.
+  - Parameters (in constructor)
+    - sys: InputOutputSystem (the I/O system being controlled).
+    - timepts: 1D array-like, sequence of time points at which the optimal input should be computed.
+    - integral_cost: callable, function that returns the instantaneous (or accumulated) cost given the current state x and input u. Called as integral_cost(x, u).
+    - trajectory_constraints: list of tuples (optional). Each element specifies a constraint that must hold at each time step. Elements are tuples where the first item is a SciPy constraint class (LinearConstraint or NonlinearConstraint) and the remaining items are arguments to those constraint functions.
+  - Returns/behaviors:
+    - Encapsulates problem data for use by optimization routines (minimization over input trajectories, possibly with differential constraints).
+    - Designed to map to SciPy’s minimize-like interfaces and to integrate with the library’s timing and response utilities.
+  - Notes:
+    - The class is intended to be the central structure describing the problem; actual optimization solvers are invoked via helper functions (e.g., find_optimal_input) that interpret this description.
+- _optimal_defaults
+  - Purpose: Centralized default parameter values for optimization routines within the module.
+  - Keys and intended usage:
+    - 'optimal.minimize_method': default method for SciPy minimize (e.g., 'SLSQP', 'Nelder-Mead', etc.). None indicates global defaults may be used.
+    - 'optimal.minimize_options': default options dict passed to the minimize function.
+    - 'optimal.minimize_kwargs': additional keyword arguments for the minimize call.
+    - 'optimal.solve_ivp_method': default method for solving any IVP subproblems (if present).
+    - 'optimal.solve_ivp_options': options for the IVP solver.
+  - Usage note: Users can override these defaults via configuration mechanisms provided by the library (e.g., a global config or per-call overrides).
+
+Usage Considerations and Edge Cases
+- Input validation: Users should ensure that Ts, time grid, and constraints are consistent with the system's dynamics and the chosen solver.
+- Method availability: The discretization method must be supported by the underlying system’s discretization capabilities; invalid methods should raise clear errors at invocation time.
+- Edge cases for alpha and prewarp_frequency: These parameters are method-specific and only meaningful for certain discretization schemes (e.g., gbT, bilinear). Awaiting proper method handling will provide informative messages when misused.
+- Integration with other modules: The time-domain discretization utilities are designed to work with common LTI representations (StateSpace, TransferFunction) and with the library’s TimeResponseData infrastructure.
+
+Usage Examples
+------------
+
+Discretization example
+```python
+from control import TransferFunction
+sysc = TransferFunction([1], [1, 2, 1])  # continuous-time TF
+sysd = sample_system(sysc, Ts=1.0, method='bilinear')
+```
+
+Another discretization variant
+```python
+from control import TransferFunction
+sysc = TransferFunction([2], [1, 3, 2])
+sysd = c2d(sysc, Ts=0.5, method='zoh')
+```
+
+Optimal control scaffolding (illustrative)
+```python
+import numpy as np
+from control import OptimalControlProblem  # hypothetical public API
+# Define system, time grid, cost and constraints
+def integral_cost(x, u):
+    return x.T @ Q @ x + u.T @ R @ u
+
+timepts = np.linspace(0, 10, 50)
+
+prob = OptimalControlProblem(
+    sys=SomeI/O System,
+    timepts=timepts,
+    integral_cost=integral_cost,
+    trajectory_constraints=[]
+)
+
+# The actual solve would call a helper (e.g., find_optimal_input(prob))
+```
+
+Notes on Documentation Style and Conventions
+- Functions and classes are documented with numpy-style docstrings indicating:
+  - Purpose and relationship to related APIs
+  - Detailed parameter descriptions and types
+  - Return values and data types
+  - Side effects and edge cases
+  - Examples demonstrating typical usage
+- Public API surfaces are exposed via __all__ in each module and are intended to be stable within minor releases.
+- Code samples use clear, minimal, copy-pasteable examples to illustrate typical usage patterns.
+
+End of Documentation

@@ -1,0 +1,142 @@
+Subarray and Camera Geometry
+===========================
+
+This section documents the SubarrayDescription class and how it relates to working with Cherenkov camera data at the subarray level. It focuses on how to organize, index, and align images or data cubes from multiple cameras (telescope cameras) that belong to a common subarray, which is essential when combining per-telescope images into array-level analyses or visualizations.
+
+Overview
+--------
+
+- Purpose: Represent a group of telescopes (a subarray) along with their fixed ground positions and per-telescope descriptions. This structure enables consistent indexing, coordinate handling, and data alignment when working with multi-telescope camera data.
+- Core class: SubarrayDescription
+- Key features:
+  - Ground coordinates of all telescopes in the subarray
+  - A mapping from telescope IDs to TelescopeDescription objects
+  - Utilities to map telescope IDs to a compact index space suitable for stacking per-telescope data
+  - Helpers to print information about the subarray and to extract index/mask mappings
+
+What it models for Cherenkov data
+---------------------------------
+
+When working with images or data cubes from Cherenkov cameras across many telescopes, you typically need to:
+
+- Treat the subarray as a single logical entity with a fixed set of telescopes
+- Map from telescope identifiers (tel_id) to a compact index used to assemble multi-telescope data structures (e.g., stacking per-telescope images into a 3D data cube)
+- Access the geometric layout (ground positions) to project camera data into a common coordinate frame or sky map
+- Inspect the composition of the subarray (types of telescopes and counts)
+
+Key APIs and how to use them for images/data cubes
+--------------------------------------------------
+
+SubarrayDescription is built around a few core concepts that are particularly useful when handling per-telescope images or data cubes.
+
+1) Telescopes and positions
+- tel_coords (lazy property): Returns the telescope positions as an Astropy SkyCoord array in the GroundFrame.
+  - Use: Project per-telescope images to a common sky/ground reference, or compute array footprints and baselines.
+- tel_ids (lazy property): An array of telescope IDs in the subarray.
+- tel_descriptions (via self.tels): A mapping from tel_id to TelescopeDescription objects, which describe the camera, optics, and other properties.
+
+2) Indexing and alignment helpers
+- tel_indices (lazy property): Maps each tel_id to a compact index (0 .. n_tels-1). Useful when stacking per-telescope data into a fixed-size array.
+- tel_index_array (lazy property): An expanded array that maps tel_id to index, with -1 for missing/gaps if the tel_ids are not contiguous.
+  - Example: If max tel_id is large but only a few IDs exist, this array helps you locate the per-telescope data in a compact, contiguous index space.
+- tel_ids_to_indices(self, tel_ids): Given a tel_id or a list of tel_ids, return their corresponding compact indices.
+  - Useful for placing per-telescope arrays into a global data structure (e.g., data_cube[<index>, ...]).
+- tel_ids_to_mask(self, tel_ids): Convert a list of telescope IDs to a boolean mask over the full subarray length.
+  - Useful when selecting or filtering data for a subset of telescopes.
+
+3) Subarray information
+- info(printer=print): Print a concise description of the subarray, including per-type telescope counts and ID ranges. Helpful for quick diagnostics when preparing data cubes or visualizations.
+
+Practical patterns for work with images or data cubes
+----------------------------------------------------
+
+A common workflow is to assemble per-telescope images into a single data cube with one axis corresponding to telescope index. SubarrayDescription provides the mapping needed to place each telescope’s image into the correct slice of the cube.
+
+Example: stacking per-telescope images into a data cube
+- Given: a dictionary per_tel_images where keys are tel_id and values are 2D images (H x W).
+- Goal: Create a data_cube of shape (n_tels, H, W) aligned by the compact telescope index.
+
+Pseudo-code:
+
+- n_tels = sub.n_tels
+- H, W = next(iter(per_tel_images.values())).shape
+- data_cube = np.empty((n_tels, H, W), dtype=per_tel_images[0].dtype)
+
+- for tel_id, img in per_tel_images.items():
+    idx = int(sub.tel_ids_to_indices(tel_id))  # convert to plain int
+    data_cube[idx] = img
+
+Notes:
+- tel_ids_to_indices returns an array; cast to int when indexing.
+- If some telescopes are missing from per_tel_images, those slices remain uninitialized and can be set to a default (e.g., zeros or NaNs) as needed.
+
+Example: selecting a subset of telescopes
+- subset_tel_ids = [0, 2]
+- mask = sub.tel_ids_to_mask(subset_tel_ids)
+- To operate on a subset efficiently, use the mask to select the corresponding slices in the data_cube or to extract per-telescope data.
+
+Working with coordinates and projection
+---------------------------------------
+
+- tel_coords provides ground-based positions as a SkyCoord array in the GroundFrame, which can be used to:
+  - Compute baselines and geometry of the array
+  - Project per-telescope images into a common coordinate frame if you implement a projection routine
+  - Convert ground coordinates to other frames (e.g., CameraFrame) for instrument-specific analyses
+
+Integration with Cherenkov camera workflows
+-------------------------------------------
+
+- The SubarrayDescription object integrates with the broader camera and telescope descriptions in ctapipe, enabling consistent handling of camera geometries, focal lengths, and other instrument properties when assembling or interpreting multi-telescope data products.
+- Versioning compatibility: CURRENT_TAB_VERSION and COMPATIBLE_VERSIONS indicate the subarray schema versioning; useful when reading/writing subarray configurations alongside camera data.
+
+Code references (illustrative)
+------------------------------
+
+- Constructing a subarray (example):
+  tel_positions = {
+      0: np.array([0.0, 0.0, 0.0]) * u.m,
+      1: np.array([10.0, 0.0, 0.0]) * u.m,
+      2: np.array([0.0, 20.0, 0.0]) * u.m,
+  }
+
+  tels = {
+      0: TelescopeDescription(name="LST-1", ...),
+      1: TelescopeDescription(name="MST-1", ...),
+      2: TelescopeDescription(name="SST-1", ...),
+  }
+
+  sub = SubarrayDescription("DemoSubarray", tel_positions=tel_positions, tel_descriptions=tels)
+
+- Accessing coordinates:
+  coords = sub.tel_coords
+  print(coords)
+
+- Mapping IDs to indices:
+  idx = int(sub.tel_ids_to_indices(0))
+
+- Building a data cube from per-telescope images:
+  per_tel_images = {0: img0, 1: img1, 2: img2}
+  n_tels = sub.n_tels
+  H, W = img0.shape
+  data_cube = np.empty((n_tels, H, W), dtype=img0.dtype)
+  for tel_id, img in per_tel_images.items():
+      data_cube[int(sub.tel_ids_to_indices(tel_id))] = img
+
+Notes and caveats
+- The tel_index_array provides a compact mapping for building fixed-size arrays, but be aware of gaps (-1 entries) if telescope IDs are not contiguous.
+- The footprint property (used in info output) provides a measure of the ground footprint of the subarray; ensure that the underlying positions are correctly defined when constructing the SubarrayDescription.
+
+Versioning
+----------
+
+- SubarrayDescription is designed to be compatible with version 2.0 of the subarray table schema. See CURRENT_TAB_VERSION and COMPATIBLE_VERSIONS for details.
+
+See also
+---------
+
+- ctapipe.instrument.CameraGeometry, CameraDescription, CameraReadout
+- ctapipe.instrument.TelescopeDescription
+- ctapipe.coordinates.CameraFrame, GroundFrame
+- ctapipe.instrument.subarray.SubarrayDescription.info() for diagnostic output
+
+This documentation focuses on enabling practical work with images or data cubes from Cherenkov cameras by leveraging the SubarrayDescription’s indexing and coordinate utilities to assemble, align, and analyze multi-telescope data.

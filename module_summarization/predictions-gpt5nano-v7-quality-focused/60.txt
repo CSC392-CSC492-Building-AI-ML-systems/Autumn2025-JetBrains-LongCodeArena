@@ -1,0 +1,216 @@
+Collection API
+==============
+
+.. currentmodule:: sqlalchemy.orm.collections
+
+Overview
+--------
+
+The collections package provides the machinery the ORM uses to inform
+the mapper of collection membership changes on a mapped entity. It uses
+runtime instrumentation via decoration, allowing arbitrary types (including
+built-ins) to serve as entity collections without requiring inheritance
+from a base class.
+
+Instrumentation relays membership change events to the currently managing
+CollectionAttributeImpl. The system supports two decorator approaches:
+
+- Generic decorators that map function arguments and return values to events.
+  Example demonstrates mapping arbitrary call signatures to add/remove
+  events.
+- Targeted decorators that wrap appropriate append/remove notifiers around
+  mutation methods present in standard Python interfaces (list, set, dict).
+  These are optimized for performance and sometimes adapt bulk operations
+  (e.g. extend, update) into a sequence of atomic events.
+
+Usage goals
+-----------
+
+- You can instrument your own collection classes at runtime.
+- Built-in types like list are adapted by substituting a trivial instrumented
+  subclass where appropriate.
+- The instrumentation aims to minimize interference with existing interfaces
+  while ensuring ORM mutation events are consistently emitted.
+
+Public API
+----------
+
+The module exports a collection namespace along with several helpers and
+types used by the ORM’s collection instrumentation.
+
+- collection
+- collection_adapter
+- keyfunc_mapping
+- column_keyed_dict
+- attribute_keyed_dict
+- MappedCollection
+- KeyFuncDict
+
+Instrumented namespace: collection
+----------------------------------
+
+The collection namespace provides two groups of decorators:
+
+1) Annotation decorators (for documenting intent on methods; no arguments):
+
+   - appender: Tag a method as the collection appender.
+   - remover: Tag a method as the collection remover.
+   - iterator: Tag a method as the collection iterator.
+   - converter: Tag a method as the collection converter.
+   - internally_instrumented: Mark methods that are instrumented internally.
+
+   The annotation decorators are used without parentheses, e.g.:
+
+   .. code-block:: python
+
+      class MyClass:
+          @collection.appender
+          def append(self, item):
+              ...
+
+          @collection.remover
+          def remove(self, item):
+              ...
+
+2) Recipe decorators (require parens; map to mutation events):
+
+   - adds(...) and related forms map function arguments to “add” events.
+     Example (from the module docstring):
+
+     .. code-block:: python
+
+        class MyClass:
+            @collection.adds(1)
+            def store(self, item):
+                self.data.append(item)
+
+   - removes_return(...) maps removal to the returned value as part of the
+     event flow (e.g., for methods that return the removed item).
+
+Operational notes
+-----------------
+
+Instrumentation flow follows these high-level steps during mapper compilation:
+
+1. If the class is a built-in, substitute a trivial instrumented subclass.
+2. If the class is already instrumented, skip decoration.
+3. Add generic decorators (annotation-style) to the class.
+4. Inspect the collection interface via duck-typing to discover mutation points.
+5. Add targeted decoration to undecorated interface methods (e.g., list-like
+   methods such as append, extend, or __setitem__).
+
+Collection classes in relationship(collection_class=)
+-----------------------------------------------------
+
+Relationship attributes can specify a collection_class either as a type
+or as a function returning an instance. During mapper compilation, the
+collection_class callable runs once to produce a specimen, and the
+type of that specimen is instrumented. Functions returning built-in types
+(e.g. lists) are adapted to yield instrumented instances.
+
+Notes on built-ins and extension methods
+---------------------------------------
+
+When extending a known type like list, additional decorations are usually
+unnecessary because the extension method can delegate to a method already
+instrumented by virtue of the base type. Decorating such methods can lead to
+duplicate events.
+
+The targeted decoration strives to minimize reliance on other methods in the
+underlying collection class, though some read-access methods are required to
+properly instrument write operations. Bulk methods (update, extend, etc.)
+may be reimplemented in terms of atomic appends/removes, so the decorations
+may implement the bulk operation by emitting multiple atomic events instead of
+calling the underlying bulk method.
+
+Internal control and access
+---------------------------
+
+If you want tight coordination of append/remove events within your own
+mutating methods, you can use collection_adapter(self) to retrieve an adapter
+object that gives you explicit control over triggering append and remove events.
+The adapter also provides access to the owning object and the
+CollectionAttributeImpl.
+
+Threads and safety
+------------------
+
+The module uses a mutex to guard instrumentation setup, ensuring thread-safe
+modification of instrumentation state.
+
+Internal types and protocol
+---------------------------
+
+- _AdaptedCollectionProtocol: protocol describing an instrumented collection
+  with attributes for the adapter, appender, remover, iterator, and converter.
+
+- _CollectionFactoryType: a callable returning an instrumented collection instance.
+
+- _CollectionConverterProtocol: protocol for a converter function taking and
+  returning the same collection type.
+
+- MappedCollection, KeyFuncDict: public helpers exposed by the module for
+  working with key-function-based mappings.
+
+Examples
+--------
+
+Simple generic decorator usage (mirrors the docstring example):
+
+.. code-block:: python
+
+   from sqlalchemy.orm.collections import collection
+
+   class MyClass:
+       def __init__(self):
+           self.data = []
+
+       @collection.adds(1)
+       def store(self, item):
+           self.data.append(item)
+
+       @collection.removes_return()
+       def pop(self):
+           return self.data.pop()
+
+Instrumenting a built-in list subclass:
+
+.. code-block:: python
+
+   from sqlalchemy.orm.collections import collection
+
+   class InstrumentedList(list):
+       pass
+
+   # InstrumentedList now emits collection events for mutations
+   class MyList(InstrumentedList):
+       def push(self, item):
+           self.append(item)
+       def pull(self):
+           return self.pop(0)
+
+API reference (summary)
+-----------------------
+
+- collection: namespace for annotation and recipe decorators.
+- collection.appender, collection.remover, collection.iterator, collection.converter,
+  collection.intentionally_instrumented: annotation decorators.
+- collection.adds, collection.removes, collection.removes_return, etc.: generic
+  recipe decorators mapping mutations to ORM events.
+- collection_adapter: access point to the instrumentation adapter on instrumented
+  collections.
+- keyfunc_mapping, column_keyed_dict, attribute_keyed_dict, MappedCollection,
+  KeyFuncDict: helper types and mappings used by mapped collections.
+
+See also
+--------
+
+- sqlalchemy.orm.collections (module-wide behavior and integration with
+  relationship(collection_class=)).
+- sqlalchemy.orm.attributes (CollectionAttributeImpl and related event
+  mechanisms).
+
+Version and license
+-------------------
+
+The module is part of SQLAlchemy and is released under the MIT License.

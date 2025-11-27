@@ -1,0 +1,188 @@
+RandAugment (rand_augment.rst)
+===============================
+
+Overview
+--------
+This module provides an implementation of the RandAugment augmentation
+scheme for image and video data using NVIDIA DALI’s auto augmentation
+framework. RandAugment randomly selects a fixed number of augmentation
+operations and applies them with magnitudes drawn from a predefined
+range. This lightweight and parameterizable approach is designed to be
+easy to tune for datasets with different characteristics.
+
+Key concepts
+- n: number of random augmentation operations to apply to each sample.
+- m: magnitude (strength) for each selected operation, interpreted within
+  a magnitude bin range.
+- num_magnitude_bins: how many bins to split the magnitude spectrum into.
+- monotonic_mag: controls how magnitudes scale across bins for certain
+  operations.
+- shape / max_translate_abs / max_translate_rel: options to tailor the
+  magnitude scale using the input sample size.
+- shape-aware vs. shape-agnostic magnitude: providing shape influences how
+  certain translations and geometric augmentations are parameterized.
+
+Public API
+-----------
+
+rand_augment(data, n, m, …) -> DataNode
+----------------------------------------
+Applies RandAugment to a batch of samples.
+
+Parameters
+- data: DataNode
+  A batch of samples to be processed. Supported samples are images with
+  HWC layout and videos with FHWC layout. Data type should be uint8.
+- n: int
+  Number of randomly sampled augmentation operations to apply to each sample.
+- m: int
+  Magnitude (strength) for each operation. Must be in [0, num_magnitude_bins - 1].
+- num_magnitude_bins: int, optional
+  Number of magnitude bins. Default is 31.
+- shape: DataNode or Tuple[int, int], optional
+  If provided, specifies the height/width used to determine translation magnitudes
+  and other shape-dependent operations. When given, magnitude depends on shape and spans
+  from 0 to max_translate_rel * shape.
+- fill_value: int, optional
+  Padding value used by warp_affine-based operations (translation, shear, rotate).
+  If None, padding uses border value repeated (clamped).
+- interp_type: types.DALIInterpType, optional
+  Interpolation method for warp operations. Supported: INTERP_LINEAR (default) and INTERP_NN.
+- max_translate_abs: int or (int, int), optional
+  Maximal pixel shift for translation when shape is not provided. Can be a single int
+  or a tuple (height, width). Defaults to 100.
+- max_translate_rel: float or (float, float), optional
+  Maximal shift as a fraction of the image shape when shape is provided. Can be a
+  float or a tuple. Defaults to around 0.45 (100/224).
+- seed: int, optional
+  Seed to randomize operation selection and to potentially negate magnitudes.
+- monotonic_mag: bool, optional
+  If True (default), magnitudes increase with bin index for most operations. If False,
+  some color operations may have inverted or different magnitude behavior.
+  See get_rand_augment_non_monotonic_suite for details.
+- excluded: List[str], optional
+  Names of augmentations to exclude from the default suite. If you need custom
+  operations, consider using apply_rand_augment directly.
+
+Returns
+- DataNode: A batch of transformed samples.
+
+Notes
+- rand_augment constructs a suite of potential augmentations via
+  get_rand_augment_suite or get_rand_augment_non_monotonic_suite depending on
+  monotonic_mag, then randomly selects n augmentations and applies them with
+  magnitude m.
+- Excluded augmentations are validated against the available suite; attempting
+  to exclude a non-existent operation raises an error.
+- To apply a custom set of augmentations or to fine-tune behavior, use
+  apply_rand_augment directly.
+
+apply_rand_augment(augmentations, data, n, m, …) -> DataNode
+------------------------------------------------------------
+Internal helper used by rand_augment to apply a specified list of augmentations.
+
+Parameters
+- augmentations: List[_Augmentation]
+  List of augmentation operations (each with a name and behavior) to consider
+  for random selection.
+- data: _DataNode
+  Input batch to transform.
+- n: int
+  Number of augmentations to apply to each sample (selected uniformly from the list).
+- m: int
+  Magnitude index to apply to the selected augmentations (usually in [0, num_magnitude_bins - 1]).
+- num_magnitude_bins: int, optional
+  See rand_augment for meaning. Default is 31.
+- seed: int, optional
+  Seed for reproducibility of the random selection process.
+- fill_value: int, optional
+  Passed through to augmentations that require padding on geometric transforms.
+- interp_type: types.DALIInterpType, optional
+  Interpolation mode for transforms that require it.
+- shape: DataNode or Tuple[int, int], optional
+  Shape used to parameterize magnitude for shape-aware transforms.
+
+Returns
+- DataNode: Transformed batch.
+
+Usage examples
+--------------
+
+Basic usage with default settings
+- Apply RandAugment with 2 operations on a batch of images.
+
+.. code-block:: python
+
+   from nvidia.dali.auto_aug import rand_augment as ra
+   from nvidia.dali import fn
+   from nvidia.dali import types
+
+   # Suppose `images` is a DataNode containing a batch of HWC uint8 images
+   augmented = ra.rand_augment(
+       data=images,
+       n=2,
+       m=10,  # magnitude bin index
+   )
+
+Explicit shape-based magnitudes
+- Provide a specific shape to influence magnitude of translation-based augmentations.
+
+.. code-block:: python
+
+   shape = (224, 224)  # H x W
+   augmented = ra.rand_augment(
+       data=images,
+       n=3,
+       m=15,
+       shape=shape
+   )
+
+Excluding augmentations
+- Exclude a particular augmentation by name (e.g., "Color") from the default suite.
+
+.. code-block:: python
+
+   augmented = ra.rand_augment(
+       data=images,
+       n=2,
+       m=8,
+       excluded=["color"]  # or "Color" depending on naming
+   )
+
+Custom augmentation suite
+- Use apply_rand_augment to apply a custom set of augmentations.
+
+.. code-block:: python
+
+   from nvidia.dali.auto_aug.augmentations import brightness, contrast
+   custom_suite = [brightness(), contrast()]
+   augmented = ra.apply_rand_augment(
+       augmentations=custom_suite,
+       data=images,
+       n=2,
+       m=12,
+       num_magnitude_bins=31,
+       seed=1234,
+       fill_value=128,
+       interp_type=types.INTERP_LINEAR
+   )
+
+Notes for developers
+--------------------
+- The rand_augment function is designed to be a thin wrapper that selects a suitable
+  augmentation suite and delegates the actual augmentation to apply_rand_augment.
+- The function enforces that all selected augmentations have unique names to avoid
+  ambiguity when excluding operations.
+- When shape is provided, the magnitude scaling for relevant transforms adapts to
+  image/frame size; otherwise a fixed absolute magnitude bound is used.
+
+References
+----------
+- RandAugment original paper: https://arxiv.org/abs/1909.13719
+- NVIDIA DALI Auto Augment: NVIDIA/DALI documentation and examples
+
+Versioning and compatibility
+----------------------------
+- Requires NVIDIA DALI and the auto_aug module.
+- API may evolve alongside the DALI auto_aug suite; consult the latest source for
+  updates to augmentation implementations and available operation names.

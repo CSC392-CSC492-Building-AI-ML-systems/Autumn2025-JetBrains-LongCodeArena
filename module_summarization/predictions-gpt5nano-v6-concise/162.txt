@@ -1,0 +1,246 @@
+# Parallel Random Number Generation
+
+This document describes how the parallel random number generation (RNG) facility is implemented and used in the project. It explains the architecture, available algorithms, how to create independent RNG streams for parallel execution, and practical usage patterns with examples.
+
+---
+
+## Overview
+
+- The project provides a parallel RNG framework built around a modular “bit generator” abstraction. Each bit generator implements a fast, independent RNG algorithm.
+- High-level Python API is exposed via Cython extensions, enabling fast generation of random numbers in Python while keeping a clean separation between the PRNG algorithms and the Python-facing API.
+- Supported algorithms (as exposed by the build):
+  - MT19937 (Mersenne Twister)
+  - Philox
+  - PCG64
+  - SFC64
+- The core functionality is exposed through a Python module structure under `numpy/random` (as built by the Meson build in the repository):
+  - `_bounded_integers`, `_common`, `_mt19937`, `_philox`, `_pcg64`, `_sfc64`
+  - `bit_generator` (wrapper module)
+  - `generator` (high-level RNG that uses a bit generator)
+  - `mtrand` (legacy path using distributions and legacy behavior)
+- To support parallel usage, the code emphasizes independence between streams, typically achieved by creating separate bit generators or by spawning child seeds via a seed sequence.
+
+---
+
+## Architecture and Build
+
+The build process composes two main components:
+
+1. A C library implementing the RNG algorithms and distributions
+   - Source examples found under:
+     - `src/distributions/logfactorial.c`
+     - `src/distributions/distributions.c`
+     - `src/distributions/random_mvhg_count.c`
+     - `src/distributions/random_mvhg_marginals.c`
+     - `src/distributions/random_hypergeometric.c`
+   - Exposed as a static library:
+     - `npyrandom` (installed to `np_dir/random/lib`)
+
+2. Cython extensions for Python API
+   - The Cython code bridges the PRNG algorithms to Python:
+     - `_mt19937`, `_philox`, `_pcg64`, `_sfc64` – individual bit generator implementations
+     - `bit_generator` – abstraction/interface for bit generators
+     - `generator` – high-level Random Generator API
+     - `_bounded_integers` and `_common` – common helper pieces and integer handling (including bounded integer generation)
+   - A custom target is used to prepare `_bounded_integers.pxd` (needed by inter-module imports):
+     - `_bounded_integers_pxd` and `_bounded_integers_pyx`
+   - `mtrand` integrates legacy distributions and optional legacy mode via a compile-time flag `-DNP_RANDOM_LEGACY=1`
+
+The build path culminates in a Python package under:
+- `numpy/random` (for Python sources, stubs, tests, and examples)
+- `numpy/random/tests` (test suite)
+- `numpy/random/tests/data` (test data)
+- `numpy/random/_examples/...` (example usage for CFFI, Cython, and Numba)
+
+Note: The code is dual-licensed (NC-like license header in the repository). Please respect the licensing terms when distributing builds.
+
+---
+
+## Algorithms and Streams
+
+The parallel RNG module exposes several algorithms, each with its own characteristics:
+
+- MT19937 (Mersenne Twister)
+  - Very long-period RNG with good statistical properties for general use.
+  - Suitable for many serial streams, but parallel usage requires multiple independent MT19937 instances to avoid correlation.
+
+- Philox
+  - A counter-based RNG designed for parallel workloads.
+  - Excellent for parallel and vectorized contexts because it naturally supports generating independent streams from distinct counters/seed sequences.
+
+- PCG64
+  - A modern, fast, statistically robust RNG with a small code footprint.
+  - PCG family is well-suited for parallel usage via seed/sequence management, and it exposes nice reproducibility properties when combined with a proper seed sequence.
+
+- SFC64 (Small Fast Chaotic 64-bit)
+  - A fast RNG with a good trade-off between speed and statistical quality.
+  - Often used as a fast fallback or in performance-sensitive locations.
+
+- Legacy (mtrand)
+  - Legacy path used to support older code paths that rely on distributions and legacy distributions.
+  - Controlled by a compile-time flag (`NP_RANDOM_LEGACY`).
+
+Parallel usage patterns revolve around creating independent bit generators or distributing seeds across processes/threads to avoid unintended correlations.
+
+---
+
+## API and Usage
+
+The project exposes a set of APIs that map to Python objects representing a bit generator (the PRNG engine) and a high-level generator that consumes a bit generator.
+
+- BitGenerator classes (per algorithm)
+  - MT19937
+  - Philox
+  - PCG64
+  - SFC64
+
+- Generator
+  - A high-level RNG object that wraps a chosen BitGenerator to deliver high-level methods such as integers, random, etc.
+
+- Seed management
+  - Use a SeedSequence to create independent child seeds for parallel streams.
+  - Spawn child seeds to create multiple independent bit generators for parallel work.
+
+Key usage pattern (conceptual; exact import paths depend on how the bindings are exposed in your build):
+
+- Create independent bit generators
+  - MT19937, Philox, PCG64, SFC64 each can be constructed with a seed or a SeedSequence.
+
+- Create high-level generators
+  - Generator(bit_generator)
+
+- Parallel usage with per-thread or per-process streams
+  - Spawn multiple independent seeds, attach each to a dedicated bit generator, and wrap with Generator.
+
+Code examples below illustrate common patterns.
+
+Code example 1: Independent streams for parallel threads (per-thread generators)
+
+```python
+import numpy as np
+# SeedSequence-based spawn to create independent seeds
+base = np.random.SeedSequence(12345)
+child_seeds = base.spawn(4)  # create 4 independent seeds
+
+# Create independent bit generators
+g1 = Generator(np.random.PCG64(child_seeds[0]))
+g2 = Generator(np.random.PCG64(child_seeds[1]))
+g3 = Generator(np.random.PCG64(child_seeds[2]))
+g4 = Generator(np.random.PCG64(child_seeds[3]))
+
+# Example parallel work using per-thread generators
+from concurrent.futures import ThreadPoolExecutor
+
+def worker(gen, n):
+    return gen.integers(low=0, high=100, size=n)
+
+with ThreadPoolExecutor(max_workers=4) as ex:
+    futures = [
+        ex.submit(worker, g1, 10),
+        ex.submit(worker, g2, 10),
+        ex.submit(worker, g3, 10),
+        ex.submit(worker, g4, 10),
+    ]
+    results = [f.result() for f in futures]
+
+print(results)
+```
+
+Code example 2: Spawned child streams using default_rng with SeedSequence
+(Note: default_rng uses a PCG64-like backend in many NumPy builds; you can replace with explicit bit generators.)
+
+```python
+import numpy as np
+
+# Create a master seed and spawn independent child streams
+master = np.random.SeedSequence(987654321)
+children = master.spawn(3)
+
+# Independent bit generators
+g_a = np.random.Generator(np.random.PCG64(children[0]))
+g_b = np.random.Generator(np.random.PCG64(children[1]))
+g_c = np.random.Generator(np.random.PCG64(children[2]))
+
+# Generate in parallel (or in separate processes)
+print("A:", g_a.integers(0, 100, size=5))
+print("B:", g_b.integers(0, 100, size=5))
+print("C:", g_c.integers(0, 100, size=5))
+```
+
+Code example 3: Cross-process parallelism using independent streams
+```python
+# In each process, create an independent Generator from a unique seed
+# Process 1
+import numpy as np
+g1 = np.random.Generator(np.random.PCG64(11111))
+print(g1.integers(0, 2, size=8))
+
+# Process 2
+g2 = np.random.Generator(np.random.PCG64(22222))
+print(g2.integers(0, 2, size=8))
+```
+
+Notes:
+- Always favor independent streams for parallel work. Do not share a single RNG instance across threads without synchronization, as that can create contention and introduce correlations.
+- Seed management via SeedSequence and spawning is a robust pattern to ensure independence between streams.
+
+---
+
+## Parallel RNG Design Considerations
+
+- Independence and reproducibility:
+  - Use separate bit generators or spawned seeds for different parallel tasks.
+  - Seed sequences help reproduce exact streams when needed.
+
+- Algorithm choice:
+  - For parallel workloads, counter-based generators (like Philox) and well-scoped stateful generators (like PCG64) generally offer better parallel scalability and reproducibility than a single large MT19937 stream.
+
+- Performance:
+  - SFC64 and PCG64 tend to be fast with low overhead.
+  - Philox, designed for parallel workloads, can offer excellent throughput on multi-core architectures.
+
+- Thread-safety:
+  - The Python-facing API assumes you create separate bit generators per thread. Do not mutate a shared generator from multiple threads without proper synchronization.
+
+---
+
+## Building and Integration
+
+- The project uses Meson to build:
+  - Compile C sources for distributions and RNG algorithms into a static library: `npyrandom`.
+  - Compile Cython extensions for the Python API, exposing per-algorithm bit generators and the high-level `Generator`.
+  - Install Python sources, tests, and examples to the target directory.
+
+- Package layout (after build):
+  - npyrandom static library
+  - numpy/random (Python/Cython extensions)
+  - numpy/random/tests (test suite)
+  - numpy/random/tests/data (test datasets)
+  - numpy/random/_examples (CFFI, Cython, Numba examples)
+
+- Licensing:
+  - Dual-licensed component with a permissive license (as indicated in the source header). Please comply with the license terms when distributing or using the build.
+
+---
+
+## Best Practices for Developers
+
+- Prefer separate streams for parallel tasks to avoid correlations.
+- Use SeedSequence and spawn to create independent child seeds.
+- Choose the most appropriate algorithm for your workload:
+  - PCG64 or Philox for parallel and high-throughput tasks.
+  - MT19937 if legacy compatibility or certain statistical characteristics are required (understood in a parallel context via separate instances).
+  - SFC64 as a fast alternative when ultimate statistical properties are not critical.
+- When testing parallel RNG behavior, validate independence across streams with simple correlation tests or standard randomness tests.
+
+---
+
+## Additional Resources
+
+- Source locations in the repository:
+  - Core RNG algorithms and distributions: src/distributions/
+  - Algorithm implementations: src/mt19937/, src/philox/, src/pcg64/, src/sfc64/
+  - Python/Cython bindings: numpy/random/
+- Tests and data for RNG behavior: numpy/random/tests, numpy/random/tests/data
+
+If you need a more targeted example (e.g., parallel RNG in NumPy-like environments with a specific backend or a particular algorithm), I can tailor the examples accordingly.

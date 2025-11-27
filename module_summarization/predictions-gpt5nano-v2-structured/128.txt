@@ -1,0 +1,146 @@
+# Miscellaneous features of astropy.io.fits
+
+This section covers small, self-contained helpers used by astropy.io.fits. It highlights the verification framework for validating objects and the NotifierMixin used for internal change notifications. These utilities are primarily intended for internal use but are documented here for completeness.
+
+## Verification framework
+
+The verification framework provides lightweight utilities to verify values within objects, report issues, and optionally fix fixable problems.
+
+### Key components
+
+- `VerifyError`  
+  Exception raised when verification fails in a non-recoverable way.
+
+- `VerifyWarning`  
+  Warning class raised or issued when verifications report non-fatal issues.
+
+- `VERIFY_OPTIONS`  
+  A list of supported verification options. Possible string values include:
+  - `"ignore"`, `"warn"`, `"exception"`, `"fix"`, `"silentfix"`
+  - Combinations such as `"fix+warn"`, `"fix+exception"`, `"silentfix+ignore"`, etc.
+  - This list also includes more complex combinations like `"fix+ignore"`, `"silentfix+warn"`, etc.
+
+- `_Verify`  
+  Internal mixin providing verification utilities:
+  - `run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)`  
+    Execute the verification for a single issue. Returns a tuple `(fixable, text)` describing whether the issue is fixable and the message to report.
+    - If the option is `"warn"` or `"exception"`, the issue is not fixable.
+    - If not fixable, the message is prefixed with an “Unfixable error” notice.
+    - If fixable and a `fix` function is provided, it is executed and the message is augmented with the fix note.
+  - `verify(option="warn")`  
+    Verify all values in the instance according to the given option.
+    - Valid options are one of the values in `VERIFY_OPTIONS`, or combinations using `"fix"`/`"silentfix"` with `"+ignore"`, `"+warn"`, or `"+exception"`.
+    - Splits the option into fix-related and reporting-related parts, e.g. `"fix+warn"`, `"silentfix+ignore"`.
+    - Handles special-casing for empty or unreportable results and formats output accordingly.
+    - Emits warnings via `astropy.utils.exceptions.AstropyUserWarning` (as `VerifyWarning`) or raises `VerifyError` when appropriate.
+    - Includes a note that “Astropy uses zero-based indexing” when reporting lines.
+
+> Note: `_Verify` is an internal utility. It is designed to be subclassed by objects that expose a `_verify` method returning an error structure.
+
+### Error structure
+
+- `_ErrList`  
+  A nested list structure that collects verification messages. It is designed to represent hierarchical verification results.
+  - Each leaf item is typically a tuple of the form `(fixable: bool, message: str)`.
+  - Internal nodes are other `_ErrList` objects, enabling structured, multi-level reporting.
+  - Constructor: `_ErrList(val=(), unit="Element")` where `unit` can be used as a header label for nested levels.
+  - String conversion: `__str__()` yields a textual representation of the messages.
+  - Iteration: `iter_lines(filter=None, shift=0)` yields lines with indentation appropriate to the level, enabling nicely formatted output.
+  - The reporting system inserts a header like `"Verification reported errors:"` and appends a note about zero-based indexing.
+
+### Usage examples
+
+Note: The following examples illustrate typical usage patterns. They rely on internal classes and are intended for demonstration; actual usage in user code may differ.
+
+- Basic verification flow (warnings vs. exceptions):
+```python
+from astropy.io.fits.misc import _Verify, _ErrList
+
+class MyObject(_Verify):
+    def __init__(self, value):
+        self.value = value
+
+    def _verify(self, opt):
+        # Build an error list. In real usage, this would reflect actual checks.
+        # Here we simulate a single fixable issue.
+        return _ErrList([(True, "value must be non-negative")], unit="Element")
+
+obj = MyObject(-1)
+# This will emit a warning for the issue by default
+obj.verify(option="warn")
+# To raise an exception instead:
+# obj.verify(option="exception")
+```
+
+- Fixing a verifiable issue:
+```python
+from astropy.io.fits.misc import _Verify, _ErrList
+
+class MyObject(_Verify):
+    def __init__(self, value):
+        self.value = value
+
+    def _verify(self, opt):
+        # Example: a fixable issue
+        if self.value < 0:
+            return _ErrList([(True, "value must be non-negative")], unit="Element")
+        return _ErrList()
+
+    def fix_value(self):
+        if self.value < 0:
+            self.value = 0
+
+obj = MyObject(-5)
+# Automatically fixable and report the fix
+obj.verify(option="fix+warn")
+```
+
+- Silent fixing (no output) for fixable issues:
+```python
+obj.verify(option="silentfix")
+```
+
+> Note: The message reporting behavior depends on the specific option combination chosen (e.g. `"warn"`, `"exception"`, `"fix+warn"`, `"silentfix+ignore"`, etc.). The documentation stored in the code includes the exact rules for how options are interpreted and how messages are formatted.
+
+## NotifierMixin
+
+The `NotifierMixin` provides a lightweight mechanism for objects to register listeners and notify them of changes. This is intended for internal use within the fits subsystem, enabling decoupled components to respond to changes.
+
+- How it works
+  - Listeners can be registered using the internal `_add_listener` method. Listeners are kept with weak references to avoid memory leaks.
+  - To notify listeners of a change, call `_notify(change_type, *args, **kwargs)`.
+  - When notifying, the framework attempts to call a corresponding method on each listener named `_update_<change_type>` (e.g., `_update_change_type`).
+
+- Example usage
+```python
+from astropy.io.fits.misc import NotifierMixin
+
+class Listener:
+    def _update_value_changed(self, new_value):
+        print("Value changed to", new_value)
+
+class MyNotifier(NotifierMixin):
+    def __init__(self):
+        super().__init__()
+        self.value = 0
+        self._add_listener(Listener())
+
+    def set_value(self, new_value):
+        self.value = new_value
+        self._notify("value_changed", new_value)
+
+notifier = MyNotifier()
+notifier.set_value(42)
+# Output: Value changed to 42
+```
+
+- Notes
+  - This mechanism is designed for internal event handling within astropy.io.fits and similar components.
+  - Listeners must implement a method named `_update_<change_type>` to respond to notifications.
+
+## See also
+
+- The verification system integrates with the project’s warning and error handling mechanisms, emitting `VerifyWarning` by default and raising `VerifyError` when necessary.
+- The error-reporting structure (`_ErrList`) supports hierarchical reporting to reflect nested checks and sub-issues.
+
+If you need more hands-on examples tailored to a particular object or workflow in astropy.io.fits, I can provide a focused snippet.

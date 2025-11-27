@@ -1,0 +1,113 @@
+# FleurXMLModifier
+
+Comprehensive documentation for the FleurXMLModifier class
+
+Overview
+- FleurXMLModifier is a lightweight, robust utility to collect and organize changes to a Fleur input file (inp.xml) without applying them immediately.
+- It delegates actual XML updates to setter functions provided by the Masci-tools XML utilities (xpath setters, schema-dict setters, and NMMPMAT setters).
+- Changes are accumulated as a sequence of tasks (ModifierTask) and can be applied in a single operation via modify_xmlfile (not shown here but part of the class’ typical usage).
+- The class is designed for extensibility: additional setter sets can be incorporated via the _extra_functions mechanism.
+
+Key concepts
+- Task-based modification: Each modification is stored as a ModifierTask(name, args, kwargs). The name maps to a setter function responsible for applying the change.
+- Setter categories:
+  - XPath-based setters (XPATH_SETTERS)
+  - Schema-dict-based setters (SCHEMA_DICT_SETTERS)
+  - NMMPMAT-related setters (NMMPMAT_SETTERS)
+- Extensibility: Extra setter groups can be merged into the default categories at runtime via _extra_functions['xpath'], _extra_functions['schema_dict'], and _extra_functions['nmmpmat'].
+
+Class design and internals
+- Core data structures
+  - ModifierTask: NamedTuple(name, args, kwargs) representing a single modification task.
+  - _tasks: List[ModifierTask] storing all collected tasks.
+- Setter function maps
+  - _xpath_functions: mapping of task names to callables from XPATH_SETTERS
+  - _schema_dict_functions: mapping of task names to callables from SCHEMA_DICT_SETTERS
+  - _nmmpmat_functions: mapping of task names to callables from NMMPMAT_SETTERS
+  - _extra_functions: optional additional function mappings to extend any of the above categories
+  - On first instantiation, __new__ populates instance-level views:
+    - xpath_functions, schema_dict_functions, nmmpmat_functions
+    - These are a combination of the base setters and any extras provided through _extra_functions
+- Task application flow
+  - add_task_list(task_list): resolves a list of (name, kwargs) pairs into concrete setter calls.
+    - Retrieves the current available actions via get_avail_actions().
+    - For each (name, kwargs), calls the corresponding setter function with **kwargs.
+    - Unknown names raise a ValueError with a helpful message.
+  - fromList(task_list, *args, **kwargs) convenience constructor: builds an instance and populates it immediately from a list of tasks.
+- Getter helper
+  - _get_setter_function_and_prefix(name): returns the underlying setter function and a prefix tuple that describes how arguments are substituted when performing the modification.
+    - If the name is in xpath_functions: (func, ('xmltree',))
+    - If in schema_dict_functions: (func, ('xmltree', 'schema_dict'))
+    - If in nmmpmat_functions: (func, ('xmltree', 'nmmplines', 'schema_dict'))
+    - If the function is missing, a ValueError is raised
+- Validation
+  - _validate_signature: deprecated shim that forwards to _validate_arguments; emits a DeprecationWarning.
+  - The class stores a flag validate_signatures (default True) used to control argument validation behavior (the implementation details depend on the full suite of setter utilities).
+
+Public API (highlights)
+- __new__(cls, validate_signatures=True)
+  - Initializes combined setter maps (xpath_functions, schema_dict_functions, nmmpmat_functions) possibly including extras.
+- __init__(self, validate_signatures: bool = True)
+  - Initializes the task list and validation flag.
+- fromList(cls, task_list, *args, **kwargs) -> FleurXMLModifier
+  - Create a new instance and populate it with tasks from task_list.
+- add_task_list(self, task_list)
+  - Add a list of tasks to the modifier by resolving names to setter callables.
+- _validate_signature(self, name: str, *args: Any, **kwargs: Any)
+  - Deprecated; for backward compatibility.
+- _get_setter_function_and_prefix(self, name: str) -> tuple[Callable, tuple[str, ...]]
+  - Resolve a setter name to the callable and its argument prefix.
+
+Extending and customizing
+- _extra_functions: a mechanism to inject additional setter groups without modifying the core dictionaries.
+  - Example usage:
+    - FleurXMLModifier._extra_functions = {
+        'xpath': {'custom_setter': some_callable},
+        'schema_dict': {'custom_schema': another_callable},
+        'nmmpmat': {'custom_nmmp': yet_another_callable},
+      }
+  - On instantiation, these extras are merged into the corresponding maps, making the new setters available via add_task_list.
+
+Usage patterns (typical workflow)
+- Build a modifier and collect tasks
+  - fmode = FleurXMLModifier()
+  - fmode.set_inpchanges({'Kmax': 4.0})          # example task name from xpath-based setters
+  - fmode.shift_value({'Gmax': 5.0})            # another task name
+  - fmode.set_species('all-Fe', {'lo': [{'n':3, 'l': 's', 'type': 'SCLO'},
+                                        {'n':3, 'l': 'p', 'type': 'SCLO'}]})
+- Create from a pre-defined task list
+  - task_list = [
+      ('set_inpchanges', {'Kmax': 4.0}),
+      ('shift_value', {'Gmax': 5.0}),
+    ]
+  - fmode = FleurXMLModifier.fromList(task_list)
+- Apply changes to an input file
+  - new_xmltree, additional_files = fmode.modify_xmlfile('/path/to/input/file/inp.xml')
+- Undo support (as suggested by the docstring example)
+  - fmode.undo()
+  - fmode.undo(revert_all=True)
+- Use with modify_xmlfile to produce updated XML and any needed ancillary files (e.g., relaxations, includes)
+
+Notes and best practices
+- The actual wiring to modify the XML tree happens through the setter functions collected in xpath_functions, schema_dict_functions, and nmmpmat_functions. Ensure the task names you pass correspond to available setters in these dictionaries.
+- If you extend FleurXMLModifier via _extra_functions, remember to update get_avail_actions() (implicitly provided by the class or its mixins) so that add_task_list can resolve new task names.
+- The docstrings in the module indicate that setter method docstrings are auto-generated from the XML utility modules; changes to the underlying XML setter implementations will reflect in the generated docs during the pre-commit hook.
+
+Example: complete basic flow
+- Given a set of changes to apply:
+  - Kmax = 4.0
+  - Gmax increment by 5.0
+  - Local orbital configuration on iron atoms
+- You can express this as:
+  - fmode = FleurXMLModifier()
+  - fmode.set_inpchanges({'Kmax': 4.0})
+  - fmode.shift_value({'Gmax': 5.0})
+  - fmode.set_species('all-Fe', {'lo': [{'n':3, 'l': 's', 'type': 'SCLO'},
+                                      {'n':3, 'l': 'p', 'type': 'SCLO'}]})
+  - new_xmltree, additional_files = fmode.modify_xmlfile('/path/to/input/file/inp.xml')
+
+Security and compatibility
+- The class design uses dynamic merging of setter dictionaries and a task-list approach to minimize direct file I/O during setup, improving robustness against partial updates.
+- The interface hints (names of setters, structure of task items) rely on the underlying masci-tools XML utilities; changes in those modules may affect available task names and their arguments.
+
+This documentation focuses on the FleurXMLModifier class as provided, its intended usage, extensibility points, and typical developer workflows for collecting and applying changes to Fleur input files in a controlled, batched fashion.

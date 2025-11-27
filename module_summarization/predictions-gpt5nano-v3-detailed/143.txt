@@ -1,0 +1,167 @@
+# memory.rst
+
+Managing Memory
+
+Introduction
+------------
+This section documents the memory management mechanisms used by the distributed client/server
+infrastructure. It explains how memory usage is tracked, how remote results (futures) are kept
+alive on workers, and how clients coordinate with the scheduler to manage in-memory data and
+prevent memory-related failures. The documentation focuses on practical concepts and developer-facing
+details, with concrete references to the core classes and helper functions implemented in this module.
+
+Overview of the memory management model
+---------------------------------------
+- Futures represent remote computations and the data they produce. A local proxy to a result running on
+  a remote worker, a Future helps you manage memory by controlling when data must be kept in memory
+  on the cluster and when it may be released.
+- The client maintains reference information for remote keys (data produced by computations) to ensure
+  that memory on workers is kept for as long as needed by active computations.
+- A global registry of clients allows the runtime to determine an appropriate client to attach new futures
+  to, and to manage memory-related bookkeeping across the process.
+- Upon binding a Future to a client, the client increments a reference count for the remote key.
+  This reference tracking helps the scheduler and workers determine when data can be spilled or released.
+- Futures can inform the scheduler about the keys they depend on (via an "inform" pathway) so the system
+  can track in-use data and avoid premature eviction.
+
+Key components and relationships
+-------------------------------
+- Future
+  - A local proxy to a remote computation and its result.
+  - Key attributes:
+    - key: remote data key associated with the Future
+    - client: the Client instance responsible for this Future
+    - _inform: whether to inform the scheduler about the keys this Future depends on
+    - _state: per-Future state stored on the client (e.g., Pending, Finished)
+  - Lifecycle and memory impact:
+    - When bound to a client, the Future calls the client’s internal mechanisms to increment the reference count for its key.
+    - The Future’s state is tracked within the client’s futures dictionary; this ensures consistent memory accounting across the cluster.
+    - If _inform is True, the client informs the scheduler that a particular key is desired, ensuring the corresponding data remains resident.
+- Client
+  - Represents a connection to a Dask distributed cluster; tracks futures and reference counts.
+  - Methods (referenced here conceptually):
+    - _inc_ref(key): increment the reference count for a given remote key, aiding memory retention decisions.
+    - _send_to_scheduler(payload): communicate memory-related intents (e.g., which keys to keep alive).
+  - Lifecycle:
+    - Clients can be registered as global defaults; the module maintains a weak registry of active clients.
+- Global client registry
+  - _global_clients: a weak value dictionary mapping a numeric id to Client instances.
+  - _global_client_index: a mutable single-element list used to assign incremental ids to new clients.
+  - _get_global_client(): returns the most suitable globally available client for attaching new futures.
+  - _set_global_client(c): marks a client as the default global client and registers it.
+  - _del_global_client(c): removes a client from the global registry when it is closed.
+- Internal helpers
+  - SourceCode: utility type used for code location tracking; helps attach source context to remote tasks.
+  - _get_global_client / _set_global_client / _del_global_client: internal lifecycle helpers for client management.
+
+Public API surface (high level)
+-------------------------------
+- Future(key, client=None, inform=True, state=None)
+  - Purpose: proxy to a remote computation result; manages memory implications on the cluster by coordinating with the client.
+  - Parameters:
+    - key: str or tuple – the remote data key this Future refers to.
+    - client: Client or None – the client that should own this Future. If None, the system will attempt to locate a suitable global client.
+    - inform: bool – whether to inform the scheduler about required keys to keep data resident.
+    - state: FutureState or None – optional pre-existing state for the Future.
+  - Behavior:
+    - On first access, the Future binds to a client, increments the client’s reference count for the key, and initializes internal state.
+    - If a matching key already exists in the client’s futures, the existing state is reused.
+    - When informing is enabled, a payload is sent to the scheduler to maintain the key as needed.
+- Internal utilities
+  - _get_global_client(): Retrieve an appropriate global client to attach new Futures.
+  - _set_global_client(c): Register a client as the default global client for memory bookkeeping.
+  - _del_global_client(c): Remove a client from the global registry upon shutdown or closure.
+
+Parameters and return values (memory-focused)
+--------------------------------------------
+- Future
+  - key: The remote data key this Future represents; used by memory tracking to allocate and release resources.
+  - client: The Client instance used for memory accounting and coordination with the scheduler.
+  - inform: When True, causes a memory-desire signal to be sent to the scheduler so that the key remains resident while needed.
+  - state: The per-Future state stored on the client; determines whether memory can be reclaimed or must be held.
+  - Return: A Future object that can be used to query status, retrieve results, or cancel the remote computation. Memory effects are driven by the client’s bookkeeping and the scheduler’s eviction/retention policies.
+
+Usage patterns
+--------------
+- Submitting a task and keeping memory under control
+  - A client submits a function and obtains a Future. The futures bookkeeping ensures the result’s key is retained on workers until it’s no longer needed.
+  - Code snippet:
+    ```python
+    from distributed import Client
+
+    client = Client()
+
+    # Submit a computation; the returned Future participates in memory accounting
+    fut = client.submit(pow, 2, 10)
+
+    # Access the result (memory will be retained until the result is consumed and the Future is released)
+    result = fut.result()
+
+    # When the Future goes out of scope or is explicitly released, memory may be reclaimed by the cluster
+    del fut
+    ```
+- Global client management
+  - The module maintains a global client registry to enable seamless memory management across different parts of an application.
+  - Code snippet:
+    ```python
+    from distributed import Client, _get_global_client, _set_global_client
+
+    c = Client(...)
+    _set_global_client(c)
+
+    # Retrieve the most suitable global client
+    current = _get_global_client()
+    ```
+- Memory-aware cancellation and release
+  - If a computation is canceled or a Future is discarded, the reference tracking on the client helps release memory on workers when safe to do so.
+
+Important considerations and edge cases
+---------------------------------------
+- Memory retention vs. eviction: Futures increment per-key references to ensure the corresponding data stays resident while needed. After all references are released, the cluster may spill or evict the data according to its memory policies.
+- Client lifecycle: If a client is closed or becomes unavailable, memory accounting for its futures must gracefully adapt. The global client registry helps maintain consistent behavior, but you should ensure clients are closed properly to avoid stale references.
+- Inform flag: Enabling inform ensures the scheduler is aware of keys that must be kept; disabling it can reduce messaging overhead but may risk eviction if no other references exist.
+- Shutdown behavior: During Python shutdown, memory cleanup paths coordinate to release remote data and avoid leaks. Ensure you shut down clients gracefully to allow for proper memory reclamation.
+- Edge data paths: The internal _bind_late mechanism ensures that, even if a Future is created before a client is known, it will bind to a suitable client lazily when first accessed. This can affect when memory accounting begins.
+
+Configuration and tuning (practical guidance)
+---------------------------------------------
+- Memory targets and spilling:
+  - Set per-worker memory limits to trigger eviction or spilling when usage approaches a threshold.
+  - Example (conceptual):
+    - distributed.worker.memory.target: percentage of memory to target for retention
+    - distributed.worker.memory.spill: whether to spill to disk when targets are exceeded
+- Scheduler hints:
+  - Use the inform pathway to communicate which keys must be retained, enabling better global memory coordination.
+- Client lifecycle:
+  - Use a stable global client when feasible to keep consistent memory accounting across modules and threads.
+
+Edge cases to be aware of
+-------------------------
+- Large, long-lived keys: If many large results are produced and kept alive, memory pressure may require spilling or eviction. Consider tuning memory settings and using result streaming where possible.
+- Rapid creation/destruction of futures: Frequent creation and release of futures may generate churn in memory tracking; ensure your workload pattern fits the scheduler’s memory management strategy.
+
+End-to-end usage example
+------------------------
+- Submit a task, inspect status, obtain result, and observe memory considerations
+  ```python
+  from distributed import Client
+
+  client = Client()
+
+  # Submit a computation
+  fut = client.submit(lambda x: x * x, 123)
+
+  # Monitor status and obtain result
+  print(fut.status)
+  result = fut.result()
+
+  # Release local reference to allow memory to be reclaimed by the cluster
+  del fut
+
+  client.close()
+  ```
+
+Notes
+-----
+- The memory management behavior described here is implemented through the combination of Futures, per-client bookkeeping, and scheduler coordination. The Future class is central to ensuring that remote data remains available while needed and is released when it is safe to do so.
+- For deeper customization, refer to the internal helpers (_get_global_client, _set_global_client, _del_global_client) and the interaction with the scheduler via the "client-desires-keys" operation.

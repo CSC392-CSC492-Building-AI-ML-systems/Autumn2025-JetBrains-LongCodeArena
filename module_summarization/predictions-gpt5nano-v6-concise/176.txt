@@ -1,0 +1,123 @@
+# Probability calibration
+
+Probability calibration aims to transform the raw output scores of a classifier into well-calibrated probability estimates. The CalibratedClassifierCV class provides this capability by applying either Platt scaling (sigmoid) or isotonic regression on top of a base estimator, using cross-validation to produce unbiased calibration data.
+
+## Key ideas
+
+- The base estimator is used to produce scores (decision function) or probabilities.
+- Calibration maps these scores/probabilities to calibrated probabilities in a separate validation set.
+- Cross-validation drives both the calibration data and, optionally, the final calibrated model:
+  - ensemble=True (default): for each CV split, a copy of the base estimator is fitted on the training data and calibrated on the validation data. Predictions are averaged across all calibrated classifiers.
+  - ensemble=False: calibration uses unbiased predictions from cross_val_predict, and the final model is trained on all the data; at prediction time, the original estimator trained on all data is used (this is the behavior typically used by some SVM implementations with probabilities).
+- cv="prefit": you can calibrate a pre-fitted estimator. Provide disjoint data for fitting and calibration.
+
+## What it does
+
+- Calibration method:
+  - sigmoid: Platt scaling (logistic regression on the calibration data)
+  - isotonic: non-parametric isotonic regression (requires a reasonable amount of calibration data)
+- Calibration target: uses the estimator’s decision_function if available; otherwise, it uses predict_proba.
+- Cross-validation is used to generate the calibration data, ensuring that the calibrated probabilities are less biased.
+
+## API (highlights)
+
+- estimator: base classifier to calibrate (default: LinearSVC)
+- method: {'sigmoid', 'isotonic'}, default='sigmoid'
+  - 'sigmoid' is Platt scaling (logistic regression on calibration data)
+  - 'isotonic' is a non-parametric isotonic regression
+- cv: cross-validation strategy. See sklearn.model_selectionCV for details. Can be "prefit" for pre-fitted estimators.
+- n_jobs: number of parallel jobs
+- ensemble: whether to ensemble calibrated classifiers across CV folds (default=True)
+- base_estimator: deprecated alias for estimator (use estimator)
+
+Attributes (after fit)
+- classes_: array-like of shape (n_classes,)
+- n_features_in_: int (if the underlying estimator exposes it)
+- feature_names_in_: array-like of shape (n_features_in_,) (if the estimator exposes feature names)
+- calibrated_classifiers_: list of the calibrated classifiers (one per CV fold, or length 1 if cv="prefit" or ensemble=False)
+
+## How to use
+
+### Basic usage (sigmoid calibration, default ensemble)
+
+- Calibrate a LinearSVC with Platt scaling.
+- The calibrated estimator exposes predict_proba.
+
+Example:
+```python
+from sklearn.svm import LinearSVC
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+
+from sklearn.calibration import CalibratedClassifierCV
+
+X, y = load_iris(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+base = LinearSVC(random_state=42)
+calibrated = CalibratedClassifierCV(base, method='sigmoid', cv=5)
+calibrated.fit(X_train, y_train)
+
+# Calibrated probability estimates
+proba = calibrated.predict_proba(X_test)
+```
+
+### Isotonic calibration
+
+Example:
+```python
+calibrated_iso = CalibratedClassifierCV(base, method='isotonic', cv=5)
+calibrated_iso.fit(X_train, y_train)
+proba_iso = calibrated_iso.predict_proba(X_test)
+```
+
+### ensemble=False (unbiased calibration)
+
+When ensemble=False, cross_val_predict is used to obtain unbiased predictions for calibration. The final estimator is the base estimator trained on all data.
+
+```python
+calibrated_no_ensemble = CalibratedClassifierCV(base, method='sigmoid', cv=5, ensemble=False)
+calibrated_no_ensemble.fit(X, y)
+proba_no_ensemble = calibrated_no_ensemble.predict_proba(X)
+```
+
+### Prefit calibration
+
+Calibrate a pre-fitted estimator (no cross-validation):
+
+```python
+base = LinearSVC().fit(X_train, y_train)
+calibrated_prefit = CalibratedClassifierCV(base, method='sigmoid', cv="prefit")
+# Use a separate calibration dataset (must be disjoint from data used to fit the base)
+X_cal, y_cal = X_test, y_test  # example: replace with a proper calibration split
+calibrated_prefit.fit(X_cal, y_cal)
+
+proba_prefit = calibrated_prefit.predict_proba(X_test)
+```
+
+Notes:
+- When cv="prefit", the user must ensure that the data used for fitting the base estimator and for calibration are disjoint.
+- The underlying estimator’s interface is used to generate scores: if decision_function exists, it is used; otherwise predict_proba is used.
+
+## Calibration methods: when to use what
+
+- sigmoid (Platt scaling)
+  - Works well when the score is monotonic with the true probability and there is enough calibration data.
+  - Generally robust and fast.
+- isotonic
+  - Non-parametric; can model complex calibration curves.
+  - Requires more calibration data to avoid overfitting; tends to overfit with small calibration sets (recommended to have at least several hundred to thousands of samples).
+
+## Practical considerations
+
+- Calibration data size: Isotonic calibration benefits from larger calibration sets; small calibration sets may lead to overfitting. If you have limited calibration data, sigmoid calibration is a safer default.
+- Target distribution and class balance: Ensure stratified CV is used (default behavior) to maintain class proportions in calibration sets.
+- Expected outputs: After fitting, predict_proba returns calibrated probabilities that better reflect true likelihoods, improving decision thresholds and metrics that rely on probability estimates.
+
+## References
+
+- Platt scaling (sigmoid calibration) for probability estimates
+- Isotonic regression calibration for non-parametric calibration curves
+- Cross-validation-based calibration to avoid biased probability estimates
+
+If you need a shorter quick-start or a deeper dive into implementation details, I can tailor additional sections or expand examples.

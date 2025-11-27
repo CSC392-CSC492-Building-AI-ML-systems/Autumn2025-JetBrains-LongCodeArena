@@ -1,0 +1,173 @@
+AutoAugment for NVIDIA DALI
+=============================
+
+Overview
+--------
+
+This module provides utilities to apply predefined AutoAugment policies to batches of images or videos. It selects from a set of built-in policies (image_net, reduced_image_net, svhn, reduced_cifar10) and configures augmentations such as translations, rotations, and other affine transforms. The operations are designed to work with uint8 data in HWC (images) or FHWC (videos) layouts.
+
+Key concepts
+------------
+
+- Policies: Predefined augmentation sequences from the AutoAugment paper and related variations. Each policy is implemented in the DALI auto_aug package and exposed via convenience factory calls.
+- Translation and shape: Some policies depend on the input shape to determine the magnitude of translation/affine transforms. If a policy uses shape, you can pass shape to scale the magnitudes accordingly.
+- DataNode: The function operates on a DataNode batch (images or videos), returning a new DataNode with augmented content.
+
+API
+---
+
+auto_augment
+  Applies a chosen AutoAugment policy to a batch of samples.
+
+  Signature
+  ---------
+  auto_augment(
+      data: _DataNode,
+      policy_name: str = 'image_net',
+      shape: Optional[Union[_DataNode, Tuple[int, int]]] = None,
+      fill_value: Optional[int] = 128,
+      interp_type: Optional[types.DALIInterpType] = None,
+      max_translate_abs: Optional[int] = None,
+      max_translate_rel: Optional[float] = None,
+      seed: Optional[int] = None,
+  ) -> _DataNode
+
+  Description
+  ------------
+  - Applies one of the predefined policies to the input batch.
+  - Supported policy names:
+    - image_net
+    - reduced_image_net
+    - svhn
+    - reduced_cifar10
+  - shape argument:
+    - If provided, shapes the magnitude of translation-based augmentations.
+    - Some policies do not use translation; in those cases, providing shape raises an error.
+  - max_translate_abs / max_translate_rel:
+    - max_translate_abs is used if shape is not provided.
+    - max_translate_rel is used if shape is provided.
+  - fill_value / interp_type:
+    - Padding fill value for border during affine transforms and the interpolation method used by warp_affine.
+
+  Validation and behavior
+  - Validates policy_name and raises if an invalid value is provided.
+  - For policies that do not involve translation, shape must not be specified.
+  - Returns a DataNode containing the augmented batch.
+
+  Usage notes
+  - data must be a DataNode with a batch of images (HWC) or videos (FHWC) in uint8.
+  - Supported policies may have different behavior regarding shape/translation dependencies.
+
+  Example
+  ```python
+  from nvidia.dali.auto_aug import auto_augment
+
+  # Basic usage with the default policy (image_net)
+  out = auto_augment(images_batch, policy_name='image_net')
+
+  # With shape and translation magnitudes
+  out = auto_augment(images_batch,
+                     policy_name='image_net',
+                     shape=(224, 224),
+                     max_translate_abs=20,
+                     seed=42)
+
+  # Reduced policy that does not use translation (must not provide shape)
+  out = auto_augment(images_batch, policy_name='reduced_image_net')
+
+  # Seeded randomness for reproducibility
+  out = auto_augment(images_batch,
+                     policy_name='svhn',
+                     max_translate_abs=30,
+                     seed=123)
+  ```
+
+auto_augment_image_net
+  Convenience wrapper around auto_augment with policy_name='image_net'.
+
+  Signature
+  ---------
+  auto_augment_image_net(
+      data: _DataNode,
+      shape: Optional[Union[_DataNode, Tuple[int, int]]] = None,
+      fill_value: Optional[int] = 128,
+      interp_type: Optional[types.DALIInterpType] = None,
+      max_translate_abs: Optional[int] = None,
+      max_translate_rel: Optional[float] = None,
+      seed: Optional[int] = None,
+  ) -> _DataNode
+
+  Description
+  ------------
+  - Equivalent to auto_augment(data, policy_name='image_net', ...).
+  - Useful when you want to apply only the ImageNet policy without naming it explicitly.
+
+  Example
+  ```python
+  from nvidia.dali.auto_aug import auto_augment_image_net
+
+  out = auto_augment_image_net(images_batch, shape=(128, 128), max_translate_abs=15, seed=7)
+  ```
+
+Parameters
+----------
+
+- data (DataNode)
+  A batch of samples to be processed. Supported: images (HWC, uint8) and videos (FHWC, uint8).
+
+- policy_name (str)
+  Name of the predefined policy. Options:
+  - 'image_net' (default)
+  - 'reduced_image_net'
+  - 'svhn'
+  - 'reduced_cifar10'
+
+- shape (DataNode or tuple[int, int], optional)
+  Height and width for which translation magnitudes are scaled. If provided, magnitudes span up to max_translate_rel * shape.
+
+- fill_value (int, optional)
+  Padding value used by warp_affine operations. If None, border is filled with repeated (clamped) border value. Default: 128.
+
+- interp_type (types.DALIInterpType, optional)
+  Interpolation method for warp_affine transforms. Typical values are types.INTERP_LINEAR (default) and types.INTERP_NN.
+
+- max_translate_abs (int or (int, int), optional)
+  Maximum translation in pixels when shape is not provided. If a tuple, (height, width) limits are applied.
+
+- max_translate_rel (float or (float, float), optional)
+  Maximum translation as a fraction of the input shape when shape is provided. If a tuple, (height, width) limits are applied. Default for shape-based usage is 1.0.
+
+- seed (int, optional)
+  Seed for random sampling of transformations and magnitudes.
+
+Return value
+------------
+- DataNode: A batch of augmented samples with the same layout and data type as the input.
+
+Notes and considerations
+------------------------
+
+- numpy is a required dependency. If numpy cannot be imported, the module raises a runtime error indicating the need to install numpy.
+- Only certain policies rely on the input shape for translation magnitudes. For policies that do not use translation (e.g., reduced_image_net), providing shape will raise an error.
+- The module supports both images and videos; ensure your DataNode batch conforms to HWC (images) or FHWC (videos) layout with uint8 data.
+
+See Also
+--------
+
+- auto_augment_image_net: wrapper for the image_net policy
+- Official AutoAugment literature: arXiv:1805.09501
+
+Usage examples
+--------------
+
+- Basic usage with default policy:
+  - out = auto_augment(batch, policy_name='image_net')
+
+- Using shape-based magnitudes:
+  - out = auto_augment(batch, policy_name='image_net', shape=(224, 224), max_translate_rel=0.5, seed=123)
+
+- Using a policy without translation (no shape):
+  - out = auto_augment(batch, policy_name='reduced_image_net')
+
+- Wrapper example:
+  - out = auto_augment_image_net(batch, shape=(128, 128), max_translate_abs=20)

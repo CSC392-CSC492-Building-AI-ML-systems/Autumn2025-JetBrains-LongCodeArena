@@ -1,0 +1,146 @@
+Permutation feature importance
+===============================
+
+Overview
+--------
+Permutation feature importance measures the impact of each feature on the model’s predictive performance. For a given feature, the values in that feature are randomly permuted, breaking the association with the target variable. The drop in the model score (relative to a baseline score computed with the unpermuted data) indicates the feature’s importance. This approach is model-agnostic and can handle single or multiple scoring metrics.
+
+Key Components
+--------------
+
+- _check_feature_names(X, feature_names=None)
+  - Validates or derives feature names.
+  - Behavior
+    - If feature_names is None:
+      - If X has pandas-like columns, uses X.columns.tolist().
+      - Otherwise, generates generic names ["x0", "x1", ...].
+    - If feature_names has a tolist method, converts to a Python list.
+    - Raises ValueError if duplicates are present.
+  - Returns: list of feature names.
+
+- _get_feature_index(fx, feature_names=None)
+  - Maps a feature identifier to its index.
+  - If fx is a string, looks up its index in feature_names (must be provided).
+  - If fx is an int, returns it unchanged.
+  - If the feature name is not found, raises ValueError.
+
+- _weights_scorer(scorer, estimator, X, y, sample_weight)
+  - Helper to apply the scoring function with or without sample_weight.
+
+- _calculate_permutation_scores(estimator, X, y, sample_weight, col_idx, random_state, n_repeats, scorer, max_samples)
+  - Core permutation routine for a single feature (column index col_idx).
+  - Steps
+    - Optionally sample a subset of rows when max_samples < number of samples.
+    - For each repeat:
+      - Permute the target feature column (shuffle rows).
+      - Evaluate the scorer on the permuted data.
+    - Aggregate scores across repeats (dict vs. array).
+  - Returns: scores for the given feature across repeats.
+
+- _create_importances_bunch(baseline_score, permuted_score)
+  - Computes the raw importances as baseline_score - permuted_score.
+  - Returns a Bunch with:
+    - importances_mean: mean importances across repeats
+    - importances_std: std dev of importances across repeats
+    - importances: raw per-repetition importances
+
+- permutation_importance(estimator, X, y, ...)
+  - Main API for computing permutation feature importance.
+  - Decorated with parameter validation to ensure correct usage.
+  - Accepts:
+    - estimator: fitted model with a fit() method
+    - X: array-like input data
+    - y: target values (or None for unsupervised settings)
+    - scoring: score function or list/dict of scorers; can be a string name, callable, or multi-metric structure
+    - n_repeats: number of permutation repeats per feature
+    - n_jobs: number of parallel jobs
+    - random_state: seed/state for reproducibility
+    - sample_weight: optional sample weights
+    - max_samples: number of samples to use (subset) for efficiency
+  - Returns: a Bunch with:
+    - importances_mean
+    - importances_std
+    - importances
+
+Notes
+-----
+- Supports multi-metric scoring. If scoring is a list/dict and multiple metrics are provided, importances are computed for each metric and stored accordingly.
+- The algorithm can operate on a subset of samples via max_samples to balance accuracy and speed.
+- Parallelism is supported through n_jobs.
+
+Usage
+-----
+
+Basic example (single metric)
+1. Train a model and compute permutation feature importance for a single scoring metric (e.g., accuracy).
+
+```python
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+X, y = load_breast_cancer(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+estimator = RandomForestClassifier(n_estimators=100, random_state=0)
+estimator.fit(X_train, y_train)
+
+from sklearn.inspection import permutation_importance
+
+result = permutation_importance(
+    estimator, X_test, y_test, scoring='accuracy',
+    n_repeats=10, random_state=0
+)
+
+print("Mean importances:", result.importances_mean)
+print("Importances std:", result.importances_std)
+```
+
+Basic example (multimetric scoring)
+```python
+# If multiple metrics are desired, pass a list/dict of scorers to scoring.
+result = permutation_importance(
+    estimator, X_test, y_test,
+    scoring=['accuracy', 'f1'],
+    n_repeats=10, random_state=0
+)
+# Access per-metric importances:
+print(result.importances_mean)  # shape (n_features, n_metrics)
+```
+
+Notes on feature names
+- If the input X is a plain NumPy array, feature names default to ["x0", "x1", ...].
+- If X is a pandas DataFrame, feature names are taken from X.columns unless feature_names is provided.
+
+Details
+-------
+
+- The permutation_importance function requires the estimator to have a fit method.
+- The scoring parameter can be:
+  - A string name supported by the scoring infrastructure
+  - A callable that returns a scalar score
+  - A list/tuple/dict of scorers for multi-metric assessment
+  - None (default behavior depends on the estimator and scoring context)
+- The result is a Bunch containing:
+  - importances_mean: mean decrease in score per feature
+  - importances_std: standard deviation across repeats
+  - importances: raw per-feature per-repeat score differences
+- Internally, the implementation ensures thread-safety when using parallel execution and handles potential memory considerations by optionally sampling a subset of data (max_samples).
+
+Code references (highlights)
+----------------------------
+- Core permutation logic computes scores after permuting each feature:
+  - _calculate_permutation_scores(...)
+- Construction of the final importance metrics:
+  - _create_importances_bunch(...)
+- Validation and API surface:
+  - permutation_importance(...) with parameter validation via @validate_params
+
+For further details, refer to the implementation of:
+- _check_feature_names
+- _get_feature_index
+- _weights_scorer
+- _calculate_permutation_scores
+- _create_importances_bunch
+- permutation_importance
+

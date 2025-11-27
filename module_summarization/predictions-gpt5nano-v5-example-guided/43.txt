@@ -1,0 +1,195 @@
+# Config usage
+
+## Overview
+
+This module provides an enhanced configuration system built on top of Python's configparser. It adds:
+- built-in defaults for common sections and keys
+- an include mechanism to compose configurations from multiple files
+- support for reading configuration from Zookeeper
+- environment-variable and variable expansion
+- structured handling of sensitive values (passwords)
+
+The primary component is a subclass of configparser.ConfigParser with extra features to manage defaults, includes, and dynamic sources of configuration.
+
+## Key Components
+
+- ConfigParser class
+  - Inherits from configparser.ConfigParser
+  - Enhanced with defaults, include processing, and Zookeeper support
+  - Internal helpers for loading and traversing included files
+
+- _default_values
+  - A nested dictionary of default sections and keys used to bootstrap configuration
+  - Includes sections such as general, asab:metrics, asab:doc, logging (and its sub-sections), library, passwords, housekeeping, etc.
+  - Example defaults are environment-aware (e.g., ASAB_CONFIG, ASAB_VERBOSE)
+
+  Example (partial structure):
+  ```
+  _default_values = {
+      'general': {
+          'config_file': os.environ.get('ASAB_CONFIG', ''),
+          'tick_period': 1,
+          'var_dir': os.path.expanduser('~/.' + os.path.splitext(os.path.basename(sys.argv[0]))[0]),
+          'changelog': '',
+          'manifest': '',
+          'pidfile': '!',
+          'working_dir': '.',
+          'uid': '',
+          'gid': '',
+      },
+      "asab:metrics": { "native_metrics": "true", "web_requests_metrics": False, "expiration": 60 },
+      "asab:doc": { "default_route_tag": "module_name" },
+      "logging": {
+          'verbose': os.environ.get('ASAB_VERBOSE', False),
+          "app_name": os.path.basename(sys.argv[0]),
+          "sd_id": "sd",
+          "level": "NOTICE",
+          "levels": "",
+      },
+      "logging:console": {
+          "format": "%(asctime)s %(levelname)s %(name)s %(struct_data)s%(message)s",
+          "datefmt": "%d-%b-%Y %H:%M:%S.%f",
+      },
+      "logging:syslog": {
+          "enabled": "false",
+          "address": _syslog_sockets.get(platform.system(), "/dev/log"),
+          "format": _syslog_format.get(platform.system(), "3"),
+      },
+      "logging:file": {
+          "path": "",
+          "format": "%(asctime)s %(levelname)s %(name)s %(struct_data)s%(message)s",
+          "datefmt": "%d-%b-%Y %H:%M:%S.%f",
+          "backup_count": 3,
+          "backup_max_bytes": 0,
+          "rotate_every": "",
+      },
+      "library": { "azure_cache": "false" },
+      "passwords": {},
+      "housekeeping": { "at": "03:00", "limit": "05:00", "run_at_startup": "no" },
+  }
+  ```
+  If ASAB_ZOOKEEPER_SERVERS is defined, a zookeeper default is added:
+  ```
+  if 'ASAB_ZOOKEEPER_SERVERS' in os.environ:
+      _default_values['zookeeper'] = {'servers': os.environ['ASAB_ZOOKEEPER_SERVERS']}
+  ```
+
+- add_defaults(self, dictionary: dict) -> None
+  - Adds default values to the active configuration without overwriting existing keys
+  - Ensures sections exist, expands environment variables, and performs variable expansion when needed
+  - Signature:
+    ```
+    def add_defaults(self, dictionary: dict) -> None
+    ```
+  - Example:
+    ```
+    cp = ConfigParser()
+    cp.add_defaults({'general': {'tick_period': 2}})
+    ```
+
+- _traverse_includes(self, includes: str, this_dir: str) -> None
+  - Reads and processes included configuration files
+  - Supports nested includes and zookeeper-based includes (e.g., strings starting with "zookeeper")
+  - Handles includes separated by newline or space
+  - Prevents infinite recursion by tracking already-included files
+  - Behavior summary:
+    - For each include_glob, expand environment vars, glob files, read them, and recursively process any further includes
+
+- _load(self)
+  - Internal loader intended to be invoked once
+  - Initializes internal state (_load_dir_stack, config_contents_list, config_name_list)
+  - Determines the configuration file to load from _default_values['general']['config_file']
+  - Intended to perform the initial read of configuration files and then process includes
+
+- zookeeper and include support
+  - Includes can be loaded from regular files or via zookeeper
+  - If an include entry starts with "zookeeper", _include_from_zookeeper is invoked (exact implementation not shown in excerpt)
+
+- Platform-aware defaults
+  - Defaults such as syslog address and format are chosen per platform (Darwin, Linux, etc.)
+
+- Passwords handling
+  - Passwords are stored in a dedicated "passwords" section
+  - The documentation-friendly pattern is to reference secrets:
+    - In the config:
+      [connection:KafkaConnection]
+      password=${passwords:kafka_password}
+    - And in the passwords section:
+      [passwords]
+      kafka_password=<MY_SECRET_PASSWORD>
+
+- Pidfile semantics
+  - The default 'pidfile' value is '!' which is a special placeholder that resolves to a platform-specific path
+
+## Usage
+
+- Typical workflow
+  - Create a ConfigParser instance
+  - Optionally extend defaults with add_defaults
+  - Load configuration from one or more files (recursively via includes)
+  - Access values using standard ConfigParser accessors (get, getint, etc.)
+
+- Example: loading and accessing values
+  ```
+  from yourpackage.config import ConfigParser
+
+  cp = ConfigParser()
+  # Optionally override defaults
+  cp.add_defaults({'general': {'tick_period': 2}})
+  # Load a main config file (includes are handled automatically)
+  cp.read('/etc/myapp/config.ini')
+
+  # Access values
+  tick = cp.getint('general', 'tick_period', fallback=1)
+  log_level = cp.get('logging', 'level', fallback='NOTICE')
+  ```
+
+- Example: secret management
+  - In your config.ini:
+    ```
+    [connection:KafkaConnection]
+    password=${passwords:kafka_password}
+    ```
+  - In the same file or a separate block:
+    ```
+    [passwords]
+    kafka_password=MySecretPassw0rd
+    ```
+
+- Example: include usage
+  - In your config:
+    ```
+    [general]
+    include = /etc/myapp/conf.d/*.ini
+    ```
+  - The includes will be loaded and processed recursively, with environment-variable expansion and globbing support
+
+- Example: Zookeeper-backed config (via environment)
+  - Set an environment variable:
+    ASAB_ZOOKEEPER_SERVERS=zk1:2181,zk2:2181
+  - The default values will include:
+    ```
+    'zookeeper': {'servers': 'zk1:2181,zk2:2181'}
+    ```
+
+## Details
+
+- Environment and variable expansion
+  - Values may contain environment variables (e.g., ${ASAB_VERBOSE}) and are expanded where appropriate
+  - When a value contains a dollar sign, expansion is performed during setting
+
+- Include processing order
+  - Includes are processed in a depth-first manner
+  - Each file is loaded only once to prevent infinite loops
+
+- Security considerations
+  - Passwords are stored in a dedicated section and can be referenced securely in other sections without hard-coding secrets in multiple places
+
+- Access patterns
+  - This module relies on standard ConfigParser semantics; you can still use get, getint, getboolean, etc., to read values after loading
+
+- Notes
+  - _load is intended for internal use; the normal usage pattern is to instantiate ConfigParser, optionally add defaults, and load configuration files via read and include processing
+  - The code references an _include_from_zookeeper method for fetching configuration from Zookeeper; the exact implementation is not shown in the excerpt
+
+---

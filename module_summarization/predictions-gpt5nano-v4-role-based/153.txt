@@ -1,0 +1,97 @@
+Geometric image transformations
+===============================
+
+Overview
+--------
+Geometric image transformations describe how 3D world points are mapped to 2D image pixels using a pinhole camera model. The core idea is the composition of intrinsic camera parameters (how 3D rays map to the image plane) and extrinsic parameters (how the world coordinate system relates to the camera coordinate system). This module centers around the PinholeCamera class, which encapsulates a batched 4x4 intrinsic matrix and a batched 4x4 extrinsic matrix, plus the corresponding image size.
+
+Key concepts
+- Intrinsics (K): 4x4 camera calibration matrix with the useful 3x3 block K = [fx  0  cx; 0  fy  cy; 0  0  1]. The class exposes the 3x3 camera matrix via camera_matrix and the focal lengths and principal point via fx, fy, cx, cy.
+- Extrinsics ([R|t]): 4x4 transformation from world coordinates to camera coordinates, where R is a 3x3 rotation matrix and t is a 3x1 translation vector. The class exposes rotation_matrix (R), translation_vector (t), and the 3x4 rt_matrix (the essential portion [R|t]).
+- Projection pipeline: a 3D point Xw (in world coordinates) is transformed to the camera coordinate frame Xc = R Xw + t, and then projected onto the image plane with K to obtain pixel coordinates (u, v). In homogeneous form, P = K [R|t] is the 3x4 projection matrix, and the image coordinates come from P Xw_h (followed by normalization).
+
+PinholeCamera: purpose and usage
+---------------------------------
+The PinholeCamera class provides a batched representation of a pinhole camera and exposes convenient accessors to the core matrices and parameters used in geometric image transformations.
+
+Constructor
+- intrinsics: Tensor of shape (B, 4, 4)
+- extrinsics: Tensor of shape (B, 4, 4)
+- height: Tensor of shape (B)
+- width: Tensor of shape (B)
+
+Notes
+- The class is designed to operate in batch form to leverage PyTorch parallelism.
+- The class validates input shapes with internal checks and provides read-only accessors for the core matrices and parameters. It also supports setting translation components (tx, ty, tz) that modify the underlying extrinsics.
+
+What’s exposed
+- Intrinsics and extrinsics
+  - intrinsics: (B, 4, 4)
+  - extrinsics: (B, 4, 4)
+- Derived matrices
+  - camera_matrix: K, (B, 3, 3)
+  - rt_matrix: [R|t], (B, 3, 4)
+  - rotation_matrix: R, (B, 3, 3)
+  - translation_vector: t, (B, 3, 1)
+- Image geometry
+  - height: (B)
+  - width: (B)
+- Intrinsic parameters
+  - fx, fy: focal lengths in x and y (B)
+  - cx, cy: principal point coordinates (B)
+- Extrinsic translation components
+  - tx, ty, tz: translation in x, y, z (B)
+  - tx/ty/tz setters mutate extrinsics in-place and return self
+
+Derived semantics and formulas
+- Camera projection matrix
+  - P = K [R|t], where K = camera_matrix (3x3) and [R|t] = rt_matrix (3x4)
+- Image projection (for a world point Xw in homogeneous coordinates)
+  - Xw_h = [Xw; 1] (4x1)
+  - xp_h = P Xw_h (3x1)
+  - (u, v) = (xp_h[0] / xp_h[2], xp_h[1] / xp_h[2])
+- Back-projecting or transforming points between coordinate systems typically uses:
+  - Xc = R Xw + t
+  - x = K Xc (in homogeneous form), followed by normalization
+
+Practical example
+- Build a batched camera model and inspect core components:
+
+  .. code-block:: python
+
+     import torch
+     from your_module import PinholeCamera
+
+     B = 2
+     intrinsics = torch.eye(4).unsqueeze(0).repeat(B, 1, 1)  # placeholder (B,4,4)
+     extrinsics = torch.eye(4).unsqueeze(0).repeat(B, 1, 1)  # placeholder (B,4,4)
+     height = torch.tensor([480, 480])
+     width  = torch.tensor([640, 640])
+
+     cam = PinholeCamera(intrinsics, extrinsics, height, width)
+
+     K = cam.camera_matrix         # (B, 3, 3)
+     R = cam.rotation_matrix       # (B, 3, 3)
+     t = cam.translation_vector    # (B, 3, 1)
+     P = cam.camera_matrix @ cam.rt_matrix  # Projection matrix (B, 3, 4)
+
+     # Example world point (single point per batch) in homogeneous form
+     Xw_h = torch.tensor([[[1.0], [2.0], [10.0], [1.0]] for _ in range(B)], dtype=torch.float32)  # (B, 4, 1)
+
+     xp_h = P @ Xw_h  # (B, 3, 1)
+     u = xp_h[:, 0, 0] / xp_h[:, 2, 0]
+     v = xp_h[:, 1, 0] / xp_h[:, 2, 0]
+
+- This demonstrates the standard pinhole projection pipeline using the class’s derived matrices.
+
+Validation and design notes
+- The internal validation methods ensure batch consistency and shape expectations for intrinsics and extrinsics. The error messaging emphasizes batch-consistency but the exact validation logic in _check_valid_params contains a note in code about potential logical refactoring (the AND vs OR discussion). Users should ensure their inputs reflect (B, 4, 4) matrices with a shared batch dimension.
+- The class is designed to be compatible with common geometric utilities such as transform_points and inverse_transformation (imported but not required in the class itself). These utilities operate on the 3x4 extrinsic portion and projection matrices to apply or invert transforms on point sets.
+
+Additional notes
+- The PinholeCamera class is batched, enabling simultaneous camera parameterization across multiple views or samples.
+- tx, ty, tz setters provide convenient in-place updates to the camera extrinsics, useful for dynamic camera calibration or synthetic data generation.
+
+In summary
+- Geometric image transformations hinge on the interaction between intrinsics (K) and extrinsics ([R|t]).
+- PinholeCamera exposes the essential matrices and their decompositions, enabling projection of 3D world points into 2D image coordinates and, with utilities like transform_points and inverse_transformation, efficient batch-wise geometric operations.

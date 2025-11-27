@@ -1,0 +1,180 @@
+# Managing Memory
+
+## Overview
+This module provides primitives for memory management within the distributed system, focusing on remote result management via Futures and the lifecycle of global client references. It tracks client references with a weak registry to avoid memory leaks and binds futures to a client lazily, ensuring references are only kept as long as needed.
+
+Key concepts include:
+- Global, weakly-referenced client tracking to facilitate memory-safe access across threads and processes.
+- Lazy binding of remote computation futures to the appropriate client, with reference counting and scheduler communication.
+
+## Key Components
+
+- Global client registry and context
+  - _global_clients: weakref.WeakValueDictionary[int, Client]
+  - _global_client_index: list[int] used to generate unique indices
+  - _current_client: ContextVar to hold the current Client in context
+  - _get_global_client(): Resolve the current or most-recent non-closed global client
+  - _set_global_client(c): Register a client as the global default
+  - _del_global_client(c): Remove a client from the global registry
+
+  These elements allow memory-safe reuse of a default client without keeping strong references that could prevent garbage collection.
+
+  Code highlights:
+  - Retrieve the global client (preferring the current context, then the most recently added non-closed client)
+    - def _get_global_client() -> Client | None:
+        c = _current_client.get()
+        if c:
+            return c
+        L = sorted(list(_global_clients), reverse=True)
+        for k in L:
+            c = _global_clients[k]
+            if c.status != "closed":
+                return c
+            else:
+                del _global_clients[k]
+        return None
+
+  - Register a client as global
+    - def _set_global_client(c: Client | None) -> None:
+        if c is not None:
+            c._set_as_default = True
+            _global_clients[_global_client_index[0]] = c
+            _global_client_index[0] += 1
+
+  - Remove a client from global registry
+    - def _del_global_client(c: Client) -> None:
+        for k in list(_global_clients):
+            try:
+                if _global_clients[k] is c:
+                    del _global_clients[k]
+            except KeyError:  # pragma: no cover
+                pass
+
+- Future: Remote computation proxy
+  - A Future represents a result that is computed on a remote worker. It acts as a local handle to manage and observe remote memory/state.
+  - Key attributes:
+    - key: str or tuple identifying remote data
+    - client: Client owning the future (may be determined lazily)
+    - _inform: whether to inform the scheduler that this future’s key is needed
+    - _state: internal state object for the future
+    - _input_state: optional state transition hook for additional handling
+
+  - Core behavior:
+    - The Future is initialized with _bind_late(), which lazily binds to a client if not provided.
+    - _bind_late():
+      - If no client is specified, it attempts to obtain the current client via get_client().
+      - If a client is obtained and no state exists yet for this key, it creates or retrieves the corresponding FutureState in the client.
+      - If _inform is True, it sends a message to the scheduler indicating the keys this client desires.
+      - If an _input_state is provided, it attempts to resolve and invoke a corresponding handler on the client.
+
+  Code excerpt (from Future and binding logic):
+  - Basic Future setup
+    - class Future(WrappedKey):
+        """A remotely running computation
+        ...
+        Examples
+        --------
+        Futures typically emerge from Client computations
+
+        >>> my_future = client.submit(add, 1, 2)  # doctest: +SKIP
+
+        We can track the progress and results of a future
+
+        >>> my_future  # doctest: +SKIP
+        <Future: status: finished, key: add-8f6e709446674bad78ea8aeecfee188e>
+
+        See Also
+        --------
+        Client:  Creates futures
+        """
+
+        _cb_executor = None
+        _cb_executor_pid = None
+
+        def __init__(self, key, client=None, inform=True, state=None):
+            self.key = key
+            self._cleared = False
+            self._client = client
+            self._input_state = state
+            self._inform = inform
+            self._state = None
+            self._bind_late()
+
+        @property
+        def client(self):
+            self._bind_late()
+            return self._client
+
+        def _bind_late(self):
+            if not self._client:
+                try:
+                    client = get_client()
+                except ValueError:
+                    client = None
+                self._client = client
+            if self._client and not self._state:
+                self._client._inc_ref(self.key)
+                self._generation = self._client.generation
+
+                if self.key in self._client.futures:
+                    self._state = self._client.futures[self.key]
+                else:
+                    self._state = self._client.futures[self.key] = FutureState()
+
+                if self._inform:
+                    self._client._send_to_scheduler(
+                        {
+                            "op": "client-desires-keys",
+                            "keys": [self.key],
+                            "client": self._client.id,
+                        }
+                    )
+
+                if self._input_state is not None:
+                    try:
+                        handler = self._client._state_handlers[self._input_state]
+                    except KeyError:
+                        pass
+                    else:
+                        handler
+
+- Usage hints
+  - Creating and using Futures
+    - Futures typically emerge from Client computations.
+    - Example:
+      - my_future = client.submit(add, 1, 2)
+      - print(my_future) shows the remote key and status
+      - result = my_future.result() retrieves the value once available
+
+## Usage
+
+- Getting a Future from a Client
+  - Use a Client to submit a computation, which yields a Future representing the remote result.
+  - The Future class handles lazy client binding and memory tracking, ensuring that remote data is accounted for and references are properly managed.
+
+- Inspecting and retrieving results
+  - After submission, you can monitor or fetch the result via Future methods (e.g., result()) as with typical asynchronous results.
+
+Example (illustrative; exact calls may vary by context):
+- my_future = client.submit(add, 1, 2)  # creates a remote computation
+- print(my_future)  # <Future: status: running, key: some-key>
+- value = my_future.result()  # retrieve the result when available
+
+## Details
+
+- Memory-safety strategies
+  - Global client registry uses a weak reference dictionary to avoid preventing garbage collection of clients that are no longer in use.
+  - Futures are bound lazily to a client to avoid retaining client references longer than necessary.
+  - When a client is no longer needed or is closed, the registry can drop its reference, helping to prevent memory leaks in long-running environments.
+
+- Scheduler communication
+  - When a Future is bound to a client, and _inform is True, the client informs the scheduler of the keys it cares about:
+    - The operation payload includes op: "client-desires-keys", keys: [self.key], and client: self._client.id
+
+- Extensibility and debugging
+  - The module includes internal helpers for managing global clients and for binding futures to the correct client, enabling robust debugging and introspection via the Future’s lifecycle and the global client registry.
+
+- Related components
+  - The Future class interacts with internal client state (e.g., _inc_ref, generation, futures dict, _state_handlers) to manage memory and lifecycle of remote results.
+
+Note: The documentation reflects the provided source structure and behavior relevant to memory management in the distributed system. For concrete APIs and usage patterns, consult the higher-level Client and scheduler interaction documentation.

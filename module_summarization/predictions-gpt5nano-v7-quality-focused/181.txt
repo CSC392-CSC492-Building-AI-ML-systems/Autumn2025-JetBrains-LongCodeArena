@@ -1,0 +1,119 @@
+Datasets loading utilities
+==========================
+
+This section documents the dataset loading utilities used to fetch and cache OpenML datasets. It covers the caching strategy, network resilience, and the helper functions that support loading data from the OpenML API.
+
+Overview
+--------
+
+- The loading utilities fetch OpenML data via HTTP(S) endpoints and cache results locally to improve performance and offline availability.
+- Caching is controlled by a data_home directory. When provided, resources are stored under data_home/openml.org/<path>.gz.
+- The utilities support retry logic for transient network errors and a cleanup path to recover from invalid caches.
+
+Key components
+--------------
+
+- _get_local_path(openml_path, data_home) -> str
+  - Computes the local cache path for an OpenML resource.
+  - Returns a path like data_home/openml.org/<openml_path>.gz.
+
+- _retry_with_clean_cache(openml_path, data_home, no_retry_exception=None) -> Callable
+  - Decorator that wraps a function to retry on failure.
+  - If a cached file exists, and the wrapped call fails, it removes the local cache and retries.
+  - If data_home is None, caching is effectively disabled and the function is called once.
+
+- _retry_on_network_error(n_retries=3, delay=1.0, url="") -> Callable
+  - Decorator that retries the wrapped function on network-related errors (URLError, TimeoutError).
+  - A 412 HTTP error (OpenML-specific) is not retried.
+  - Emits a warning between retries and waits for the specified delay.
+
+- _open_openml_url(openml_path, data_home, n_retries=3, delay=1.0)
+  - Core helper to fetch a resource from OpenML.
+  - Uses the prefix "https://api.openml.org/" and supports gzip-encoded content.
+  - If data_home is provided, caches the downloaded content to data_home/openml.org/<openml_path>.gz.
+  - If the remote content is gzip-encoded, the content is saved as gzip data; otherwise, the content is compressed to gzip as part of the cache file.
+
+- OpenMLError
+  - Specific exception for OpenML HTTP 412 errors, representing a generic OpenML error.
+
+- _get_json_content_from_openml_api(url, error_message, data_home, n_retries=3, delay=1.0) -> Dict
+  - Loads JSON data from the OpenML API.
+  - Utilizes the OpenML loading pipeline (including caching and retries) to obtain and parse JSON content.
+
+- OpenML API endpoints (constants)
+  - _OPENML_PREFIX = "https://api.openml.org/"
+  - _SEARCH_NAME = "api/v1/json/data/list/data_name/{}/limit/2"
+  - _DATA_INFO = "api/v1/json/data/{}"
+  - _DATA_FEATURES = "api/v1/json/data/features/{}"
+  - _DATA_QUALITIES = "api/v1/json/data/qualities/{}"
+  - _DATA_FILE = "data/v1/download/{}"
+
+- Type aliases
+  - OpenmlQualitiesType = List[Dict[str, str]]
+  - OpenmlFeaturesType = List[Dict[str, str]]
+
+Usage notes
+-----------
+
+- Caching behavior
+  - When data_home is provided, resources are cached under data_home/openml.org/<openml_path>.gz.
+  - The download process uses a temporary directory to perform an atomic move to the final cache location, ensuring safe concurrent access.
+  - If a loading operation fails and a cached file exists, _retry_with_clean_cache removes the cache and retries, avoiding stale data.
+
+- Network resilience
+  - Network requests are retried up to n_retries times with a delay between attempts.
+  - HTTP 412 responses are treated as OpenML-level errors and are not retried.
+  - Progress is surfaced via warnings when retries occur.
+
+- Content handling
+  - The helper detects gzip-encoded responses. If the remote content is gzip, it saves the content directly to the cache file. If not, it compresses the downloaded content to gzip to store in the cache.
+  - The return type from _open_openml_url is a stream:
+    - If content is gzip-encoded, a gzip.GzipFile-like stream is opened from the cached data or network response.
+    - If content is not gzip-encoded, the data is compressed to gzip in the cache and presented as a gzip stream for downstream consumption.
+
+Examples
+--------
+
+- Basic usage with caching (pseudo-API usage; actual call sites depend on the public dataset API that exports fetch_openml):
+
+  - Retrieve a dataset via OpenML with caching
+    - from sklearn.datasets import fetch_openml
+    - data = fetch_openml(name='iris', version=1, data_home='/path/to/cache')
+
+  - Disable caching (network-only access)
+    - data = fetch_openml(name='iris', version=1, data_home=None)
+
+- Access to OpenML endpoints (internal usage)
+  - The constants and helpers document the endpoints used to query dataset lists, metadata, features, qualities, and file downloads.
+
+API reference (highlights)
+--------------------------
+
+- fetch_openml
+  - Exported in __all__ from the module. The public entry point to load datasets from OpenML with caching and retry behavior.
+
+- _get_local_path(openml_path: str, data_home: str) -> str
+  - Returns the local cache path for the given OpenML path.
+
+- _retry_with_clean_cache(openml_path: str, data_home: Optional[str], no_retry_exception: Optional[Exception] = None) -> Callable
+  - Returns a decorator that adds cache-cleanup retry logic to a function.
+
+- _retry_on_network_error(n_retries: int = 3, delay: float = 1.0, url: str = "") -> Callable
+  - Returns a decorator that retries on URLError or TimeoutError, with a delay between attempts.
+
+- _open_openml_url(openml_path: str, data_home: Optional[str], n_retries: int = 3, delay: float = 1.0)
+  - Opens a resource from OpenML, with optional local caching and gzip handling.
+
+- OpenMLError
+  - Exception raised for OpenML-specific errors (HTTP 412).
+
+- _get_json_content_from_openml_api(url: str, error_message: Optional[str], data_home: Optional[str], n_retries: int = 3, delay: float = 1.0) -> Dict
+  - Loads and returns JSON content from the OpenML API, using the caching and retry mechanisms.
+
+Notes
+-----
+
+- The loading utilities are designed to be robust in environments with intermittent network connectivity and to minimize repeated downloads by leveraging a local disk cache.
+- All networking and caching behavior is implemented with careful atomic file operations to ensure safe concurrent usage in multi-process contexts.
+
+This documentation reflects the implementation details present in the code and provides guidance for developers integrating or extending the dataset loading utilities.

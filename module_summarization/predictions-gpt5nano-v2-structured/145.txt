@@ -1,0 +1,170 @@
+File Objects
+============
+
+This section documents how h5py represents and manages HDF5 file objects at the low level. The implementation focuses on object identifiers, their lifecycle, and the safety measures that keep Python objects in sync with the underlying HDF5 library.
+
+Overview
+--------
+
+In HDF5, files, groups, datasets, and other objects are referred to by opaque identifiers (hid_t). h5py wraps these identifiers in Python objects (notably the ObjectID base class and its derivatives like FileID) to provide a Pythonic interface while ensuring correct lifecycle management, thread safety, and integration with Python’s garbage collector.
+
+Key concepts:
+
+- Each Python object that wraps an HDF5 identifier is tracked in a registry to coordinate lifetime and invalidate stale identifiers when the underlying HDF5 object is closed or reused.
+- A global locking mechanism serializes access to the low-level HDF5 API to prevent races when identifiers are created, mutated, or closed.
+- Nonlocal/invalidation logic ensures that “zombie” identifiers (Python objects whose HDF5 id may have been closed or replaced) don’t point to invalid handles.
+
+Locking and thread safety
+-------------------------
+
+To minimize races and ensure safe interaction with the low-level API, h5py uses a global lock:
+
+- A recursive lock is used to serialize all access to the low-level HDF5 routines.
+- The with_phil decorator provides a convenient way to run internal helpers under the lock.
+
+Code sketch (conceptual):
+
+.. code-block:: cython
+
+    IF USE_LOCKING:
+        cdef FastRLock _phil = FastRLock()
+    ELSE:
+        cdef BogoLock _phil = BogoLock()
+
+    phil = _phil
+
+    def with_phil(func):
+        """ Locking decorator """
+        ...
+
+This locking strategy is central to preventing races when identifiers are created, closed, or invalidated in multi-threaded contexts.
+
+Registry and zombie identifiers
+--------------------------------
+
+As of HDF5 1.8, identifiers may be reused once a previous object is closed. To avoid stale Python objects inadvertently referring to new HDF5 objects, h5py maintains a registry of live ObjectID instances and provides a mechanism to invalidate them when nonlocal events (such as file closure) occur.
+
+- registry: maps id(obj) -> weakref(obj), populated when an ObjectID is created and cleared when it is collected.
+- nonlocal_close(): walks the registry and sets obj.id = 0 for any non-locked, non-dying objects that are no longer valid.
+
+This behavior helps ensure that a lingering Python object cannot masquerade as a different HDF5 object after the original has been closed or replaced.
+
+The ObjectID class
+------------------
+
+The core runtime representation of an HDF5 identifier is the ObjectID class. It provides a minimal, safe wrapper around the underlying C API.
+
+Attributes (high level):
+
+- id: the underlying HDF5 identifier (hid_t)
+- locked: integer flag indicating whether the object is protected from closure
+- _pyid: a Python-side id used as a key in the object registry
+- __weakref__: support for weak references
+
+Key properties:
+
+- fileno: returns a tuple (fileno_lo, fileno_hi) representing the OS file descriptor associated with the object, via H5Gget_objinfo(self.id, '.', 0, &stat).
+- valid: indicates whether the Python-visible object is currently a valid HDF5 object (uses is_h5py_obj_valid(self)).
+
+Lifecycle:
+
+- __cinit__(self, id_): when a new ObjectID is created, it is registered in the global registry under self._pyid and tracked for debugging.
+- __dealloc__(self): when the Python object is garbage-collected, it releases the HDF5 reference if the object is valid and not locked; if the reference release fails, a warning is issued.
+
+Relevant excerpts (conceptual):
+
+.. code-block:: cython
+
+    cdef class ObjectID:
+        """
+            Represents an HDF5 identifier.
+
+        attributes:
+        cdef object __weakref__
+        cdef readonly hid_t id
+        cdef public int locked
+        cdef object _hash
+        cdef size_t _pyid
+        """
+
+        def __cinit__(self, id_):
+            with _phil:
+                self.id = id_
+                self.locked = 0
+                self._pyid = id(self)
+                registry[self._pyid] = weakref.ref(self)
+
+        def __dealloc__(self):
+            with _phil:
+                if is_h5py_obj_valid(self) and (not self.locked):
+                    if H5Idec_ref(self.id) < 0:
+                        warnings.warn(
+                            "Reference counting issue with HDF5 id {}".format(
+                                self.id
+                            )
+                        )
+
+Nonlocal/invalidation details
+------------------------------
+
+- nonlocal_close() scans the registry to invalidate stale ObjectIDs after nonlocal events (e.g., closing a file that could invalidate related identifiers).
+- Only non-locked, live objects are considered for invalidation; locked objects are preserved to prevent unintended disruption.
+
+Example: inspecting the registry (debug helper)
+------------------------------------------------
+
+For debugging purposes, h5py provides a helper that prints a summary of the object registry:
+
+.. code-block:: python
+
+    @with_phil
+    def print_reg():
+        import h5py
+        refs = registry.values()
+        objs = [r() for r in refs]
+
+        none = len([x for x in objs if x is None])
+        files = len([x for x in objs if isinstance(x, h5py.h5f.FileID)])
+        groups = len([x for x in objs if isinstance(x, h5py.h5g.GroupID)])
+
+        print("REGISTRY: %d | %d None | %d FileID | %d GroupID" % (len(objs), none, files, groups))
+
+Usage and lifecycle with File objects
+-------------------------------------
+
+High-level File objects (e.g., created via h5py.File) internally create and manage an ObjectID that represents the underlying HDF5 file identifier. The lifecycle is managed automatically:
+
+- When a File is opened, a corresponding ObjectID is created and registered.
+- As long as the File is in scope, the ObjectID ensures the HDF5 id is valid and kept alive.
+- Upon closing the File (or during garbage collection), the registry and reference counting mechanisms ensure a clean release of resources and prevent stale identifiers from being reused by accident.
+
+Code examples (high level)
+
+.. code-block:: python
+
+    import h5py
+
+    # Create a file and write data
+    with h5py.File('example.h5', 'w') as f:
+        dset = f.create_dataset('/data', data=[1, 2, 3])
+
+    # Access a file descriptor (for debugging/low-level interop)
+    with h5py.File('example.h5', 'r') as f:
+        print(f.fileno)  # (low, high) OS file descriptor pair
+
+Debugging tips
+--------------
+
+- Use print_reg() to inspect live ObjectIDs during development or debugging.
+- The DEBUG_ID switch controls extra diagnostic output during ObjectID construction and deallocation.
+
+See Also
+--------
+
+- h5py.File: high-level user-facing API for file interactions
+- h5py.h5f.FileID: internal class representing a File object’s low-level identifier
+
+Notes
+-----
+
+This documentation focuses on the low-level File object representation and its lifecycle internals as implemented in the ObjectID machinery. End users typically interact with File via h5py.File and do not manipulate ObjectID directly. The locking, registry, and nonlocal_close mechanisms operate behind the scenes to provide robust, thread-safe operation.

@@ -1,0 +1,140 @@
+Support Vector Machines
+=======================
+
+Overview
+--------
+
+This module implements linear Support Vector Machines using the LIBLINEAR library. It provides a practical, scalable linear SVM suitable for large numbers of samples and features, with support for both dense and sparse inputs. Non-linear kernels are not included; the focus is on fast linear classification with configurable regularization and loss.
+
+Key ideas:
+- Linear SVMs are trained via LIBLINEAR, exposing a flexible set of penalties and losses.
+- Regularization can be L1 or L2 (penalty).
+- Loss options include hinge and squared hinge.
+- Dual or primal optimization can be chosen automatically or forced by the user.
+- Multiclass classification is supported using one-vs-rest (ovr) or crammer–Singer strategies.
+- Intercept handling via fit_intercept and intercept_scaling.
+- Training is exposed through a small, well-defined Python surface backed by Cython/C code, with a thin bridge to a C library.
+
+Core Architecture
+-----------------
+
+- Cython wrappers bridge Python to LIBLINEAR:
+  - C-level interfaces declared in extern blocks:
+    - cdef extern from "_cython_blas_helpers.h": provides BLAS helpers and a BlasFunctions struct used by the low-level routines.
+    - cdef extern from "linear.h": declares LIBLINEAR core types (feature_node, problem, parameter, model) and essential API (check_parameter, train, get_nr_feature, get_nr_class, get_n_iter, etc.).
+    - cdef extern from "liblinear_helper.c": wraps parameter and problem setup, training, model extraction, and memory management (set_parameter, set_problem, set_model, get_bias, free_problem, free_parameter, etc.).
+- Python API surface (example in the code):
+  - _validate_dual_parameter: internal helper to determine whether to use the dual formulation based on data characteristics and configuration.
+  - LinearSVC: the public class implementing a linear SVM classifier with a rich parameterization compatible with scikit-learn’s API (penalty, loss, dual, tol, C, multi_class, fit_intercept, intercept_scaling, etc.).
+
+Public API
+----------
+
+LinearSVC
+---------
+
+LinearSVC implements a linear Support Vector Classifier using LIBLINEAR. It mirrors the familiar scikit-learn interface, with a focus on large-scale linear SVMs. Key aspects include:
+
+- Inheritance: LinearClassifierMixin, SparseCoefMixin, BaseEstimator
+- Kernel: linear (no kernel parameter; this is a linear SVM)
+- Multiclass strategy: ovR or crammer_singer (controlled by multi_class)
+- Optimization: supports dual or primal, with an auto-detection heuristic when dual="auto"
+- Regularization: penalty in {'l1', 'l2'}
+- Loss: loss in {'hinge', 'squared_hinge'}
+- Intercept handling: fit_intercept, intercept_scaling
+- Convergence: tol
+- Regularization strength: C (positive scalar)
+- Internal considerations: uses BLAS-backed routines for performance, and can handle dense or sparse input
+
+Parameters (high-level)
+
+- penalty : {'l1', 'l2'}, default='l2'
+  - Norm used for regularization of the coefficients.
+- loss : {'hinge', 'squared_hinge'}, default='squared_hinge'
+  - Loss function to use for optimization.
+- dual : "auto" or bool, default=True
+  - Choose dual or primal optimization. If "auto", the implementation selects the most suitable formulation based on data shape and configuration.
+- tol : float, default=1e-4
+  - Tolerance for the stopping criterion.
+- C : float, default=1.0
+  - Regularization strength; larger C means less regularization.
+- multi_class : {'ovr', 'crammer_singer'}, default='ovr'
+  - Multiclass strategy when more than two classes are present.
+- fit_intercept : bool, default=True
+  - Whether to fit an intercept term.
+- intercept_scaling : float, default=1.0
+  - Scaling of the synthetic feature used for the intercept when fit_intercept is True.
+- max_iter (in some implementations): not shown in the snippet, but typically present in high-level SVM APIs
+- verbose/verbosity: controlled via set_verbosity in the C API (internal)
+
+Internal API and Implementation Details
+--------------------------------------
+
+- Core C/Cython interfaces:
+  - Liblinear and its helpers are wired through extern blocks:
+    - set_parameter(...) constructs a parameter object for LIBLINEAR.
+    - set_problem(...) or csr_set_problem(...) initialize the problem representation from inputs.
+    - train(...) runs the optimization and returns a model.
+    - get_nr_feature, get_nr_class, get_n_iter provide meta-information about the trained model.
+    - get_bias(model *) retrieves the intercept term when present.
+    - free_problem, free_parameter, free_and_destroy_model manage memory.
+    - set_verbosity controls diagnostic output during training.
+- BLAS integration:
+  - BlasFunctions struct with function pointers for dot, axpy, scal, nrm2 is provided to accelerate linear algebra operations inside LIBLINEAR, especially when interfacing with C/C++ code paths.
+- Data representations:
+  - feature_node, problem, and parameter represent LIBLINEAR’s native structures.
+  - The Python layer accepts dense or sparse input; internally the CSR (Compressed Sparse Row) form can be constructed via csr_set_problem for efficiency with sparse data.
+- Training lifecycle:
+  - Build a LIBLINEAR problem (set_problem or csr_set_problem) from X, y.
+  - Validate parameters with check_parameter (extern function).
+  - Configure the solver via set_parameter and potentially a BlasFunctions pointer.
+  - Call train to obtain a model.
+  - Extract model properties (bias, coefficients) as needed by the Python API.
+  - Free allocated memory with free_problem, free_parameter, and free_and_destroy_model to avoid leaks.
+
+Usage Examples
+--------------
+
+Basic usage (dense data):
+
+- Instantiate and train a linear SVM classifier
+  - from sklearn.svm import LinearSVC
+  - clf = LinearSVC(penalty='l2', loss='squared_hinge', C=1.0, dual='auto', tol=1e-4)
+  - clf.fit(X, y)
+
+Sparse/dense data compatibility:
+- The implementation accepts both dense and sparse feature representations; sparse data is typically passed as a CSR-like structure, enabling efficient linear SVM training on high-dimensional, sparse data.
+
+Internal notes for developers
+-----------------------------
+
+- The dual vs primal decision path is handled by _validate_dual_parameter and depends on:
+  - n_samples (X.shape[0])
+  - n_features (X.shape[1])
+  - chosen loss and penalty
+  - multi_class setting
+- The interface emphasizes memory efficiency and performance by leveraging C-level routines and BLAS.
+- The API aims to be consistent with the scikit-learn interface, enabling familiar usage and interoperability with other estimators and pipelines.
+
+Practical Takeaways
+-------------------
+
+- Use LinearSVC for fast linear classification on large-scale problems when a linear decision boundary suffices.
+- Choose penalty and loss to control sparsity and regularization:
+  - penalty='l1' with appropriate loss can yield sparse coefficient vectors.
+  - penalty='l2' is the standard regularization for LIBLINEAR’s SVM.
+  - loss='hinge' is the classic SVM loss; 'squared_hinge' often yields different convergence properties.
+- Let the implementation decide dual vs primal when dual='auto' to balance speed and memory usage based on your data shape.
+- Multiclass is handled natively; the default is one-vs-rest, with an alternative crammer_singer option if desired.
+- Intercept handling is configurable via fit_intercept and intercept_scaling.
+
+See Also
+--------
+
+- SVC (non-linear SVM with kernels) for alternatives that provide kernelized SVMs.
+- The LIBLINEAR project and its documentation for deeper algorithmic details on the optimization problem, dual/primal formulations, and regularization options.
+
+Notes
+-----
+
+This documentation reflects the integration points and public API surface exposed by the svm.rst for the linear SVM implementation backed by LIBLINEAR, including the C-level interfaces and their Python-facing wrappers.

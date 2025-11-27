@@ -1,0 +1,179 @@
+Connect to remote data
+======================
+
+Overview
+--------
+This module provides utilities to read bytes from remote data sources (filesystems
+via fsspec) and construct lazy, block-aligned readers using Dask. It enables
+reading multiple files (including globs), optionally splitting data into blocks
+across files, and returning a sample header. It handles remote filesystems, block
+splitting, and optional inclusion of file paths alongside the blocks.
+
+Key concepts
+------------
+- read_bytes: Core function to obtain a sample and a collection of delayed read blocks
+  from one or more files, with optional delimiter-based block boundaries.
+- read_block_from_file: Helper that reads a specific block from a lazy file handle.
+- Delayed execution: Each block is produced as a Dask delayed object, allowing parallel
+  computation when used within a Dask graph.
+
+API reference
+-------------
+
+.. function:: read_bytes(
+    urlpath,
+    delimiter=None,
+    not_zero=False,
+    blocksize="128 MiB",
+    sample="10 kiB",
+    compression=None,
+    include_path=False,
+    **kwargs,
+)
+
+Read bytes from remote data sources and return lazily-evaluated blocks.
+
+Parameters
+----------
+urlpath : str or sequence of str/PathLike
+    Absolute or relative filepath(s). Can include a protocol like s3:// or hdfs://
+    if the corresponding filesystem is installed. To read from multiple files, you
+    can pass a globstring (e.g. "2015-*-*.csv") or a list of paths. All paths must
+    share the same protocol when multiple files are provided.
+delimiter : bytes, optional
+    Delimiter used to split the data into blocks. Blocks start after a delimiter and
+    end on the delimiter. If None, blocks are chunked purely by byte offsets.
+not_zero : bool
+    If True, seek past the start-of-file delimiter, discarding the header.
+blocksize : int or str, optional
+    Chunk size in bytes. Accepts an int or a string like "128 MiB". If None, reads
+    each file as a single block.
+sample : int, str, or bool, optional
+    Whether to return a header sample. False disables the sample. True returns a
+    default 10 KiB sample. If an int or string is provided, it is interpreted as a
+    size (e.g. 2**20 or "1 MiB").
+compression : str or None, optional
+    Compression type (e.g. 'gzip', 'xz') or None. Only uncompressed or
+    explicitly supported formats are read with chunked reads.
+include_path : bool, optional
+    If True, also return the file paths corresponding to each block.
+**kwargs : dict
+    Storage options passed to fsspec (e.g. host, port, username, password).
+
+Returns
+-------
+sample : bytes
+    The header sample read from the first file (or from the beginning, depending on
+    options).
+blocks : list of list of ``dask.Delayed``
+    Outer list per input file; inner list contains delayed objects, each computing to
+    a block of bytes from that file.
+paths : list of str, optional
+    Only present when include_path is True. Mirrors the structure of ``blocks`` and
+    contains the corresponding file paths.
+
+Raises
+------
+TypeError
+    If ``urlpath`` is not a string, list/tuple, or os.PathLike.
+OSError
+    If the provided urlpath resolves to no files.
+ValueError
+    If chunked reads are requested for compressed files (blocksize not None and
+    compression is set to a value that requires random access is not supported).
+
+Notes
+-----
+- When blocksize is not None, data is split into offsets per file. If a file’s size
+  cannot be determined, a ValueError is raised unless blocksize is None.
+- If the file is empty, it is skipped (no blocks are produced for that file).
+- If ``compression`` is set to "infer", compression is inferred from the file path
+  extension before deciding whether chunked reads are possible.
+
+Underlying behavior
+-------------------
+- The function uses ``fsspec`` to open remote files and obtain file handles.
+- A per-file set of offsets and lengths is computed to align blocks with
+  delimiter boundaries and to optimize block distribution.
+- Each block is produced by a delayed call to ``read_block_from_file``, which reads
+  the designated offset and length from a lazily opened file, respecting the specified
+  delimiter when provided.
+
+Usage examples
+--------------
+
+.. code-block:: python
+
+   # Basic read: sample header and block-delimited chunks from local or remote files
+   sample, blocks = read_bytes('2015-*-*.csv', delimiter=b'\n')
+
+.. code-block:: python
+
+   # Read from a remote filesystem (e.g., S3) with a delimiter
+   sample, blocks = read_bytes('s3://bucket/2015-*-*.csv', delimiter=b'\n')
+
+.. code-block:: python
+
+   # Include path information for each block
+   sample, blocks, paths = read_bytes('2015-*-*.csv', include_path=True)
+
+.. code-block:: python
+
+   # Read with no chunking (single block per file)
+   sample, blocks = read_bytes('2015-*-*.csv', blocksize=None, delimiter=b'\n')
+
+Edge cases and considerations
+------------------------------
+- If no files are resolved from the given urlpath, a clear OSError is raised.
+- Using compression with chunked reads (blocksize != None) is not supported; set
+  blocksize=None for compressed files.
+- The ``sample`` parameter can be False (disable sample), or a size specifier
+  (int or string like "1 MiB"). If True, a 10 KiB sample is used for backward
+  compatibility.
+- The ``delimiter`` must be a bytes object. If None, blocks are split purely by
+  byte offsets.
+
+Internal helpers
+----------------
+read_block_from_file(lazy_file, off, bs, delimiter)
+    Reads a specific block from a lazily opened file handle. If ``off`` is 0 and
+    ``bs`` is None, the entire file is read. Otherwise, a block is read using
+    the provided offset, length, and delimiter.
+
+Notes on usage with remote data
+-------------------------------
+- Requires fsspec-compatible backends (e.g., local filesystem, S3, HDFS).
+- The implementation returns Dask delayed objects, enabling parallel computation
+  when used inside a Dask graph or compute pipeline.
+
+Code references (high level)
+----------------------------
+- read_bytes: Core entry point for obtaining sample and blocks.
+- read_block_from_file: Block-level reader used by read_bytes to assemble blocks.
+- get_fs_token_paths and OpenFile from fsspec are used to open files on remote filesystems.
+
+End user guidance
+-----------------
+- Start with a simple glob pattern and a reasonable blocksize to balance memory
+  and parallelism.
+- When dealing with text data that requires header skipping, consider not_zero or
+  delimiter-based splitting to align with row boundaries.
+- For performance, prefer non-compressed, unchunked reads or ensure files expose
+  their sizes to enable efficient chunking.
+
+Usage snippet
+-------------
+Code example showing typical workflow with Dask:
+
+.. code-block:: python
+
+   from dask import compute
+
+   sample, blocks = read_bytes('data/2015-*.csv', delimiter=b'\\n')
+   # blocks is a list of lists of delayed objects; each inner list corresponds to a file
+   # To trigger computation:
+   results = [compute(b)[0] for b in blocks]
+   # Flatten results or compose into a larger pipeline as needed
+
+This documentation summarizes the connect-to-remote-data functionality and how to
+use read_bytes to access remote files efficiently with delayed execution.

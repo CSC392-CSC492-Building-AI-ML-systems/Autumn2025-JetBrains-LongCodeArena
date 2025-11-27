@@ -1,0 +1,189 @@
+Using review sessions
+=====================
+
+This module provides the core session and authentication machinery used to participate in review workflows on an ftrack server. Review sessions are powered by a Session object that manages server connection, authentication, data caching, plugin loading, and an embedded event hub for notifications related to review activities.
+
+Overview
+--------
+
+- SessionAuthentication: attaches ftrack authentication information to outgoing HTTP requests via headers.
+- Session: central entry point for interacting with an ftrack server. Handles credentials, environment variable fallbacks, caching, plugin discovery, and optional event hub connection.
+- Event hub (optional): enables subscribing to and publishing non-local review-related events in the background.
+- Caching: a layered cache is used with a MemoryCache at the top level to improve performance and reduce redundant server requests.
+- auto_populate: when enabled, accessing an attribute on an unloaded entity will trigger a server fetch to populate it automatically.
+- Auto connection to event hub: can be enabled to establish an asynchronous connection to the event server for review notifications.
+
+Key components and relationships
+-------------------------------
+
+- SessionAuthentication(api_key, api_user)
+  - Purpose: attach authentication headers to requests.
+  - Behavior: __call__(request) updates headers with:
+    - ftrack-api-key: <api_key>
+    - ftrack-user: <api_user>
+  - Returned value: the updated request object.
+
+- Session(...)
+  - Purpose: provide a configured connection to a specific ftrack server for review-related operations.
+  - Core responsibilities:
+    - Manage server URL, API key, and API user (with environment variable fallbacks).
+    - Handle automatic population of entity attributes (auto_populate).
+    - Set up and manage a layered cache (with a default MemoryCache at the top).
+    - Optionally connect an embedded event hub (auto_connect_event_hub).
+    - Discover and configure plugins (plugin_paths, plugin_arguments).
+    - Support an optional custom cache_key_maker for object caching.
+  - Important flags:
+    - record_operations: whether to record pending operations.
+    - recorded_operations: a container for pending operations (ftrack_api.operation.Operations).
+
+- EventHub (ftrack_api.event.hub)
+  - Purpose: enable publishing and subscribing to review-related events, potentially non-local.
+  - Behavior: when auto_connect_event_hub is True, the hub connects in a background thread.
+
+- Caching and plugin mechanisms
+  - Cache: implements a layered caching strategy with a top-level memory cache by default.
+  - cache_key_maker: generates cache keys for objects stored in the cache.
+
+Getting started
+---------------
+
+- Prerequisites:
+  - A reachable ftrack server URL.
+  - API credentials: api_key and api_user.
+  - Optional: enable review-event notifications via the embedded event hub.
+
+Getting started example
+-----------------------
+
+- Basic session creation (credentials via arguments; dynamic environment fallback is supported):
+```python
+from ftrack_api import Session
+
+session = Session(
+    server_url='https://ftrack.example.com',
+    api_key='YOUR_API_KEY',
+    api_user='YOUR_USERNAME',
+    auto_populate=True,
+    auto_connect_event_hub=True,
+    schema_cache_path='/path/to/schema/cache',
+)
+```
+
+- Environment-variable based startup (alternative approach):
+```bash
+export FTRACK_SERVER=https://ftrack.example.com
+export FTRACK_API_KEY=YOUR_API_KEY
+export FTRACK_API_USER=YOUR_USERNAME
+```
+
+- Using the session (high-level workflow):
+```python
+# Access entities; with auto_populate enabled, attributes are fetched on demand.
+# Example: interacting with review-related entities will trigger server lookups as needed.
+# Actual entity usage will depend on the ftrack API (e.g., querying reviews, tasks, etc.)
+
+# Pseudo-usage to illustrate the pattern (replace with actual entity types/queries as appropriate):
+# review = session.query('Review where id is 12345').one()
+# review.update_status('approved')
+```
+
+Configuration options
+---------------------
+
+- server_url
+  - Description: URL of the target ftrack server (including port if needed).
+  - Notes: If not provided, the environment variable FTRACK_SERVER will be consulted.
+  - Errors: TypeError if not specified.
+
+- api_key
+  - Description: API key for authentication.
+  - Notes: May be supplied directly or via the environment variable FTRACK_API_KEY (or FTRACK_APIKEY for backward compatibility).
+  - Errors: TypeError if not specified.
+
+- api_user
+  - Description: Username for the API user.
+  - Notes: May be supplied directly or via the environment variable FTRACK_API_USER or inferred from getpass.getuser().
+  - Errors: TypeError if not specified.
+
+- auto_populate
+  - Type: bool
+  - Description: If True, entity attributes are lazily fetched from the server upon access if not already loaded.
+
+- plugin_paths
+  - Description: List of paths to search for plugins to load at discovery time.
+
+- cache
+  - Description: Cache instance implementing the Cache interface, or a callable that returns a cache or None.
+  - Notes: The provided cache is integrated into a pre-configured layered cache with a MemoryCache at the top.
+
+- cache_key_maker
+  - Description: Instance implementing KeyMaker used to generate keys for cached objects.
+  - Default: StringKeyMaker.
+
+- auto_connect_event_hub
+  - Type: bool
+  - Description: If True, the embedded event hub is connected automatically in the background.
+  - Notes: If False, you must connect manually via the hub API.
+
+- schema_cache_path
+  - Description: Path to a folder for schema caching; can be False to disable caching entirely.
+  - Environment: Uses FTRACK_API_SCHEMA_CACHE_PATH if not provided.
+
+- plugin_arguments
+  - Description: Mapping of keyword arguments passed to plugin registration functions; compatible plugins will accept only relevant arguments.
+
+Returns and behavior notes
+--------------------------
+
+- SessionAuthentication.__call__(request)
+  - Returns: the modified request with authentication headers set.
+
+- Session(...)
+  - Returns: a new Session object configured with the provided options.
+  - Side effects:
+    - May spawn a background thread to connect the event hub if auto_connect_event_hub is True.
+    - Configures caching and plugin loading as part of initialization.
+    - Validates required credentials and server URL, raising TypeError if missing.
+
+Important considerations and edge cases
+---------------------------------------
+
+- Required credentials
+  - If server_url is not provided (either as an argument or via FTRACK_SERVER), a TypeError is raised.
+  - If api_key is not provided (via argument or FTRACK_API_KEY / FTRACK_APIKEY), a TypeError is raised.
+  - If api_user is not provided (via argument or FTRACK_API_USER or fallback), a TypeError is raised.
+
+- Backwards compatibility
+  - The environment may contain FTRACK_APIKEY as an alias for FTRACK_API_KEY.
+
+- Auto-population
+  - Enabling auto_populate means that attribute access on unloaded entities will trigger server requests to fetch data.
+
+- Event hub behavior
+  - Enabling auto_connect_event_hub starts a background thread to establish a connection to the event server. Subscribing to events does not require a connected hub, but publishing or receiving non-local events does.
+
+- Caching behavior
+  - A top-level MemoryCache is used by default; configuring a custom cache via the cache parameter integrates with a layered caching strategy.
+
+- Plugin loading
+  - plugin_paths and plugin_arguments control runtime plugin discovery and configuration.
+
+- Stability and safety
+  - Misconfiguration (e.g., missing credentials or server URL) will raise TypeError during Session initialization.
+  - The system is designed to continue safely if a non-critical cache or plugin configuration cannot be established, by returning None from those respective hooks, allowing the session to operate with defaults.
+
+Usage summary
+-------------
+
+- Use Session to connect to an ftrack server for review-related workflows.
+- Authenticate via api_key/api_user (or environment variables).
+- Optionally enable auto_populate for convenient data access and auto_connect_event_hub to receive review-related events in real time.
+- Leverage the caching and plugin systems to optimize performance and extend functionality.
+
+Notes
+-----
+
+- The embedded event hub connection is performed in a background thread to improve startup time.
+- Subscribing to events does not require a connected hub; publishing and receiving events rely on the hub being connected.
+
+End of documentation

@@ -1,0 +1,199 @@
+# Generate tutorial about pipelines
+
+This document provides a developer-focused tutorial on using and composing pipelines with the pipeline utilities. It covers the core concepts, common usage patterns, and practical examples to build, tune, and inspect pipelines that chain transforms and estimators together.
+
+## Overview
+
+- A pipeline is a sequence of steps: transforms (fit/transform) followed by a final estimator (fit).
+- Steps are defined as a list of (name, transform/estimator) tuples.
+- The final estimator is responsible for prediction; all intermediate steps must implement fit and transform.
+- Pipelines enable consistent parameter tuning across steps via the double-underscore (`__`) separator (e.g., `pipeline__transformer__param`).
+- Memory caching can be enabled to speed repeated fits by caching fitted transformers (the final estimator is not cached).
+- You can replace or drop steps at will (e.g., replace a transformer, remove a step with `passthrough` or `None`).
+
+Key classes and helpers
+- `Pipeline`: Core class that composes a sequence of transforms and a final estimator.
+- `FeatureUnion` / `make_union`: Combine features from multiple transformer outputs in parallel.
+- `make_pipeline`: Convenience wrapper to create a simple pipeline without naming every step explicitly.
+- Output configuration: `set_output` to influence how transform outputs are produced (e.g., pandas DataFrames).
+
+This tutorial focuses on practical usage and patterns developers typically employ when building reusable ML pipelines.
+
+## Core concepts
+
+- Steps:
+  - Each step is a (name, estimator) pair.
+  - All steps except the last must be transformers (implement `fit` and `transform`).
+  - The last step is an estimator (implements `fit`; may also implement `predict`/`predict_proba` for downstream tasks).
+
+- Parameter setting:
+  - Use the double underscore syntax to target parameters inside a specific step, e.g.:
+    - `pipeline__scaler__with_mean = False`
+    - `pipeline__svc__C = 10`
+
+- Memory:
+  - If `memory` is set (e.g., to a `joblib.Memory` instance or a path), transformers are cached between fits to speed up repeated calls.
+
+- Flexibility:
+  - Steps can be replaced by other estimators or removed by using `passthrough` or `None`.
+  - You can inspect steps via `named_steps` or `steps`.
+
+- Output handling:
+  - `set_output` can configure the transform output format (e.g., default or pandas DataFrames) for all steps.
+
+## Getting started
+
+Install dependencies (if needed) and import the core components.
+
+Example:
+- Basic pipeline with scaling and a classifier
+- Inspecting and tuning parameters
+- Caching for expensive transforms
+
+Code example 1: Simple pipeline and evaluation
+- This demonstrates a typical pipeline with a scaler and a classifier.
+
+```python
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+
+# Data
+X, y = make_classification(random_state=0)
+X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0)
+
+# Pipeline: transform (scaling) then estimator (SVC)
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('svc', SVC())
+])
+
+# Fit and evaluate
+pipe.fit(X_train, y_train)
+score = pipe.score(X_test, y_test)
+print("Test score:", score)
+```
+
+Code example 2: Parameter tuning via `set_params`
+- You can tune parameters of steps using the `__` separator.
+
+```python
+# For example, adjust the C parameter of the SVC step
+pipe.set_params(svc__C=10).fit(X_train, y_train)
+score = pipe.score(X_test, y_test)
+print("Test score with C=10:", score)
+```
+
+Code example 3: Grid search with pipelines
+- Use `GridSearchCV` to explore parameter combinations across steps.
+
+```python
+from sklearn.model_selection import GridSearchCV
+
+param_grid = {
+    'svc__C': [0.1, 1, 10],
+    'svc__gamma': ['scale', 'auto']
+}
+
+grid = GridSearchCV(pipe, param_grid=param_grid, cv=5)
+grid.fit(X_train, y_train)
+
+print("Best score:", grid.best_score_)
+print("Best params:", grid.best_params_)
+print("Test score with best params:", grid.score(X_test, y_test))
+```
+
+Code example 4: Using `make_pipeline` for convenience
+- `make_pipeline` creates a pipeline without explicit step naming.
+
+```python
+from sklearn.pipeline import make_pipeline
+
+# Simple pipeline without naming steps
+pipe2 = make_pipeline(StandardScaler(), SVC(C=1.0))
+pipe2.fit(X_train, y_train)
+print("Score with make_pipeline:", pipe2.score(X_test, y_test))
+```
+
+Code example 5: Caching transformers with memory
+- Cache expensive transforms to speed subsequent fits.
+
+```python
+from joblib import Memory
+import numpy as np
+
+# Example cache directory (adjust as needed)
+memory = Memory(location="/tmp/sklearn-pipeline-cache", verbose=0)
+
+pipe_cached = Pipeline([
+    ('scaler', StandardScaler()),
+    ('svc', SVC())
+], memory=memory)
+
+pipe_cached.fit(X_train, y_train)
+print("Cached pipeline score:", pipe_cached.score(X_test, y_test))
+```
+
+Code example 6: Feature unions (parallel feature extraction)
+- Combine features from multiple transforms before fitting the estimator.
+
+```python
+from sklearn.pipeline import Pipeline, FeatureUnion
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+
+union = FeatureUnion([
+    ('pca', PCA(n_components=2)),
+    ('scaler', StandardScaler())
+])
+
+pipe_union = Pipeline([
+    ('features', union),
+    ('clf', LogisticRegression())
+])
+
+pipe_union.fit(X_train, y_train)
+print("Union pipeline score:", pipe_union.score(X_test, y_test))
+```
+
+## Advanced usage
+
+- Replacing or removing steps
+  - To drop a transform, replace it with `'passthrough'` or `None` in the `steps` list.
+  - To replace a transformer or estimator, assign a new estimator to the corresponding step name using `set_params`.
+
+- Inspecting pipelines
+  - Access steps via `named_steps` for user-friendly names:
+    - `pipe.named_steps['scaler']` gives the scaler instance.
+  - Access raw step configuration via `pipe.steps`.
+
+- Output configuration
+  - Use `set_output` to configure how transform results are produced, e.g., pandas DataFrames when downstream steps can consume them.
+
+- Integration with cross-validation
+  - Pipelines work seamlessly with `GridSearchCV`, `CrossValidator`, and other scikit-learn utilities to tune hyperparameters across steps in a single objective.
+
+## Developer notes
+
+- The `Pipeline` class exposes a minimal interface compatible with the scikit-learn estimator API:
+  - Constructor: `__init__(self, steps, *, memory=None, verbose=False)`
+  - Methods: `fit`, `transform`, `predict` (if final estimator supports it), `score`, `set_output`, `get_params`, `set_params`
+- Internal helpers and structures:
+  - `_BaseComposition` provides common behavior for composite estimators.
+  - `FeatureUnion` and `make_union` enable parallel feature extraction paths.
+  - `make_pipeline` provides a concise alternative to building a named `Pipeline`.
+- Best practices:
+  - Favor meaningful step names to keep parameter grids readable.
+  - Cache expensive transforms only when beneficial and safe to cache (non-stateless transforms can be problematic).
+  - Always validate the pipeline with a held-out test set or cross-validation.
+
+## See also
+
+- `FeatureUnion` and `make_union` for parallel feature extraction.
+- `make_pipeline` for quick pipeline construction.
+- Official user guide on pipelines for deeper theory and examples.
+
+This documentation provides a practical, developer-oriented guide to building, tuning, and using pipelines with the pipeline utilities, including concrete code examples and common patterns.

@@ -1,0 +1,154 @@
+Config usage
+==============
+
+ConfigParser is an extended configuration helper based on Python's ConfigParser. It adds sensible defaults, environment variable expansion, support for includes (including recursion and glob patterns), and optional Zookeeper-backed configuration. Passwords are stored separately to avoid exposure in the API.
+
+Defaults
+--------
+
+Defaults are defined in the _default_values mapping and can be augmented at runtime with add_defaults.
+
+- general
+  - config_file: taken from the ASAB_CONFIG environment variable (empty by default)
+  - tick_period: 1 (seconds)
+  - var_dir: a per-script hidden directory under the user home, derived from the script name
+  - changelog: ''
+  - manifest: ''
+  - pidfile: '!' (special token that expands to a platform-specific pid file location)
+  - working_dir: '.'
+  - uid: ''
+  - gid: ''
+
+- asab:metrics
+  - native_metrics: "true"
+  - web_requests_metrics: False (default: not generated)
+  - expiration: 60
+
+- asab:doc
+  - default_route_tag: "module_name"
+
+- logging
+  - verbose: from ASAB_VERBOSE environment variable (default: False)
+  - app_name: basename of the running script
+  - sd_id: "sd" (Structured data id, RFC5424)
+  - level: "NOTICE"
+  - levels: ''
+
+- logging:console
+  - format: "%(asctime)s %(levelname)s %(name)s %(struct_data)s%(message)s"
+  - datefmt: "%d-%b-%Y %H:%M:%S.%f"
+
+- logging:syslog
+  - enabled: "false"
+  - address: platform-specific default (Darwin: /var/run/syslog, others: /dev/log)
+  - format: platform-specific default (Darwin: "m", others: "3")
+
+- logging:file
+  - path: ''
+  - format: "%(asctime)s %(levelname)s %(name)s %(struct_data)s%(message)s"
+  - datefmt: "%d-%b-%Y %H:%M:%S.%f"
+  - backup_count: 3
+  - backup_max_bytes: 0
+  - rotate_every: ''
+
+- library
+  - azure_cache: "false" (true or a path to the cache location)
+
+- passwords
+  - (empty by default; used to securely store passwords separate from the main API)
+
+- housekeeping
+  - at: "03:00"
+  - limit: "05:00"
+  - run_at_startup: "no"
+
+Dynamic defaults
+----------------
+If the ASAB_ZOOKEEPER_SERVERS environment variable is set, a zookeeper section is added by default:
+  zookeeper:
+    servers: <value from ASAB_ZOOKEEPER_SERVERS>
+
+Includes and file loading
+-------------------------
+
+- Includes are read from the general.include option.
+- Includes may be newline- or space-delimited strings; each item can be a glob pattern.
+- For each include:
+  - It is expanded with environment variables, then globbed.
+  - Each file is loaded once (duplicates are warned and ignored).
+  - The include value is cleared after processing and files are loaded recursively to support nested includes.
+- Special handling for zookeeper includes:
+  - If an include starts with "zookeeper", it is processed via _include_from_zookeeper (implementation not shown here).
+- After loading an included file, the loader re-checks for further includes, enabling nested inclusion.
+
+Loading flow
+------------
+
+- The _load method initializes internal structures (load stack, contents, and names) and reads the default configuration file path from general.config_file.
+- If a config file is specified, it is loaded and its includes are processed as described above.
+- Defaults can be extended or overridden by calling add_defaults with a dictionary of sections and options.
+
+Usage tips
+----------
+
+- To provide defaults programmatically, call add_defaults with a dictionary matching the structure of _default_values.
+- Use environment variable expansion and URL-like references to keep configuration portable across environments.
+- Store secrets in the dedicated passwords section and reference them from other sections as needed.
+- Leverage includes to compose configurations from multiple files or to pull dynamic configuration from Zookeeper when available.
+
+Public API
+----------
+
+- add_defaults(dictionary: dict) -> None
+  - Merge the given dictionary into the current configuration, creating missing sections and options as needed.
+  - If a value contains a '$', environment variables within the value are expanded.
+
+Example configuration (highlights)
+----------------------------------
+
+[general]
+config_file = /etc/asab/config.ini
+tick_period = 1
+var_dir = ~/.config/your_script
+
+[logging]
+verbose = true
+app_name = your_app
+level = NOTICE
+
+[logging:console]
+format = %(asctime)s %(levelname)s %(name)s %(struct_data)s%(message)s
+datefmt = %d-%b-%Y %H:%M:%S.%f
+
+[logging:syslog]
+enabled = false
+address = /dev/log
+format = 3
+
+[logging:file]
+path = /var/log/your_app.log
+format = %(asctime)s %(levelname)s %(name)s %(struct_data)s%(message)s
+datefmt = %d-%b-%Y %H:%M:%S.%f
+backup_count = 3
+
+[asab:metrics]
+native_metrics = true
+web_requests_metrics = false
+expiration = 60
+
+[asab:doc]
+default_route_tag = module_name
+
+[housekeeping]
+at = 03:00
+limit = 05:00
+run_at_startup = no
+
+[passwords]
+kafka_password = <SECRET>  # stored securely; referenced by other sections as needed
+
+Notes
+-----
+- The pidfile '!' token expands to a platform-specific location for the process ID file.
+- The syslog address and format adapt to the current platform (Darwin vs others).
+- Zookeeper-based configuration and includes are optional and activated when appropriate environment variables or includes are present.

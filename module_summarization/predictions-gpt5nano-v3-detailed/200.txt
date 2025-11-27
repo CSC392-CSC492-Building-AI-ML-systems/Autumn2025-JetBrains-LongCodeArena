@@ -1,0 +1,163 @@
+Novelty and Outlier Detection
+===============================
+
+Overview
+--------
+This module provides techniques for identifying rare or anomalous observations in data. It covers both novelty detection (identifying unusual instances in new, unseen data after training on normal/regular data) and outlier detection (unsupervised identification of rare instances within a dataset). The goal is to separate typical observations from anomalous ones without requiring explicit labeling of anomalies during training.
+
+Key concepts
+------------
+- Novelty detection: Train on normal data, then detect and score anomalies in new samples. Often uses a “novelty” flag or a dedicated fit/predict workflow that separates fitting from scoring.
+- Outlier detection (unsupervised): Discover anomalous samples within the training data itself without explicit labels. Models may score every sample or provide a binary inlier/outlier decision.
+- Scoring vs classification: Detectors typically expose scores (higher scores often indicate inliers, lower scores indicate outliers) and binary predictions (inlier/outlier). Functions include decision_function, score_samples, and predict.
+- Contamination: A common parameter indicating the expected fraction of outliers in the data. It guides thresholding and scoring when turning scores into binary decisions.
+- Scaling and preprocessing: Many detectors assume features are on comparable scales; standardization or normalization is commonly advised.
+- Edge cases: Degenerate data (e.g., constant features), highly imbalanced datasets, presence of mislabeled normal samples in novelty scenarios, and large datasets that affect training time.
+
+Common algorithms and interfaces
+-------------------------------
+The following algorithms are widely used for novelty and outlier detection. They share common interfaces for fit, predict, and scoring, but may differ in how they interpret scores and the availability of novelty-mode vs. batch-mode fitting.
+
+- Local Outlier Factor (LOF)
+  - Type: Density-based unsupervised detector; can be used for novelty detection by enabling novelty mode.
+  - Novelty mode: LocalOutlierFactor(novelty=True) allows fitting on normal data and scoring new samples via predict and decision_function.
+  - Typical usage:
+    - Detect anomalies in the training set using fit_predict (default, novelty=False)
+    - For novelty detection on new data: fit on normal data with novelty=True, then predict/decision_function on new samples
+  - Common parameters: n_neighbors, contamination
+  - Outputs: predict(X) inliers/outliers (+1/-1), decision_function(X) or score_samples(X)
+
+- Isolation Forest
+  - Type: Ensemble-based unsupervised detector that isolates anomalies.
+  - Novelty mode: Not typically required; standard use is unsupervised on the whole dataset.
+  - Typical usage:
+    - Fit on data, then predict or decision_function to obtain anomaly scores
+  - Common parameters: n_estimators, max_samples, contamination
+  - Outputs: predict(X), decision_function(X)
+
+- One-Class Support Vector Machines (OneClassSVM)
+  - Type: Boundary-based detector suitable for novelty detection and some outlier tasks.
+  - Novelty mode: The model itself is often used in novelty scenarios; can separate training and scoring phases.
+  - Common parameters: nu, kernel, gamma
+  - Outputs: predict(X), decision_function(X)
+
+- Elliptic Envelope
+  - Type: Robust covariance estimator used for outlier detection under a Gaussian-like assumption.
+  - Common parameters: contamination, store_precision
+  - Outputs: predict(X) (inlier/outlier)
+
+API and return values (high level)
+----------------------------------
+- fit(X, y=None): Learn the model from the data X. For novelty detectors, this should be trained on normal data.
+- predict(X): Return inliers/outliers for X (commonly +1 for inliers, -1 for outliers). Availability depends on the detector and mode.
+- decision_function(X): Return a continuous anomaly score. Larger values typically indicate inliers; smaller values indicate outliers (behavior may differ by implementation).
+- score_samples(X): Return anomaly scores for each sample in X.
+- fit_predict(X): Convenience method returning predictions for X during a single fit/score pass (where supported).
+- Parameters such as contamination, novelty, n_neighbors, and n_estimators control sensitivity and performance.
+
+Usage examples
+--------------
+Example 1: Novelty detection with LocalOutlierFactor in novelty mode
+```python
+from sklearn.neighbors import LocalOutlierFactor
+import numpy as np
+
+# X_train contains normal data; X_test contains new samples to evaluate
+X_train = np.random.randn(1000, 2)
+X_test = np.random.randn(200, 2)
+
+# Enable novelty mode to score new data after fitting on normal data
+lof_novelty = LocalOutlierFactor(n_neighbors=20, novelty=True)
+lof_novelty.fit(X_train)
+
+# Predict on new data
+preds = lof_novelty.predict(X_test)           # +1 for inliers, -1 for outliers
+scores = lof_novelty.decision_function(X_test)  # higher means more normal
+```
+
+Example 2: Unsupervised outlier detection with Isolation Forest
+```python
+from sklearn.ensemble import IsolationForest
+import numpy as np
+
+X = np.random.randn(2000, 3)
+
+iso = IsolationForest(contamination=0.05, random_state=42)
+iso.fit(X)
+
+# Binary predictions and anomaly scores
+preds = iso.predict(X)            # +1 for inliers, -1 for outliers
+scores = iso.decision_function(X) # higher scores = more normal
+```
+
+Example 3: Outlier detection with Elliptic Envelope
+```python
+from sklearn.covariance import EllipticEnvelope
+import numpy as np
+
+X = np.random.randn(1500, 4)
+
+ee = EllipticEnvelope(contamination=0.05)
+ee.fit(X)
+preds = ee.predict(X)               # +1 inliers, -1 outliers
+```
+
+Example 4: Practical workflow – thresholding with contamination
+```python
+from sklearn.ensemble import IsolationForest
+import numpy as np
+
+X = np.random.randn(5000, 5)
+
+model = IsolationForest(contamination=0.02)
+model.fit(X)
+
+# Use a threshold on the decision_function to flag anomalies
+scores = model.decision_function(X)
+threshold = np.percentile(scores, 2)  # 2nd percentile as threshold
+anomalies = scores < threshold
+```
+
+Important considerations and edge cases
+---------------------------------------
+- Data quality: Training data for novelty detection should be representative of normal behavior. Presence of anomalies in the training set can degrade performance.
+- Scaling: Many detectors are sensitive to feature scaling. Standardize or normalize features when using distance- or covariance-based methods.
+- Contamination setting: Incorrect contamination estimates can lead to too many false positives or missed anomalies. When in doubt, validate with a labeled subset or use cross-validation.
+- Novelty mode compatibility: Not all detectors support novelty detection. Use models that explicitly support novelty mode (e.g., LOF with novelty=True) or structure your workflow to separate training from scoring appropriately.
+- Missing values: Impute or otherwise handle missing data before applying detectors.
+- High-dimensional data: Some detectors may struggle or become computationally expensive. Dimensionality reduction or feature selection can help.
+- Interpretability: Anomaly scores provide relative rankings but may require domain knowledge to interpret appropriately and to set practical thresholds.
+- Degenerate data: Near-constant features or singular covariance can cause failures (notably for covariance-based detectors). Check data variance and preprocessing steps.
+
+Best practices
+--------------
+- Start with a simple model (e.g., LOF or IsolationForest) and a reasonable contamination value, then adjust based on validation performance.
+- Always evaluate on a labeled holdout set when possible to estimate precision, recall, and ROC-AUC for anomaly detection tasks.
+- Consider ensembling multiple detectors if you need robustness against different anomaly types.
+- For novelty detection, ensure the training set reflects normal operating conditions and contains few or no anomalies.
+
+Notes on edge cases and troubleshooting
+---------------------------------------
+- If LOF novelty mode underperforms, verify that the training data truly represents normal behavior and that features are scaled appropriately.
+- If a detector fails due to numerical issues, inspect feature scaling, remove near-constant features, and check for outliers that may disproportionately affect the model.
+- For very large datasets, prefer detectors with linear or near-linear complexity (e.g., IsolationForest with appropriate max_samples) and consider subsampling or streaming approaches if applicable.
+
+See Also
+--------
+- LocalOutlierFactor (novelty mode)
+- IsolationForest
+- OneClassSVM
+- EllipticEnvelope
+
+References
+----------
+- scikit-learn documentation on novelty and outlier detection: concepts and API references
+- Practical anomaly detection literature and tutorials for selecting contamination thresholds and evaluating detectors
+
+End-to-end workflow example
+--------------------------
+1. Prepare data (impute missing values, scale features if needed).
+2. Choose an anomaly detector appropriate for the use case (novelty vs unsupervised).
+3. Fit the model on suitable data (normal data for novelty detectors).
+4. Score new observations and apply a threshold or use a validation-set-derived cutoff.
+5. Integrate into a pipeline with other preprocessing steps and downstream models as needed.

@@ -1,0 +1,159 @@
+Computational Performance
+=========================
+
+Overview
+--------
+This module provides meta-estimators for multioutput learning. Instead of training a single model to predict multiple targets, these estimators train or assemble a base estimator to handle several outputs. They enable scalable experimentation with multioutput regression and classification while reusing proven single-output estimators.
+
+Key components
+-------------
+- MultiOutputRegressor: Trains one regressor per output target.
+- MultiOutputClassifier: Trains one classifier per output target.
+- ClassifierChain: Builds a chain of classifiers; each stage augments the input with previous predictions.
+- RegressorChain: Builds a chain of regressors; each stage augments the input with previous predictions.
+
+Relationships
+-------------
+- All four classes are meta-estimators that wrap a user-provided base estimator (estimator) with the ability to handle multiple outputs.
+- They rely on internal helpers for fitting and partial fitting, and on a base abstraction (_MultiOutputEstimator) that enforces common parameter constraints.
+- Internal helpers (not part of the public API) include:
+  - _fit_estimator: Clone and fit a sub-estimator.
+  - _partial_fit_estimator: Clone (if first_time) and partially fit a sub-estimator.
+  - _available_if_estimator_has: Gate parameter availability based on the sub-estimator’s capabilities.
+- Core base class: _MultiOutputEstimator, which establishes common behavior and parameter constraints for the meta-estimators.
+
+Core design and internal helpers
+--------------------------------
+- _fit_estimator(estimator, X, y, sample_weight=None, **fit_params)
+  - Clones the provided estimator and fits it to (X, y).
+  - Supports optional sample_weight and additional fit parameters.
+  - Returns the fitted estimator instance.
+
+- _partial_fit_estimator(estimator, X, y, classes=None, partial_fit_params=None, first_time=True)
+  - Supports incremental training via partial_fit when the base estimator implements it.
+  - Clones on first_time to create an independent sub-estimator.
+  - Returns the updated estimator instance.
+
+- _available_if_estimator_has(attr)
+  - Returns a condition function used with available_if to enable/disable parameters based on the sub-estimator’s capabilities.
+  - Useful for dynamic parameter validation in meta-estimators.
+
+- _MultiOutputEstimator
+  - Abstract base class for multioutput meta-estimators.
+  - Parameter constraints include:
+    - estimator: Must implement fit and predict (HasMethods(["fit", "predict"])).
+    - n_jobs: Integer or None (parallelization control).
+  - Provides a common initialization contract for derived meta-estimators.
+
+Performance considerations
+--------------------------
+- Parallelism:
+  - n_jobs controls the degree of parallelism when fitting/predicting across outputs.
+  - Benefits: Can significantly reduce wall-clock time when the base estimator training/prediction is expensive and outputs are independent (as in MultiOutputRegressor/MultiOutputClassifier).
+  - Trade-offs: Higher memory usage and potential overhead from inter-process communication. Overhead may dominate for small models or few outputs.
+
+- Memory usage:
+  - Training allocates separate sub-estimators for each output, increasing memory usage roughly linearly with the number of outputs.
+  - Chains (ClassifierChain/RegressorChain) can also increase memory usage due to augmented feature space (previous predictions as features).
+
+- Data shapes and compatibility:
+  - X is typically (n_samples, n_features).
+  - y for multioutput tasks is (n_samples, n_outputs).
+  - For classification, targets are expected to be shaped consistently with a multioutput setup (2D array for multioutput labels).
+
+- Training time scaling:
+  - Baseline: training time scales with the number of outputs and the complexity of the base estimator.
+  - Parallelized variants can reduce wall time when hardware allows, but total work remains proportional to the number of outputs.
+
+- Edge cases:
+  - If the base estimator does not support partial_fit, _partial_fit_estimator will effectively be unused.
+  - For ClassifierChain, the order of outputs affects performance; without a sensible order, performance may degrade.
+  - If y is 1D, some wrappers will reshape to 2D internally to conform to multioutput expectations.
+  - Estimators that require probabilities (predict_proba) must be compatible with multioutput usage; some base estimators may not expose per-output probabilities.
+
+Usage examples
+--------------
+Basic multioutput regression
+--------------------------
+```python
+from sklearn.datasets import make_regression
+from sklearn.linear_model import LinearRegression
+from sklearn.multioutput import MultiOutputRegressor
+
+# Generate sample data: 3 outputs
+X, y = make_regression(n_samples=200, n_features=8, n_outputs=3, random_state=0)
+
+base_estimator = LinearRegression()
+model = MultiOutputRegressor(base_estimator)
+
+model.fit(X, y)
+y_pred = model.predict(X)
+```
+
+Basic multioutput classification
+-------------------------------
+```python
+from sklearn.datasets import make_classification
+from sklearn.linear_model import LogisticRegression
+from sklearn.multioutput import MultiOutputClassifier
+
+# Generate sample data with 3 binary outputs
+X, Y = make_classification(n_samples=300, n_features=20, n_classes=2, n_outputs=3, random_state=0)
+
+base_estimator = LogisticRegression(max_iter=1000)
+model = MultiOutputClassifier(base_estimator)
+
+model.fit(X, Y)
+Y_pred = model.predict(X)
+```
+
+Classifier chain example
+------------------------
+```python
+from sklearn.datasets import make_classification
+from sklearn.linear_model import LogisticRegression
+from sklearn.multioutput import ClassifierChain
+
+X, Y = make_classification(n_samples=300, n_features=20, n_classes=2, n_outputs=3, random_state=0)
+
+base_estimator = LogisticRegression(max_iter=1000)
+cc = ClassifierChain(base_estimator, order='auto', random_state=0)
+
+cc.fit(X, Y)
+Y_pred = cc.predict(X)
+```
+
+Regressor chain example
+-----------------------
+```python
+from sklearn.datasets import make_regression
+from sklearn.svm import SVR
+from sklearn.multioutput import RegressorChain
+
+X, Y = make_regression(n_samples=300, n_features=20, n_outputs=3, random_state=0)
+
+base_estimator = SVR(kernel='rbf')
+rc = RegressorChain(base_estimator, order='auto', random_state=0)
+
+rc.fit(X, Y)
+Y_pred = rc.predict(X)
+```
+
+Parameters and return values (summary)
+------------------------------------
+- estimator: The base estimator to wrap. Must implement fit and predict.
+- n_jobs: Number of parallel jobs to run; None or -1 means using all available cores.
+- fit(X, y, ...): Trains the multioutput model. Returns self.
+- predict(X): Predicts outputs for X, returning an array of shape (n_samples, n_outputs).
+
+Notes and best practices
+------------------------
+- Prefer n_jobs > 1 when the base estimator training/prediction is compute-intensive and your hardware can support parallelism.
+- For ClassifierChain/RegressorChain, consider experimenting with different output orders to observe potential performance differences.
+- Monitor memory usage for high numbers of outputs or large base estimators; per-output models can consume substantial memory.
+- Ensure y is shaped as (n_samples, n_outputs); if you have a single output, reshape to 2D as needed.
+
+See also
+--------
+- Related multioutput estimators in scikit-learn for alternative strategies and compatibility notes.
+- Base estimator documentation for guidance on capabilities required by the meta-estimators.

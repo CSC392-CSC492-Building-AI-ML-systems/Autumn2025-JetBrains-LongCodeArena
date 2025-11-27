@@ -1,0 +1,145 @@
+Nearest Neighbors
+=================
+
+Overview
+--------
+
+This section documents the Nearest Neighbors functionality implemented via BallTree
+in the codebase. BallTree provides an efficient data structure and search procedures
+for finding nearest neighbors under a variety of distance metrics. The implementation
+is specialized for two numeric precisions (64-bit and 32-bit) to balance precision
+and performance.
+
+Key ideas
+---------
+
+- Data structure: The BallTree is built as a BinaryTree where each node stores a centroid
+  bound and a radius that encloses all points within that node's subtree.
+- Reduced distance: The search uses reduced distances to prune the traversal
+  aggressively. The reduced distance is a metric-specific surrogate that preserves the
+  ranking of the true distance (e.g., squared Euclidean distance for Euclidean metric).
+  Distances returned to the user are converted back with the appropriate mapping.
+- Pruning logic: The search uses per-node bounds to decide whether to explore a
+  subtree. The minimum and maximum possible distances between a query point and a node
+  are computed to prune branches early.
+- Precision variants: Two specialized implementations exist:
+  BallTree64 (float64) and BallTree32 (float32). These inherit from BinaryTree{{suffix}} and
+  expose the same API, differing only in numeric type details.
+
+Data model and architecture
+---------------------------
+
+- BallTree class hierarchy
+  - BallTree64 and BallTree32 inherit from BinaryTree64/BinaryTree32, respectively.
+  - Each BallTree class is instantiated from a dataset stored in tree.data with
+    accompanying index references in tree.idx_array.
+- Node representation
+  - Node data (NodeData_t) stores:
+    - radius: the radius of the node's enclosing ball
+    - idx_start, idx_end: the range in idx_array that contains the dataset points for this node
+- Node bounds
+  - node_bounds: an array of centroids for each node, stored as a 3D array with shape
+    (1, n_nodes, n_features). Each node’s centroid is the center of its enclosing ball.
+- Tree construction
+  - allocate_data{{name_suffix}} initializes node_bounds to hold centroids for all nodes.
+  - init_node{{name_suffix}} computes:
+    - centroid: the mean of points in the node’s idx range; if sample_weight is provided, a weighted centroid is used.
+    - radius: the maximum reduced distance from the centroid to any point in the node.
+  - The radius is converted to a full distance via tree.dist_metric._rdist_to_dist.
+- Query primitives
+  - min_dist{{name_suffix}} computes the minimum possible distance from a query point to a node
+    (based on centroid and radius).
+  - max_dist{{name_suffix}} computes the maximum possible distance from a query point to a node.
+  - min_dist and max_dist are used to prune subtrees during search.
+  - Additional helper min_max_dist{{name_suffix}} exists to support pruning logic (details omitted here).
+
+Distance metrics and reduced distance
+-------------------------------------
+
+- dist_metric: the distance metric used by the tree (e.g., Euclidean, Manhattan, etc.).
+- rdist: the reduced distance function used during pruning. It provides a cheaper-to-compute surrogate that preserves the ranking of true distances.
+- _rdist_to_dist: converts reduced distance values back to actual distances for user-facing results.
+- Metrics supported (examples)
+  - Bray-CurtisDistance, CanberraDistance, ChebyshevDistance, DiceDistance, EuclideanDistance,
+    HammingDistance, HaversineDistance, JaccardDistance, MahalanobisDistance, ManhattanDistance,
+    MinkowskiDistance, PyFuncDistance, RogersTanimotoDistance, RussellRaoDistance,
+    SEuclideanDistance, SokalMichenerDistance, SokalSneathDistance, WMinkowskiDistance
+- Each metric has a suffix variant (64-bit or 32-bit) to align with the precision of the underlying arrays.
+
+Implementation details by precision
+-----------------------------------
+
+Two specialized implementations are generated for performance and precision:
+
+- BallTree64
+  - Uses INPUT_DTYPE_t = float64_t and INPUT_DTYPE = np.float64
+  - Methods and attributes are specialized for 64-bit floating point data
+- BallTree32
+  - Uses INPUT_DTYPE_t = float32_t and INPUT_DTYPE = np.float32
+  - Methods and attributes are specialized for 32-bit floating point data
+
+Both variants inherit from their corresponding BinaryTree{{name_suffix}} classes and expose identical behavior,
+with numerical operations tailored to their precision.
+
+Usage
+-----
+
+Typical usage involves constructing a BallTree from a dataset and querying for neighbors.
+
+.. code-block:: python
+
+   # Pseudo-code illustrating typical usage
+   import numpy as np
+   # from your_module.neighbors import BallTree
+   X = np.random.rand(1000, 3)  # dataset of 1000 points in 3D
+   tree = BallTree(X, metric='euclidean')  # 64-bit or 32-bit variant chosen automatically
+
+   # Query for k nearest neighbors of some query points
+   q = np.random.rand(5, 3)
+   dist, ind = tree.kneighbors(q, k=5)
+
+   # Or: radius-based neighbors
+   neigh_dist, neigh_ind = tree.radius_neighbors(q, radius=0.5)
+
+Notes
+-----
+
+- The BallTree structure is particularly advantageous when the dataset is large
+  and the number of queries is substantial, as it reduces the number of distance
+  computations through effective pruning.
+- The reduced distance mechanism guarantees that the strict ordering of true distances
+  is preserved for the purposes of nearest-neighbor ranking, while enabling more
+  efficient traversal during queries.
+- If the dataset includes sample weights, these are used to compute a weighted
+  centroid for each node, improving pruning accuracy for weighted datasets.
+
+Metrics support
+---------------
+
+- A broad set of distance metrics is supported, with 64-bit and 32-bit precision variants.
+- For a complete list of supported metrics, see the metric registry documentation
+  accompanying the code. Example metrics include Euclidean, Manhattan, Hamming, Haversine,
+  Jaccard, and more specialized measures like Mahalanobis, Rogers–Tanimoto, and Minkowski
+  variants.
+
+API surface (high-level)
+------------------------
+
+- BallTree64
+- BallTree32
+- Both expose the same user-facing API (e.g., kneighbors, radius_neighbors, query)
+  with internal precision- and performance-specific optimizations.
+
+Implementation notes for contributors
+-------------------------------------
+
+- Nearest neighbor search relies on min_dist, max_dist, and the reduced distance
+  framework to prune search branches efficiently.
+- The architecture cleanly separates data layout (node_bounds, idx_array, data)
+  from the search logic (min_dist, max_dist) to facilitate future variants (e.g., KD-tree).
+- __doc__ strings for BallTree variants are populated via a template that maps
+  64-bit and 32-bit suffix variants to the appropriate class documentation.
+
+This documentation provides an overview of the Nearest Neighbors implementation via BallTree,
+highlighting its data structures, distance/pruning strategy, precision variants, and usage
+patterns relevant to developers integrating or extending the algorithm.

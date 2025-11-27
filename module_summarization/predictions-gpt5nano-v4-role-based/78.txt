@@ -1,0 +1,116 @@
+filenode.rst
+
+========================
+filenode – File interface to PyTables nodes
+========================
+
+Overview
+--------
+The filenode module provides a binary, file-like interface to PyTables nodes that live inside PyTables database files. It enables reading and appending to a node as if it were a regular Python file. The module is designed to integrate with Python's io module interfaces and, as of version 3.0, is fully compliant with the io interfaces.
+
+Key concepts
+- NodeType: a system attribute value identifying the node as a file interface. The constant is 'file'.
+- NodeTypeVersions: supported NODE_TYPE_VERSION values for the file interface. Supported versions are [1, 2].
+- RawPyTablesIO: a concrete implementation of a raw binary I/O stream (subclass of io.RawIOBase) that operates on a PyTables node. It provides a standard binary stream API (readable/writable, seekable, etc.), mapping Python I/O operations to PyTables node operations.
+
+Module docstring (purpose)
+- The module defines a file-like interface for PyTables nodes, enabling the creation of brand-new file nodes (new_node) and opening existing ones (open_node) for read and/or append operations.
+- Read access is always available; write access is allowed on new files or when opened in a mode that permits writing (e.g., 'a+' or similar).
+- Only binary I/O is supported.
+- The 3.0 rewrite brings full compliance with the interfaces defined in Python’s io module.
+
+API documentation
+Constants
+- NodeType
+  - Value: 'file'
+  - Purpose: System attribute value used to tag a node as a file-like interface.
+- NodeTypeVersions
+  - Value: [1, 2]
+  - Purpose: List of supported versions for the NODE_TYPE_VERSION system attribute. The code derives compatibility and layout from this version.
+
+Classes
+RawPyTablesIO
+- Inheritance: Inherits from io.RawIOBase.
+- Purpose: The core raw binary I/O interface to a PyTables node, exposing a standard binary stream API backed by a PyTables node. It translates high-level I/O calls into PyTables node operations.
+- Construction
+  - __init__(self, node, mode=None)
+    - node: The PyTables node that represents the binary data container.
+    - mode: Optional open mode string (e.g., 'r', 'w', 'a', with '+'). If None, uses node._v_file.mode.
+    - Behavior:
+      - Validates the node and its attributes via internal checks (_check_node, _check_attributes).
+      - Determines mode and ensures consistency with the underlying PyTables file mode via _cross_check_mode.
+      - Extracts version information from node.attrs.NODE_TYPE_VERSION and derives a shape helper via _size_to_shape.
+      - Determines the binary data type from node.atom.dtype.base.type.
+- Public attributes
+  - mode (property)
+    - Read-only. Returns the mode string used to opened the IO object (e.g., 'r', 'w', 'a', with '+').
+- Core methods (implemented)
+  - tell(self) -> int
+    - Returns the current stream position (self._pos).
+  - seek(self, pos, whence=0) -> int
+    - Repositions the stream pointer.
+    - whence values supported: 0 (start), 1 (current), 2 (end).
+    - Validates input and updates the internal position.
+  - seekable(self) -> bool
+    - Always returns True, indicating random-access is supported.
+  - fileno(self) -> int
+    - Returns the underlying file descriptor from the host PyTables file (self._node._v_file.fileno()).
+  - close(self) -> None
+    - Flushes and closes the IO object.
+    - If the underlying host file is already closed, emits a warning.
+    - Clears internal reference to the node to allow resource cleanup.
+  - flush(self) -> None
+    - Delegates to the node’s flush method to flush write buffers, when applicable.
+  - truncate(self, pos=None) -> int
+    - Truncates the file to a given size in bytes.
+    - If pos is None, uses the current position.
+    - Only supports growing the file (truncation to a larger size); cannot rewrite existing data.
+    - Extends the node with zeros as needed via _append_zeros.
+    - Returns the new size (via a subsequent seek to the target position).
+  - readable(self) -> bool
+    - Returns True if the opened mode allows reading (contains 'r' or '+').
+  - writable(self) -> bool
+    - Returns True if the opened mode allows writing (contains 'w', 'a', or '+').
+  - readinto(self, b) -> int
+    - Reads up to len(b) bytes into the pre-allocated writable bytes-like object b.
+    - Returns the number of bytes read (0 on EOF).
+    - Reads data from the underlying node via node.read(start, stop) and copies to b.
+    - Advances the internal position by the number of bytes read.
+  - readline(self, limit=-1) -> bytes
+    - Reads a line from the stream, up to limit bytes if specified.
+    - The exact implementation is in the source; the docstring indicates line-based reading semantics.
+- Internal helpers and notes
+  - _size_to_shape: a per-version mapping to determine how to interpret the number of bytes as a shape for the underlying data read from the node. Version 1 maps to (l, 1); Version 2 maps to (l,).
+  - _version, _vshape, _vtype: internal attributes derived from the node to adapt I/O operations to the underlying data type and version.
+  - _check_node, _check_attributes, _cross_check_mode: internal validation helpers invoked during initialization.
+  - _append_zeros: internal helper used by truncate() to grow the file by appending zero bytes.
+  - node.read(start, stop): used to fetch data from the PyTables node. It returns a NumPy array which is then converted to bytes (tobytes()) when copying into the buffer.
+  - node.nrows: used to determine current size/length semantics for seeking, truncation, and cutoff conditions.
+  - self._node._v_file: the underlying PyTables File object providing the host file features (including fileno and mode).
+
+Usage patterns
+- The filenode module is intended to be used via higher-level helpers (new_node and open_node) that return a RawPyTablesIO instance configured for a given PyTables node.
+- Typical behavior:
+  - Read operations are always available (readable).
+  - Write operations depend on the mode provided at open time: writing is permitted on new files or when opened in a write-capable mode (e.g., containing 'w', 'a', or '+').
+  - Writing is implemented through the standard binary IO interface; the class can grow the underlying node via truncate() when writing beyond the current end, appending zeros as needed.
+  - Data is stored in a PyTables node, and reads are performed by directly calling the node’s read method and returning the raw bytes to the caller.
+- For instructions and usage examples, refer to the module’s user guide (filenode_usersguide).
+
+Versioning and compatibility
+- The module was rewritten in version 3.0 to be fully compliant with io module interfaces.
+- Supported NodeTypeVersions are [1, 2], and the implementation adapts behavior based on NODE_TYPE_VERSION found in the node’s attributes.
+
+Notes and references
+- See filenode_usersguide for end-user instructions and examples.
+- The module integrates with PyTables’ underlying host file (node._v_file) and PyTables’ node API (node.read, node.nrows, node.atom.dtype, etc.).
+
+See Also
+- new_node(), open_node() (documented elsewhere in the filenode-related documentation)
+- filenode_usersguide
+- PyTables file interface and node I/O details
+- Python io module (RawIOBase, readable(), writable(), seek(), etc.)
+
+Version history
+- versionchanged:: 3.0
+  In version 3.0 the module was rewritten to be fully compliant with the interfaces defined in the io module.

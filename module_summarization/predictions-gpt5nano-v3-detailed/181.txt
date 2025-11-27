@@ -1,0 +1,181 @@
+Dataset loading utilities
+=========================
+
+Overview
+--------
+This module provides robust utilities for loading datasets from OpenML with built-in caching, retry logic, and gzip-aware streaming. It is designed to minimize redundant network requests, handle transient network failures gracefully, and expose a convenient API for obtaining OpenML datasets as in-memory structures (e.g., Bunch objects or dataframes).
+
+Key concepts
+- Caching: Datasets can be cached under a configurable data_home directory. Cached files are stored under openml.org and are gzipped for space efficiency. Cache operations are atomic to ensure safety in concurrent environments.
+- Network resilience: Network requests are retried with exponential-like backoff behavior. Special OpenML error codes (e.g., HTTP 412) are treated as non-retriable.
+- gzip handling: OpenML responses may be gzip-encoded. The utilities transparently decompress gzip streams when presenting data to the caller.
+- Public and internal API: fetch_openml is the public entry point. Several internal helpers provide caching, retry logic, and HTTP handling.
+
+Public API
+-----------
+
+fetch_openml
+~~~~~~~~~~~~
+Public function that retrieves datasets from OpenML, returning a structured object (typically a Bunch-like container with data, target, and metadata). The function orchestrates:
+- resolution of the dataset (by name, data_id, version, etc.),
+- optional caching via a local data_home path,
+- robust network handling with automatic retries,
+- decompression of gzip-encoded payloads when needed.
+
+Parameters (typical)
+- name or data_id: Identifier for the OpenML dataset to fetch.
+- version: Dataset version to fetch (e.g., 'latest' or a specific integer).
+- data_home: Path to the local cache directory. If None, downloads are not cached.
+- as_frame: Whether to return data as a pandas DataFrame when possible.
+- data_home defaults and other common options may be forwarded from the calling ecosystem (e.g., scikit-learn’s dataset utilities).
+
+Returns
+- A structured container (commonly a Bunch) with:
+  - data: Feature data (e.g., 2D array or DataFrame),
+  - target: Target variable (labels),
+  - feature_names or column names,
+  - DESCR: textual description of the dataset,
+  - any additional metadata retrieved from OpenML.
+
+Usage example
+```python
+from sklearn.datasets import fetch_openml
+
+# Basic usage with caching enabled
+dataset = fetch_openml(name="credit-g", version=1, as_frame=True, data_home="/tmp/openml")
+X = dataset.data
+y = dataset.target
+
+# Disable caching
+dataset_no_cache = fetch_openml(name="credit-g", version=1, as_frame=True, data_home=None)
+```
+
+Internal utilities (documentation for developers)
+-------------------------------------------------
+
+_get_local_path(openml_path, data_home)
+~~~~~~~~~~~~~~~~~
+Compute the local path for a cached OpenML resource. The cache layout is:
+data_home/openml.org/{openml_path}.gz
+
+- openml_path: API path used to fetch the resource (without the base URL).
+- data_home: Base directory for caching.
+
+_Return_: Absolute path to the gzipped cache file.
+
+_retry_with_clean_cache(openml_path, data_home, no_retry_exception=None)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Decorator that ensures cache integrity when a download fails.
+
+Behavior
+- If data_home is None, behaves as a direct call (no caching).
+- On failure (except the specified no_retry_exception), it removes any partially cached file and retries the call once.
+
+Usage pattern
+```python
+@_retry_with_clean_cache(openml_path, data_home, no_retry_exception=None)
+def _download(...):
+    ...
+```
+
+_Return_: A decorator that wraps a function for the described retry-and-clean behavior.
+
+_retry_on_network_error(n_retries=3, delay=1.0, url="")
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Decorator to retry a function on network-related errors.
+
+Behavior
+- Retries on URLError or TimeoutError up to n_retries.
+- If an HTTPError with status code 412 is encountered, the error is re-raised (non-retriable).
+- Delay (in seconds) is observed between retries.
+- The url parameter is used to enrich warning messages for diagnostics.
+
+Usage pattern
+```python
+@_retry_on_network_error(n_retries=5, delay=2.0, url="https://openml.org/api")
+def _download(...):
+    ...
+```
+
+_Return_: A decorator that wraps a function with network-retry logic.
+
+_open_openml_url(openml_path, data_home, n_retries=3, delay=1.0)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Core helper that retrieves a resource from OpenML.org with optional local caching.
+
+Behavior
+- Builds a Request to OPENML_PREFIX + openml_path and requests gzip-encoded content.
+- If data_home is None, downloads directly with retry logic and returns either a gzip.GzipFile stream or a raw stream depending on content encoding.
+- If data_home is set, caches the response:
+  - Creates an atomic temporary file in a temporary directory.
+  - Decompresses lazily if needed and writes to the final cache location.
+  - Ensures atomic move of the downloaded file.
+  - Returns a gzip.GzipFile wrapper around the cached file to provide a consistent interface.
+
+_Return_: A file-like object (possibly a gzip.GzipFile) for the requested OpenML resource.
+
+_OpenMLError
+~~~~~~~~~~~~~
+Custom exception for OpenML-specific HTTP 412 errors (generic OpenML error).
+
+- Inherits from ValueError.
+- Used to signal non-retriable OpenML-specific errors.
+
+_get_json_content_from_openml_api(url, error_message, data_home, n_retries=3, delay=1.0)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Helper to fetch and parse JSON from the OpenML API, with retry support and optional local caching.
+
+Behavior
+- Retrieves JSON from the provided OpenML API URL.
+- Applies retry logic for network errors.
+- Uses data_home for caching the response if configured.
+- Propagates meaningful error messages (via error_message) in case of failures.
+
+_Return_: Parsed JSON content as a Python dictionary.
+
+Edge cases and considerations
+------------------------------
+- Caching and atomicity: Cache writes use a temporary directory to ensure that final cache files are updated atomically, reducing race conditions in multi-process environments.
+- gzip handling: The utilities detect Content-Encoding: gzip and transparently decompress data before presenting it to callers.
+- Network resiliency: Retries are limited to a configurable number; 412 OpenML errors are treated as non-retriable and surfaced immediately.
+- Data_home=None: When caching is disabled, datasets are downloaded on every request. This can be useful for environments with limited disk space or ephemeral sessions.
+- Data integrity: On download failure, partial cache entries are cleaned up to avoid serving corrupt data on subsequent requests.
+- Compatibility: Internal helpers rely on standard library modules (gzip, urllib, etc.) and are designed to be backend-agnostic with respect to the caller’s integration (e.g., scikit-learn’s dataset utilities).
+
+Usage notes
+-----------
+- Use fetch_openml as the primary entry point for OpenML datasets.
+- Use data_home to enable caching and speed up repeated accesses.
+- For long-running processes or pipelines, caching can significantly reduce load times and network usage.
+- When integrating with environments that have strict network policies, leverage the retry and error-handling behavior to implement robust error reporting.
+
+Code references (where these behaviors are implemented)
+- _get_local_path: path computation for cached data
+- _retry_with_clean_cache: ensures cache cleanliness on failure
+- _retry_on_network_error: network error retry mechanism
+- _open_openml_url: core HTTP fetch + caching + gzip handling
+- OpenMLError: OpenML-specific error signaling
+- _get_json_content_from_openml_api: JSON retrieval with error handling
+
+End-to-end example
+~~~~~~~~~~~~~~~~~~
+- Retrieve a dataset by name and version, with caching:
+  - The function resolves the dataset on OpenML, downloads the necessary metadata and data files, and stores a gzipped cache locally.
+  - On subsequent calls, the cached file is used unless stale or explicitly invalidated.
+
+- Retrieve a dataset without caching:
+  - Data is fetched from the network on every request with the same retry strategy, but no local cache is created or read.
+
+Code snippet (conceptual)
+```python
+from sklearn.datasets import fetch_openml
+
+# Cached fetch
+ds = fetch_openml(name="credit-g", version=1, data_home="/tmp/openml", as_frame=True)
+X, y = ds.data, ds.target
+
+# No caching
+ds_no_cache = fetch_openml(name="iris", version="latest", data_home=None, as_frame=True)
+```
+
+This documentation covers the dataset loading utilities provided by the module, including the core caching, retry, and OpenML integration mechanics, along with practical usage guidance and considerations.

@@ -1,0 +1,140 @@
+# Condition syntax in PyTables
+
+Introduction
+-----------
+PyTables exposes a compact, expressive syntax for filtering data in Tables and related containers. Conditions are used to select rows efficiently, typically via methods like Table.where or related query interfaces. Expressions are evaluated for each row, with support for combining multiple atomic comparisons, arithmetic on columns, and NaN-aware comparisons to handle missing data robustly.
+
+Overview of the condition engine
+-------------------------------
+- Purpose: Enable fast, flexible row filtering by expressing logical and arithmetic constraints on table columns.
+- Core idea: Expressions reference table columns, combine with boolean operators, and are evaluated to produce a boolean mask that selects rows.
+- Performance: When possible, PyTables uses indexes on numeric columns to accelerate range comparisons. If an index is not applicable or unavailable, a full scan is performed.
+- NaN handling: Numeric comparisons use nan-aware operators to provide well-defined results in the presence of NaN values.
+- Caching: A condition cache helps avoid repeated computation when the underlying data has not changed, accelerating repeated queries.
+
+Key concepts and relations
+--------------------------
+- Atomic expressions: Basic comparisons or arithmetic involving a single column (e.g., temperature > 20, age <= 65).
+- Columns: Referenced by their names as they appear in the table. Expressions can include arithmetic on columns (e.g., temperature - baseline > 5).
+- Logical composition: Combine atomic expressions using bitwise operators:
+  - & for logical AND
+  - | for logical OR
+  - ~ for logical NOT
+  - Parentheses () to control precedence
+- Data types: Expressions typically operate on numeric columns, but equality comparisons on strings or booleans are supported where applicable.
+- Indexes: Creating an index on a numeric column accelerates comparisons such as >, <, >=, <=. PyTables will attempt to use the index when evaluating the condition.
+- Error handling: Referencing non-existent columns or using unsupported expressions will raise informative errors.
+
+Supported syntax and usage
+--------------------------
+Atomic expressions
+- Refer to a column by name:
+  - temperature > 25
+  - age <= 100
+- Arithmetic on columns:
+  - temperature - baseline > 5
+  - pressure / 2.0 < threshold
+- Equality and inequality:
+  - status == b'OK' (for bytes) or status == 'OK' (for strings)
+  - category != 'archived'
+
+Logical operators and grouping
+- Combine atoms with:
+  - temperature > 25 & humidity < 60
+  - (temperature > 25) & ((humidity < 60) | (pressure > 1000))
+- Negation:
+  - ~(status == 'OK')
+- Precedence and parentheses are important to obtain intended results.
+
+Membership (in/not in)
+- Membership tests on sequences are supported where applicable:
+  - city in ('London', 'Paris', 'New York')
+  - status not in ('archived', 'deprecated')
+Note: Use quotes for string literals and proper Python-like tuple/list syntax.
+
+String handling
+- Equality comparisons on string columns are supported.
+- Substring or pattern matching is typically not part of the core condition syntax; use exact matches or membership as needed.
+
+NaN handling
+- NaN-aware comparisons are available to avoid unreliable results when numeric columns contain missing values.
+- Examples:
+  - nan_aware_gt(x, y) is conceptually used for x > y with NaNs handled in a predictable way.
+  - nan_aware_ge, nan_aware_lt, nan_aware_le follow similarly.
+- In practice, PyTables uses nan-aware operators internally to produce robust boolean masks when evaluating conditions with missing data.
+
+Using conditions in code
+------------------------
+The primary entry point for filtering is the where method on Table (and similar containers). Expressions are supplied as strings.
+
+Basic example
+```python
+import tables as tb
+
+with tb.open_file('data.h5', mode='r') as f:
+    tbl = f.get_node('/my_table')
+    # Simple numeric filter
+    for row in tbl.where('temperature > 25'):
+        print(row['temperature'], row['humidity'])
+```
+
+Complex expressions with logic
+```python
+with tb.open_file('data.h5', mode='r') as f:
+    tbl = f.get_node('/my_table')
+    # Combine conditions with AND/OR logic
+    query = '(temperature > 25) & (humidity < 60) | (city == "Paris")'
+    for row in tbl.where(query):
+        print(row['city'], row['temperature'], row['humidity'])
+```
+
+Column arithmetic in conditions
+```python
+with tb.open_file('data.h5', mode='r') as f:
+    tbl = f.get_node('/my_table')
+    # Arithmetic on columns inside the condition
+    for row in tbl.where('(temperature - baseline) > 5'):
+        print(row['temperature'], row['baseline'])
+```
+
+Indexed queries for performance
+```python
+with tb.open_file('data.h5', mode='a') as f:
+    tbl = f.get_node('/my_table')
+    # Create an index on a numeric column to accelerate range queries
+    tbl.cols.temperature.create_index()
+
+with tb.open_file('data.h5', mode='r') as f:
+    tbl = f.get_node('/my_table')
+    for row in tbl.where('temperature >= 100'):
+        print(row['temperature'], row['city'])
+```
+Note: Index creation and usage details depend on PyTables version; see the Indexes documentation for specifics.
+
+Edge cases and considerations
+-----------------------------
+- Operator choice: Use & and | to combine conditions; do not rely on Python's and/or operators for filtering expressions.
+- Parentheses: Use parentheses to control evaluation order and avoid ambiguity.
+- Column existence: Referencing a non-existent column in the expression results in an error.
+- Data types: Ensure the expressions match the column data types (e.g., string comparisons on text columns, numeric comparisons on numeric columns).
+- Performance: If performance is critical, define appropriate indexes on candidate columns. Complex expressions spanning multiple non-indexed columns may revert to a full table scan.
+- NaN handling: Be aware that NaN values affect comparisons; rely on nan-aware operators when missing data is present.
+
+Internal mechanisms (high-level overview)
+-----------------------------------------
+- Evaluation engine: Transforms the string expression into a boolean mask and applies it to the underlying dataset.
+- NaN-aware operators: Implement nan_aware_gt/ge/lt/le to handle NaNs robustly during comparisons.
+- Condition cache: A caching mechanism reduces repeated computation when the data has not changed; the cache is invalidated upon data modification.
+- Index interaction: When an indexed column is involved in the condition, the engine attempts to use the index to limit the candidate rows.
+
+Recommended practices
+---------------------
+- Add indexes on numeric columns that are frequently used in range or equality conditions to speed up queries.
+- Prefer simple, column-local conditions for best performance; complex expressions across many columns may not benefit from indexing.
+- Validate expressions on a small subset of data before applying to large tables to ensure syntax and semantics meet expectations.
+
+See also
+--------
+- PyTables Table.where method documentation: usage, return values, and examples.
+- Indexing in PyTables: creating and managing indexes on table columns.
+- NaN handling and nan-aware operations in PyTables utilities.

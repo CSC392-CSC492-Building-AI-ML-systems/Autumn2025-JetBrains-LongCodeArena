@@ -1,0 +1,161 @@
+w_direct.rst
+
+Introduction
+============
+The w_direct component of WESTPA provides facilities to compute state-to-state kinetics by tracing trajectories and to convert flux data into rates and related statistics. It includes an initialization stage that writes kinetic data to a direct.h5 file and an averaging stage that aggregates results across windows, with optional confidence intervals via bootstrapping.
+
+Overview of the module
+----------------------
+- Purpose: Calculate state-to-state kinetics by following trajectory fluxes, producing raw flux data and durations, and then deriving rates and averaged quantities with statistical confidence.
+- Core concepts:
+  - Direct kinetics: use trajectory labeling and flux data to compute macrostate-to-macrostate rates.
+  - Bootstrapping: provide confidence intervals via MC bootstrap (mcbs_ci_correl).
+  - Outputs are stored in HDF5 files (default direct.h5), with structured datasets describing fluxes, arrivals, durations, and evolution of rate estimates when requested.
+- Primary users: developers and simulation analysts who want to obtain rate estimates and their uncertainties from WESTPA simulations.
+
+Key components and relationships
+-------------------------------
+- DKinetics (w_direct init)
+  - Subcommand: init
+  - Purpose: Initialize direct kinetics data by processing trajectory flux information and writing to a WESTPA HDF5 file (default direct.h5).
+  - Dependencies: requires an assignments file (assign.h5) that provides trajectory labels.
+  - Outputs: datasets such as conditional_fluxes, conditional_arrivals, total_fluxes, arrivals, duration_count, durations.
+  - Behavior: opens output and assignments files, stamps creator data, validates iteration ranges, and delegates kinetic computation to the w_direct machinery.
+- DKinAvg (w_direct kinetics)
+  - Subcommand: kinetics
+  - Purpose: Generate average rates/fluxes from a WESTPA simulation via tracing, including optional evolution-mode data.
+  - Inputs: kinetics data (default direct.h5) and, typically, an assignments file; outputs grouped into /avg_rates, /avg_total_fluxes, /avg_conditional_fluxes, and optionally /rate_evolution when evolution mode is enabled.
+  - Behavior: aggregates across a user-specified window of iterations, producing structured datasets with statistical summaries.
+- _rate_eval_block (internal helper)
+  - Purpose: A custom evaluation block used for bootstrapped rate estimation.
+  - Mechanism: iterates over state pairs (istate, jstate), constructs per-pair datasets, and calls mcbs_ci_correl with estimator sequence_macro_flux_to_rate.
+  - Output: a list of results with each entry containing (name, block_id, istate, jstate, (start, stop) + ci_res).
+  - Use: underpins the MC bootstrapping approach used to produce confidence intervals for rate estimates.
+- Data handling and utilities
+  - h5io: HDF5 I/O utilities used to read/write WestPA data files.
+  - sequence_macro_flux_to_rate: estimator transforming macrostate flux to rate constants.
+  - mcbs_ci_correl, mcbs knobs: Monte Carlo bootstrap-based confidence interval computation with correlation handling.
+  - Accumulation tools (in other modules) for state populations and arrivals.
+
+Output data model
+-----------------
+The primary outputs from w_direct init are written to the output file (default direct.h5) and include the following datasets:
+
+- /conditional_fluxes [iteration][state_from][state_to]
+  - Floating-point macrostate-to-macrostate fluxes (not normalized by initial macrostate population).
+
+- /conditional_arrivals [iteration][state_from][state_to]
+  - Integer counts of trajectories arriving at state_to when departing from state_from within an iteration.
+
+- /total_fluxes [iteration][state]
+  - Floating-point total flux into a given macrostate.
+
+- /arrivals [iteration][state]
+  - Integer counts of trajectories arriving at each state in a given iteration.
+
+- /duration_count [iteration]
+  - Integer: number of recorded event durations in that iteration.
+
+- /durations [iteration][event_duration]
+  - Structured dataset with fields:
+    - istate: Initial state of the transition
+    - fstate: Final state of the transition
+    - duration: Duration of the transition (in tau units)
+    - weight: Trajectory weight at the end of the transition (not normalized by initial state population)
+
+A note on normalization:
+- State-to-state fluxes stored in direct.h5 are not normalized by the initial macrostate population. To obtain rates, use the w_direct kinetics processing (e.g., w_direct kinetics or downstream tools) which normalizes by population and accounts for statistical fluctuations and correlations.
+
+Subcommands and usage
+======================
+w_direct provides two subcommands:
+
+1) init (DKinetics)
+   - Purpose: initialize and compute direct kinetics data from trajectory flux information.
+   - Default output file: direct.h5
+   - Required inputs:
+     - An assignments file (assignments_filename) that provides trajectory labeling.
+     - The output file where direct kinetics data will be written.
+   - Key options (typical):
+     - -i/--iterations-range or similar to specify the iteration window
+     - -o/--output to specify the output file
+     - --assn or similar to specify the assignments file (depending on the WestPA CLI conventions)
+   - Important behavior:
+     - Opens the output file in append/creating mode, stamps creator metadata, and validates that the assignments data span the requested iterations.
+     - If the iteration range is invalid, a ValueError is raised.
+
+2) kinetics (DKinAvg)
+   - Purpose: compute averages of rates, total fluxes, and conditional fluxes from the stored kinetics data, with optional evolution-mode datasets.
+   - Default input kinetics file: direct.h5 (as produced by w_direct init)
+   - Output datasets:
+     - /avg_rates [state_from][state_to]
+     - /avg_total_fluxes [state]
+     - /avg_conditional_fluxes [state_from][state_to]
+     - Optional /rate_evolution [window][state_from][state_to] when evolution mode is enabled
+   - Key options (typical):
+     - -o/--output to specify the output file for averages
+     - --evolution-mode to enable rate evolution data (if supported by the distribution)
+     - -i/--iterations or window specification for averaging
+   - Notes:
+     - The averaging process consolidates data across a user-specified window of iterations and provides structured statistical summaries.
+     - It relies on the kinthis or kinetics base functionality to compute uncertainties, potentially using the _rate_eval_block for bootstrap-based confidence intervals.
+
+Important parameters and return values
+-------------------------------------
+- DKinetics (init)
+  - Parameters:
+    - assignments_filename: path to the assignments file used for labeling trajectories.
+    - output_filename: path to the output HDF5 file to write kinetics data (default: direct.h5).
+    - iter_range: subset of iterations to consider; validated against the assignments file.
+  - Returns:
+    - Writes datasets to the output HDF5 file; returns None.
+- DKinAvg (kinetics)
+  - Parameters:
+    - input_kinetics_file: path to the kinetics data file (default: direct.h5).
+    - output_file: path to the file where averages are written.
+    - evolution_mode: boolean flag to enable rate evolution datasets.
+    - iter_window: window of iterations over which averages are computed.
+  - Returns:
+    - Writes /avg_* datasets (and optionally /rate_evolution) to the output file; returns None.
+- _rate_eval_block
+  - Parameters:
+    - iblock, start, stop: block indices and iteration range for bootstrapping.
+    - nstates: number of macrostates considered.
+    - data_input: dictionary with dataset and population information.
+    - name: identifier for the block.
+    - mcbs_alpha, mcbs_nsets, mcbs_acalpha: bootstrap configuration.
+    - do_correl, mcbs_enable: control correlation handling and bootstrap enabling.
+  - Returns:
+    - List of results with per-pair (istate, jstate) rate estimates and associated bootstrap results.
+
+Usage examples
+--------------
+Basic initialization of direct kinetics data
+- Purpose: create direct kinetics data from an assignments file and store in direct.h5.
+- Command:
+  - w_direct init --assignments assign.h5 --output direct.h5
+
+Compute averaged kinetics from the produced data
+- Purpose: generate averages for rates and fluxes from direct.h5, with optional evolution data.
+- Command:
+  - w_direct kinetics --kinetics-file direct.h5 --output direct_avg.h5 --evolution-mode
+
+Notes
+-----
+- The direct kinetics datasets are not normalized by the initial macrostate population; normalization and rate estimation are performed by the kinetics processing steps.
+- The iteration range must align with the coverage of the assignments file; otherwise, an error is raised during initialization.
+- Bootstrapping options (mcbs_alpha, mcbs_nsets, etc.) are internal configuration controlling confidence interval estimation; they are typically tuned by the developer or advanced user.
+
+Code references (high level)
+----------------------------
+- _rate_eval_block: internal helper for bootstrapped rate evaluation.
+  - Purpose: compute per-pair state rates using the estimator and bootstrap confidence intervals.
+  - Key logic: iterate over istate != jstate; build dataset; call mcbs_ci_correl with estimator_kwargs including istate and jstate; collect results.
+
+- DKinetics: w_direct init
+  - Opens output and assignments files; stamps metadata; validates iteration range; delegates kinetics computation to the base w_direct implementation.
+
+- DKinAvg: w_direct kinetics
+  - Reads direct.h5 (or provided kinetics file) and computes averages, storing structured results in the output file.
+
+End of documentation

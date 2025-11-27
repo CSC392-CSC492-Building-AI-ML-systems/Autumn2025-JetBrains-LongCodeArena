@@ -1,0 +1,173 @@
+Config Usage
+==============
+
+Overview
+--------
+This module defines high-level configuration orchestration for prognostic FV3-GFS runs. It provides dataclass-based representations that compose base FV3 configuration with runtime options, initial conditions overlays, and optional machine-learning emulation settings. The HighLevelConfig class is designed to translate user-facing configurations into the overlays used by fv3config and fv3kube to construct the final run configuration.
+
+Key concepts:
+- FV3Config: Dataclass containing fields that are part of the FV3 configuration but not overridden by HighLevelConfig.
+- InitialCondition: Represents an initial condition source in the format {base_url}/{timestep}, with optional restart category mappings.
+- HighLevelConfig: Combines base version, initial conditions, duration, and optional ML emulation into a final configuration via overlays.
+- Overlay mechanism: The final FV3 configuration is produced by merging several overlays (base config, initial conditions, diagnostics, namelist settings, etc.).
+
+Key relationships:
+- HighLevelConfig inherits from UserConfig (runtime runtime options) and FV3Config (non-overridden fields).
+- InitialCondition.overlay provides a ready-to-apply initial-condition overlay via fv3kube.
+- to_fv3config() builds a full configuration dictionary by composing multiple overlays with fv3kube and related helpers.
+- to_runtime_config() extracts the runtime portion as a UserConfig instance.
+
+Classes and Functions
+---------------------
+
+FV3Config
+---------
+Dataclass representing fields of the FV3 configuration that are not overridden by HighLevelConfig.
+
+- namelist: Arbitrary structure representing namelist overrides (default provided by default_coupler_nml).
+- experiment_name: Optional experiment name.
+- data_table: Optional data table.
+- field_table: Optional field table.
+- forcing: Optional forcing configuration.
+- orographic_forcing: Optional orographic forcing configuration.
+- gfs_analysis_data: Optional GFS analysis data.
+- asdict(self): Returns a dict representation with None values removed.
+
+InitialCondition
+----------------
+Dataclass describing an initial condition specification.
+
+- base_url: Base location (GCS/local) for the initial condition data.
+- timestep: Timestamp in the format YYYYMMDD.HHMMSS.
+- restart_categories: Mapping of restart categories to on-disk names (defaults to RestartCategoriesConfig).
+
+Properties:
+- overlay: Returns an overlay configuration for the initial condition using fv3kube.c48_initial_conditions_overlay.
+
+HighLevelConfig
+---------------
+Top-level configuration object for prognostic runs. Combines FV3Config and runtime configurations and provides helpers to construct the final FV3 configuration.
+
+- base_version: Base physics/config version (default "v0.5").
+- initial_conditions: Either an InitialCondition instance or a mapping suitable for initial conditions.
+- duration: Optional duration override for the run segments (e.g., "3h").
+- zhao_carr_emulation: ML/emulation configuration (default EmulationConfig()).
+
+Key methods and properties:
+- _initial_condition_overlay(): Returns the overlay for initial conditions. If initial_conditions is an InitialCondition, uses its overlay; otherwise returns a mapping under "initial_conditions".
+- _to_fv3config_specific(): Returns an FV3Config object populated with fields from HighLevelConfig that are specific to FV3.
+- to_runtime_config(): Extracts and returns runtime-related configuration as a UserConfig instance.
+- _physics_timestep(): Computes the physics timestep by merging base FV3 config with overlays to obtain dt_atmos from the current configuration.
+- _duration (property): Converts self.duration into a Python timedelta using pandas.to_timedelta when provided.
+- to_fv3config(): Constructs the final FV3 configuration dictionary by merging base config with overlays for initial conditions, diagnostics, namelist settings, and ML emulation. If a duration is provided, the resulting config is wrapped with set_run_duration to apply the duration.
+
+Helper Functions and Helpers
+----------------------------
+instantiate_dataclass_from(cls, instance)
+- Creates an instance of dataclass cls using attributes from another object instance. Useful for constructing a parent class from a child class.
+
+- Signature: instantiate_dataclass_from(cls: Callable[..., T], instance: Any) -> T
+
+_create_arg_parser()
+- Creates a CLI ArgumentParser for updating a base FV3 configuration using a YAML file and optional remote model URL for ML updates.
+- Notable arguments:
+  - user_config: Path to a YAML config with changes for the FV3 config (diag_table, runtime, etc.).
+  - --model_url: Optional remote URL to a trained ML model; if omitted, ML updating is not performed.
+
+Constants
+---------
+PROGNOSTIC_DIAG_TABLE
+- Path to the prognostic diagnostic table used for diagnostics configuration.
+
+SUPPRESS_RANGE_WARNINGS
+- Predefined overlay options to suppress range warnings for the namelist (e.g., fv_core_nml.range_warn = False).
+
+default_coupler_nml()
+- Returns a default coupler_nml with dt_atmos set to 900 seconds.
+
+Usage Notes
+-----------
+
+- Overlays and composition
+  - The final configuration is produced by merging multiple overlays:
+    - Base FV3 config (selected by base_version)
+    - Initial condition overlays
+    - Diagnostic table configuration
+    - Fortran diagnostics named-list settings (via file_configs_to_namelist_settings)
+    - Namelist overrides from the HighLevelConfig
+    - ML emulation settings (zhao_carr_emulation)
+  - The overlays are merged using fv3kube.merge_fv3config_overlays.
+
+- Initial conditions
+  - If initial_conditions is an InitialCondition, the overlay is derived from its base_url, timestep, and restart_categories.
+  - If it is a mapping, it is passed directly as an initial_conditions overlay.
+
+- Duration handling
+  - duration, if provided, is parsed into a timedelta. The final configuration applies this duration via set_run_duration. If duration is empty, no duration override is applied.
+
+- Physics timestep
+  - The _physics_timestep method derives dt_atmos from the merged overlays by retrieving the base config for the given base_version and applying the overlays.
+
+- Diagnostics
+  - Fortran diagnostics are converted to namelist settings via file_configs_to_namelist_settings, and diag_table and related settings are included in the final config.
+
+Edge cases and considerations
+- to_fv3config relies on attributes that may come from outside this module (e.g., fortran_diagnostics). Ensure these attributes exist on the HighLevelConfig instance or its parents at runtime.
+- If duration is invalid or cannot be parsed by pandas, _duration will raise while parsing; guard input accordingly.
+- When initial_conditions is a string or non-InitialCondition mapping, ensure the mapping format matches what the overlays expect.
+
+Usage Examples
+--------------
+
+Basic example: construct a HighLevelConfig with a simple initial condition and no duration
+
+```python
+from fv3config import RestartCategoriesConfig
+from config_module import InitialCondition, HighLevelConfig
+import fv3kube
+import emulation
+
+ic = InitialCondition(
+    base_url="gs://my-bucket/initial_conditions",
+    timestep="20230101.000000",
+    restart_categories=RestartCategoriesConfig()
+)
+
+hlc = HighLevelConfig(
+    base_version="v0.5",
+    initial_conditions=ic,
+    duration="3h",
+    zhao_carr_emulation=emulation.EmulationConfig()
+)
+
+fv3_config = hlc.to_fv3config()
+runtime_config = hlc.to_runtime_config()
+```
+
+Inspecting the produced configuration (pseudo-example)
+
+```python
+# fv3_config is a dictionary representing the final overlays combined for FV3
+print(fv3_config.keys())
+# Example keys you may see:
+# ['namelist', 'experiment_name', 'data_table', 'field_table', 'forcing', 'orographic_forcing', 'gfs_analysis_data']
+
+```
+
+Advanced usage: using a non-InitialCondition initial_conditions mapping and omitting duration
+
+```python
+hlc = HighLevelConfig(
+    base_version="v0.5",
+    initial_conditions={"initial_conditions": {"base_url": "gs://bucket/versions/inst", "timestep": "20230201.120000"}},
+    duration="",
+)
+fv3_config = hlc.to_fv3config()
+```
+
+Notes
+-----
+- The example assumes the presence of the related FV3/Kube infrastructure and runtime modules (fv3config, fv3kube, runtime.*).
+- The private CLI parser (_create_arg_parser) is intended for internal tooling and may be used in scripts that convert a user YAML into a run-ready configuration.
+
+End of Documentation

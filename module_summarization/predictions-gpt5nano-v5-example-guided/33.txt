@@ -1,0 +1,139 @@
+# w_select: Predicate-based selection of segments (w_select)
+
+## Overview
+w_select selects dynamics segments that satisfy a user-provided predicate function. By default, only matching segments are stored. If the -a/--include-ancestors option is specified, the ancestors of matching segments are included in the output as well.
+
+The tool operates over a range of iterations, determined by the IterRangeSelection, and writes results to an output HDF5 file (default: select.h5).
+
+Key concepts:
+- Predicate function: a user-supplied callable that determines which segments in a given iteration match.
+- Inversion: the -v/--invert option allows inverting the predicate, selecting non-matching segments instead.
+- Output: the tool writes datasets describing the iterations, the number of matches, the matching segment IDs, and their weights.
+
+---
+
+## Key Components
+
+- _find_matching_segments(west_datafile_name, n_iter, predicate, invert=False)_
+  - Opens the WESTPA data file and loads the iteration group.
+  - Calls the predicate as predicate(n_iter, iter_group) to obtain matching seg_ids.
+  - If invert is True, uses the complement of the matching IDs.
+  - Returns a tuple (n_iter, matchvec) where matchvec is a sorted array of matching segment IDs.
+  - Example signature:
+    - def _find_matching_segments(west_datafile_name, n_iter, predicate, invert=False)
+
+  - Core behavior (from the code):
+    - matching_ids = set(map(int, predicate(n_iter, iter_group)))
+    - if invert: matching_ids = set(range(nsegs)) - matching_ids
+    - matchvec = sorted(np.fromiter(matching_ids, dtype=seg_id_dtype, count=len(matching_ids)))
+    - return n_iter, matchvec
+
+- WSelectTool
+  - A WESTParallelTool that orchestrates the selection process.
+  - Attributes:
+    - data_reader: WESTDataReader
+    - iter_range: IterRangeSelection
+    - progress: ProgressIndicatorComponent
+    - output_filename / output_file handle
+    - predicate: callable predicate function
+    - invert: boolean flag for inversion
+    - include_ancestors: boolean flag to include ancestors
+  - Key methods:
+    - add_args(parser): installs command-line options
+      - Predicate options: -p/--predicate-function MODULE.FUNCTION, -v/--invert, -a/--include-ancestors
+      - Output options: -o/--output OUTPUT (default: select.h5)
+      - Data reader and iteration range options
+      - Progress indicator options
+    - process_args(args):
+      - Loads the predicate function via get_object(args.predicate_function, path=['.'])
+      - Validates that the predicate is callable
+      - Stores invert, include_ancestors, and output filename
+    - go():
+      - Opens the input data file
+      - Creates the output WESTPA HDF5 file and datasets:
+        - n_iter: iteration numbers
+        - n_segs: number of matching segments per iteration
+        - seg_ids: matching segment IDs per iteration (shape (iter_count, 0), maxshape (iter_count, None))
+        - weights: weights for the matching segments (shape (iter_count, 0), maxshape (iter_count, None))
+      - Uses parallel execution to compute matching segments for each iteration:
+        - Submits tasks to process iterations in parallel via a worker manager
+        - Each task runs _find_matching_segments(self.data_reader.we_h5filename, n_iter, self.predicate, self.invert)
+      - Intended behavior is to populate the output datasets with the results (the code excerpt ends during the parallel loop, but the documented behavior is to store the matching segments and their weights per iteration)
+
+---
+
+## Usage
+
+Predicates and options
+- Predicate function:
+  - Must be callable as predicate(n_iter, iter_group)
+  - Return a sequence of segment IDs (integers) that match the predicate in that iteration
+  - The predicate can be inverted with -v/--invert to select non-matching segments
+
+- Predicate function specification (example):
+  - The function can be provided as MODULE.FUNCTION (a dotted Python path resolved at runtime)
+  - Example predicate (conceptual; adapt to your HDF5 layout):
+    def my_predicate(n_iter, iter_group):
+        # iter_group corresponds to the HDF5 group for the given iteration
+        weights = iter_group['weights'][...]
+        return [i for i, w in enumerate(weights) if w > 0.5]
+
+Command-line usage
+- Basic usage (default output: select.h5):
+  - w_select -p mymodule.mypredicate -o select.h5
+
+- Invert predicate (select non-matching segments):
+  - w_select -p mymodule.mypredicate -v -o select.h5
+
+- Include ancestors of matching segments:
+  - w_select -p mymodule.mypredicate -a -o select.h5
+
+- Combine options:
+  - w_select -p mymodule.mypredicate -a -v -o select.h5
+
+Notes
+- The tool processes an iterable range of iterations determined by IterRangeSelection.
+- Output file contains:
+  - /n_iter: iteration numbers
+  - /n_segs: number of matching segments per iteration
+  - /seg_ids: matching segment IDs per iteration (seg_ids[iter_idx][:n_segs[iter_idx]] is valid)
+  - /weights: weights for each matching segment in /seg_ids
+
+---
+
+## Output format (datasets)
+
+- /n_iter [iteration]
+  - Integer: Iteration numbers for each entry in other datasets.
+
+- /n_segs [iteration]
+  - Integer: Number of segment IDs matching the predicate (or inverted predicate if -v is specified) in the given iteration.
+
+- /seg_ids [iteration][segment]
+  - Integer: Matching segments in each iteration.
+  - For an iteration n_iter, only the first n_segs[n_iter] entries are valid.
+
+- /weights [iteration][segment]
+  - Floating-point: Weights for each matching segment in /seg_ids.
+
+---
+
+## Example
+
+Predicate function (example)
+```python
+# mymodule.py
+def my_predicate(n_iter, iter_group):
+    # Example: select segments with weight > 0.5
+    weights = iter_group['weights'][...]
+    return [i for i, w in enumerate(weights) if w > 0.5]
+```
+
+Running w_select
+- Command:
+  - w_select -p mymodule.my_predicate -o select.h5
+- Options:
+  - Invert: -v
+  - Include ancestors: -a
+
+This will create select.h5 containing the iterations in the selected range, the number of matching segments per iteration, the matching segment IDs, and the corresponding weights.

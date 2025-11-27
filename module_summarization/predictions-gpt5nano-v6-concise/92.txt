@@ -1,0 +1,180 @@
+# distutils.rst — Generate documentation for this module
+
+This document provides a developer-focused API reference and usage guidance for the utilities exposed by the distutils support module. The module exposes a collection of helpers used by build/configuration workflows, including path manipulation, parallel build configuration, and lightweight utilities to support temporary directory handling across threads.
+
+## Overview
+
+The module offers:
+
+- A small data container for installable libraries (InstallableLib).
+- Helpers to determine the number of parallel build jobs.
+- Path utilities to normalize and join filesystem paths across platforms.
+- Mechanisms to derive the path of a module from a frame in the call stack.
+- A robust path joiner (njoin) that handles sequences and normalizes relative components.
+- Simple, internal facilities for per-thread temporary directories and their cleanup.
+
+Public API is exposed via the module’s __all__.
+
+## Public API
+
+The following symbols are part of the documented public API. Where applicable, brief notes about usage and behavior are provided.
+
+### Class
+
+- InstallableLib
+  - Purpose: Container to hold information on an installable library.
+  - Parameters
+    - name (str): Name of the installed library.
+    - build_info (dict): Dictionary holding build information.
+    - target_dir (str): Absolute path where the library should be installed.
+  - Attributes: name, build_info, target_dir
+  - Notes: Intended to be used with configuration/build processes that need to track installable libraries and their metadata.
+  - See Also: Configuration.add_installed_library
+
+### Functions
+
+- get_num_build_jobs()
+  - Purpose: Determine the number of parallel build jobs allowed.
+  - Behavior:
+    - Uses the --parallel setting from setup.py if provided (via numpy.distutils.core.get_distribution()).
+    - Falls back to the environment variable NPY_NUM_BUILD_JOBS.
+    - If neither is set, uses the system processor count (capped at 8 to avoid overloading the system).
+  - Returns: int — number of parallel build jobs.
+  - Notes:
+    - Attempts to respect per-command parallel settings for build, build_ext, and build_clib.
+    - If no parallelization is configured, returns the value derived from the environment or system CPUs.
+  - Example:
+    - from your_module import get_num_build_jobs
+      print(get_num_build_jobs())
+
+- quote_args(args)
+  - Purpose: Quote a list of command-line arguments.
+  - Status: Deprecated (since 1.22).
+  - Behavior:
+    - Returns a new list with quoted arguments where needed.
+  - Deprecation:
+    - Emits a DeprecationWarning when called.
+  - Example:
+    - from your_module import quote_args
+      cmd = ['python', 'script.py', 'arg with spaces']
+      print(quote_args(cmd))
+  - Note: Do not rely on this function for new code; prefer explicit quoting in the calling context.
+
+- allpath(name)
+  - Purpose: Convert a /-separated pathname to the OS-specific path separator.
+  - Behavior: Splits on '/' and joins using os.path.sep.
+  - Example:
+    - from your_module import allpath
+      print(allpath('dir/subdir/file.txt'))  # -> 'dir/subdir/file.txt' on Unix, 'dir\\subdir\\file.txt' on Windows
+
+- rel_path(path, parent_path)
+  - Purpose: Compute the path of 'path' relative to 'parent_path' when appropriate.
+  - Behavior:
+    - Uses realpath to normalize paths (accounts for symlinks).
+    - If 'path' is shorter than 'parent_path', returns the original 'path'.
+    - If 'path' equals 'parent_path', returns ''.
+    - If 'parent_path' is a prefix of 'path', returns the tail relative to 'parent_path'.
+  - Example:
+    - from your_module import rel_path
+      print(rel_path('/a/b/c', '/a'))  # -> 'b/c' (on most setups)
+
+- get_path_from_frame(frame, parent_path=None)
+  - Purpose: Return the path of the module corresponding to a frame in the call stack.
+  - Behavior:
+    - Attempts to determine the file via frame.f_globals/frame.f_locals['__file__'].
+    - If not available, tries __name__ and imports the corresponding module.
+    - Falls back to the current directory if neither approach yields a path.
+    - If 'parent_path' is provided, returns the path relative to it using rel_path.
+  - Returns: str — path to the module, or '.' as a fallback.
+  - Example:
+    - from your_module import get_path_from_frame
+      import inspect
+      frame = inspect.currentframe()
+      print(get_path_from_frame(frame))
+
+- njoin(*path)
+  - Purpose: Robustly join path components with normalization.
+  - Behavior:
+    - Accepts individual components or a mixture of components and sequences.
+    - If a component is a sequence, it is expanded recursively (e.g., njoin(['a','b'], 'c') -> 'a/b/c').
+    - Converts each component to a string (requires is_string).
+    - Resolves '..' and '.' and uses OS-specific separators.
+  - Returns: str — the joined, normalized path.
+  - Example:
+    - from your_module import njoin
+      print(njoin('a', 'b'))                 # 'a/b' (Unix) or 'a\\b' (Windows)
+      print(njoin(['a', 'b'], 'c'))          # 'a/b/c'
+      print(njoin('a', ['b', 'c']))          # 'a/b/c'
+
+### Internal/auxiliary mechanisms (for context)
+
+- _tdata (thread-local storage)
+  - Purpose: Stores temporary directory information per thread to ensure only a single temporary directory is created per thread.
+
+- _tmpdirs
+  - Purpose: Global list of created temporary directories to enable cleanup on program exit.
+
+- clean_up_temporary_directory()
+  - Purpose: Remove all tracked temporary directories.
+  - Behavior: Iterates over _tmpdirs and attempts to remove each directory; ignores OSError.
+
+- atexit.register(clean_up_temporary_directory)
+  - Purpose: Ensure temporary directories are cleaned up when the process exits.
+
+> Note: The above internal mechanics are intended to support safe, thread-aware temporary directory handling within the module’s workflows.
+
+## Examples
+
+- Determine the number of build jobs and print it:
+  - Python:
+    - from your_module import get_num_build_jobs
+      print(get_num_build_jobs())
+
+- Normalize a path to the current platform:
+  - Python:
+    - from your_module import allpath
+      print(allpath('src/include'))
+
+- Build-argument quoting (deprecated):
+  - Python:
+    - from your_module import quote_args
+      cmd = ['python', 'setup.py', 'install', 'with space']
+      print(quote_args(cmd))
+
+- Join and normalize paths with njoin:
+  - Python:
+    - from your_module import njoin
+      print(njoin('a', ['b', 'c'], '../d'))
+
+- Resolve a module’s path from a frame:
+  - Python:
+    - import inspect
+      from your_module import get_path_from_frame
+      frame = inspect.currentframe()
+      print(get_path_from_frame(frame))
+
+## Testing and Development
+
+- To validate behavior locally, exercise the functions with representative inputs on your platform (Windows, macOS, Linux).
+- Ensure environment variable NPY_NUM_BUILD_JOBS and any setup.py parallel options are respected by get_num_build_jobs.
+- Note deprecation: quote_args is deprecated; prefer explicit quoting in the calling code.
+
+## Deprecations and Migration
+
+- quote_args is deprecated as of version 1.22. New code should avoid using it and handle quoting explicitly.
+- If you rely on internal thread-local or temporary directory handling, be mindful of the internal _tdata and _tmpdirs lifecycle, especially in long-running processes or servers.
+
+## See Also
+
+- __all__: Public API surface exported by the module, including:
+  - Configuration, get_numpy_include_dirs, default_config_dict, dict_append, appendpath, generate_config_py
+  - get_cmd, allpath, get_mathlibs, terminal_has_colors, red_text, green_text, yellow_text
+  - blue_text, cyan_text, cyg2win32, mingw32, all_strings
+  - has_f_sources, has_cxx_sources, filter_sources, get_dependencies
+  - is_local_src_dir, get_ext_source_files, get_script_files, get_lib_source_files
+  - get_data_files, dot_join, get_frame, minrelpath, njoin
+  - is_sequence, is_string, as_list, gpaths, get_language
+  - get_build_architecture, get_info, get_pkg_info, get_num_build_jobs
+  - sanitize_cxx_flags, exec_mod_from_location
+
+This document provides a concise reference for developers extending or using the distutils support module. For deeper behavior in edge cases, consult the source and related modules (e.g., numpy.distutils.core) as indicated in the function-level notes.

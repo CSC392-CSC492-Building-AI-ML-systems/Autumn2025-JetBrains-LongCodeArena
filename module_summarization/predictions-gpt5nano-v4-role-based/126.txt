@@ -1,0 +1,95 @@
+Image HDU Data Component
+========================
+
+Overview
+--------
+In this codebase, an Image HDU (Header/Data Unit) stores its pixel data in a dedicated Data component. The Data component is represented as a NumPy array attached to the HDU (commonly via an attribute like .data on ImageHDU or PrimaryHDU). This data carries the actual image pixels used for science analysis. The design emphasizes:
+
+- Efficient numeric handling through NumPy arrays
+- Observability: changes to the Data component can be observed by registered listeners
+- Integrity checks: the data and its metadata can be verified and (if desired) automatically fixed or reported
+
+Data representation
+-------------------
+- Data is modeled as a NumPy array (ndarray). The typical use case for images is a 2D array (height × width), though higher-dimensional data cubes are also supported by the general machinery.
+- The Data component is mutable, and modifications may trigger notifications to interested observers if the hosting HDU implements the NotifierMixin pattern described below.
+
+Data validation and verification
+-------------------------------
+The codebase provides a lightweight, extensible verification framework to validate the Data component and related metadata.
+
+Key elements
+- VerifyError / VerifyWarning
+  - Custom exception and warning classes used by the verification infrastructure.
+- VERIFY_OPTIONS
+  - A list of valid verification options, including:
+    - "ignore", "warn", "exception", "fix", "silentfix"
+    - Combinations such as "fix+warn", "silentfix+ignore", etc.
+- _Verify
+  - Shared verification logic used to run verifications on an instance’s values.
+  - run_option(option, err_text, fix_text, fix, fixable)
+    - Executes a verification action for a particular issue, returning a tuple (fixable, message).
+  - verify(option="warn")
+    - High-level entry point to verify all values in the instance.
+    - Handles parsing the option, delegating to a lower-level _verify method (not shown in the excerpt), and reporting or fixing results according to the chosen option.
+    - Supports splitting combined options into fix and report components (e.g., "fix+warn").
+- _ErrList
+  - A specialized list used to accumulate verification errors in a nested, hierarchical structure.
+  - Each item is a tuple of (flag, message) or an _ErrList for nested levels.
+  - __str__ and iter_lines(filter=None, shift=0) provide readable, indented representations of errors.
+  - iter_lines yields lines suitable for user-facing output, with indentation that reflects the depth in the error hierarchy.
+  - The class is designed to produce helpful, structured diagnostic information for complex validation scenarios affecting the Data component or related HDU state.
+
+How verification works for the Data component
+- A verification run collects multiple potential issues into an _ErrList.
+- The run_option method determines whether issues are fixable and composes a textual report, potentially appending a note about zero-based indexing as in the example.
+- The verify method orchestrates:
+  - Validation of the chosen option against VERIFY_OPTIONS
+  - Invocation of the internal _verify to gather errors
+  - Separation of fix-related behavior from reporting behavior (supporting options like "fix", "silentfix", and combinations with "+ignore"/"+warn"/"+exception")
+  - Optional silence when only fixable issues are addressed and reporting is suppressed
+  - Emission of warnings or raising VerifyError based on the chosen reporting option and whether any unfixable issues remain
+
+Observability and change notifications
+--------------------------------------
+The code includes a NotifierMixin, a general-purpose mechanism enabling objects to register listeners and notify them of changes.
+
+NotifierMixin highlights
+- Purpose: allow observers to register for updates on an object’s state changes (e.g., when the Data component is mutated).
+- Underscored API (intended for internal use):
+  - _add_listener(listener): register a listener via a weak reference
+  - _notify(change_type, *args, **kwargs): notify all listeners by calling listener._update_change_type(*args, **kwargs) if such a method exists
+- Benefits: decouples components, enabling UI, caches, or dependent calculations to react to changes without tight coupling to the Data object.
+
+Usage guidance (typical patterns)
+- Attach a listener to an HDU or its Data component to respond to changes (e.g., re-validate, redraw a viewer, or update derived data).
+- When Data is mutated, invoke _notify with an appropriate change type to propagate to listeners.
+
+Examples (illustrative)
+- Verifying image data:
+  - hdu = fits.ImageHDU(data=my_image_array)
+  - hdu.verify("warn")  # emits warnings for verifiable issues or raises on "exception"
+- Observing changes:
+  - class MyViewer(NotifierMixin): def _update_change_type(self, ...): ...
+  - hdu._add_listener(my_viewer)
+  - hdu.data[...] = new_value  # if the HDU exposes a setter that triggers _notify
+
+Practical guidelines
+- Use NumPy arrays for Data to leverage efficient computations and interoperability with FITS I/O.
+- Leverage the verification framework to enforce data integrity and catch issues early, choosing a reporting/fix strategy that fits the use case (e.g., strict validation in production vs. lenient checks during development).
+- Employ NotifierMixin to build responsive components (e.g., GUI elements or derived data caches) that stay in sync with changes to the image Data.
+
+Reference to code entities (for navigation)
+- Verify
+  - _Verify.run_option(...)
+  - _Verify.verify(...)
+  - VERIFY_OPTIONS
+- Error reporting
+  - _ErrList
+  - _ErrList.iter_lines(...)
+- Notifications
+  - NotifierMixin
+  - _add_listener, _notify (described in class docstring)
+
+Notes
+- The provided code excerpt shows the verification and notification infrastructure and their intended integration with the Data component of an image HDU. The Data component itself is conceptually a NumPy array attached to the HDU; the infrastructure described above supports validating, reporting, fixing, and reacting to changes in that data.

@@ -1,0 +1,188 @@
+Computational Performance
+=========================
+
+This section describes how computational performance is achieved, measured, and improved in the context of the estimators in this codebase. It covers parallel execution, multi-output estimators, incremental learning, memory considerations, and practical tips for developers aiming to optimize runtime.
+
+Overview
+--------
+
+- Performance is dominated by the cost of fitting and predicting with the base estimators, the number of targets (outputs) in multi-output scenarios, and the level of parallelism used.
+- The module exposes parallelism controls (notably the n_jobs parameter) and leverages internal utilities (e.g., joblib, threadpoolctl) to manage threading and process-based parallelism.
+- Multi-output estimators wrap a base estimator to handle multiple targets efficiently, but this can introduce overhead due to cloning, orchestration, and potential parallelization granularity.
+- Incremental learning support (partial_fit) enables processing of large data streams with reduced memory footprint and the opportunity to amortize cost over time.
+
+Key concepts
+------------
+
+- Parallelism and n_jobs
+  - n_jobs controls the level of parallelism used by estimators that support parallel execution.
+  - Increasing n_jobs can reduce wall-clock time for large problems but may increase memory usage and scheduling overhead.
+  - Internal parallel regions may use joblib.Parallel, and underlying native libraries (NumPy/SciPy) may spawn their own threads.
+- Multi-output estimators
+  - These estimators extend single-output estimators to handle multiple targets.
+  - They may train separate sub-estimators for each output, potentially enabling parallel training across outputs.
+  - There is additional orchestration overhead to manage multiple models, validations, and predictions.
+- Incremental learning (partial_fit)
+  - partial_fit allows updating models with new data without retraining from scratch.
+  - Useful for streaming data, large datasets, or online learning scenarios.
+  - Proper usage of partial_fit (e.g., providing classes for the first call) is important to ensure correct learning behavior.
+
+Parallelism and threading
+-------------------------
+
+- General strategy
+  - Use n_jobs to control parallelism in estimators that support it.
+  - For CPU-bound tasks, parallelizing across independent subproblems (e.g., multiple outputs in a multi-output estimator) can substantially reduce wall-clock time.
+  - For I/O-bound steps (e.g., loading data, external I/O), parallelism may have limited impact and could complicate resource usage.
+- Thread management
+  - threadpoolctl can be used to inspect and limit the number of threads used by underlying libraries.
+  - Be mindful of the Global Interpreter Lock (GIL): numerical computations in NumPy/SciPy release the GIL, enabling true parallelism in C-level code; Python-level parallelism is still governed by process-based or thread-based strategies.
+- Practical considerations
+  - On machines with many cores, setting n_jobs to a value equal to or slightly below the number of physical cores often yields the best balance between performance and stability.
+  - Excessive threading can lead to diminishing returns due to context-switching overhead and memory pressure.
+- Example (conceptual)
+  - A MultiOutputRegressor wrapping a base estimator can train per-output models. If implemented with a parallel loop over outputs, a higher n_jobs can reduce wall-clock time for fitting on datasets with many outputs.
+
+Multi-output estimators: performance considerations
+---------------------------------------------------
+
+- Overhead
+  - Wrapping a base estimator introduces orchestration overhead (cloning estimators, coordinating fit/predict across outputs).
+  - If the base estimator is already highly optimized (e.g., a vectorized linear model), the relative overhead of multi-output orchestration becomes more noticeable for small datasets or few outputs.
+- Parallelism granularity
+  - Training across outputs can improve performance when outputs are independent and the base estimator training is expensive.
+  - Training across samples (for certain estimators) may be less amenable to parallelism due to data dependencies or memory access patterns.
+- Memory usage
+  - Each output typically requires its own sub-estimator, which increases memory usage roughly linearly with the number of outputs.
+  - For very large numbers of outputs, consider dimensionality reduction or staged training to manage memory.
+
+Incremental learning (partial_fit)
+----------------------------------
+
+- Benefits
+  - Enables processing in chunks, reducing peak memory usage.
+  - Facilitates online learning and real-time updating with new data.
+- Considerations
+  - The first call often requires supplying the set of classes (for classification) to initialize internal state.
+  - Partial fitting may require different data organization (e.g., streaming data with consistent feature spaces).
+
+Data layout and memory usage
+----------------------------
+
+- Shape expectations
+  - For multi-output estimators, y is typically shaped as (n_samples, n_outputs).
+  - Large numbers of outputs increase memory usage for storage of target values, per-output models, and intermediate results.
+- Sparse data
+  - Sparse matrices (scipy.sparse) can significantly reduce memory usage for high-dimensional, sparse features.
+  - Ensure base estimators and pipelines support sparse inputs to reap memory and speed benefits.
+- Caching and intermediates
+  - Some steps may cache intermediate results; monitor memory growth when experimenting with large datasets or deep pipelines.
+
+Practical examples
+------------------
+
+Example 1: Multi-output regression with parallel training
+
+- Scenario: Training a MultiOutputRegressor wrapping a RandomForestRegressor, on synthetic data with many outputs.
+- Goal: Observe speed-up with increased parallelism and larger number of outputs.
+
+.. code-block:: python
+
+   import numpy as np
+   from sklearn.ensemble import RandomForestRegressor
+   from sklearn.multioutput import MultiOutputRegressor
+   from sklearn.datasets import make_regression
+   from time import time
+
+   # Synthetic data: 2000 samples, 100 features, 20 outputs
+   X, y = make_regression(n_samples=2000, n_features=100, n_informative=80, n_targets=20, random_state=42)
+
+   base = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=4)
+   mor = MultiOutputRegressor(base)
+
+   t0 = time()
+   mor.fit(X, y)
+   t1 = time()
+   print("Training time (n_outputs=20, n_jobs=4):", t1 - t0)
+
+   # Prediction time
+   t0 = time()
+   _ = mor.predict(X[:10])
+   t1 = time()
+   print("Prediction time for 10 samples:", t1 - t0)
+
+Notes:
+- Increase n_jobs to leverage more cores, but monitor memory usage.
+
+Example 2: Incremental learning with partial_fit
+
+- Scenario: Updating a model with streaming data using partial_fit (e.g., SGD-based estimator).
+- Goal: Demonstrate online updates without full retraining.
+
+.. code-block:: python
+
+   from sklearn.linear_model import SGDRegressor
+   from sklearn.utils import check_random_state
+   import numpy as np
+   from time import time
+
+   rng = check_random_state(0)
+   n_features = 50
+   n_samples = 100000
+   X_stream = rng.randn(n_samples, n_features)
+   y_stream = X_stream.sum(axis=1) + rng.randn(n_samples) * 0.5
+
+   model = SGDRegressor(loss="squared_loss", max_iter=1, tol=None)
+
+   # First partial_fit requires initial classes-like parameter for some classifiers;
+   # for regressors, provide an initial fit to establish shapes if needed.
+   t0 = time()
+   # Stream in chunks
+   chunk = 1000
+   for i in range(0, n_samples, chunk):
+       Xi = X_stream[i : i + chunk]
+       yi = y_stream[i : i + chunk]
+       model.partial_fit(Xi, yi)
+   t1 = time()
+   print("Time to stream-update model:", t1 - t0)
+
+Notes:
+- Partial fitting is particularly beneficial for large-scale or streaming data where full retraining is impractical.
+
+Performance diagnostics and profiling
+------------------------------------
+
+- Micro-benchmarking
+  - Use time or timeit to measure wall-clock time for training and predicting on representative datasets.
+- Profiling
+  - Use cProfile or line_profiler to locate hotspots in custom pipelines or custom estimators.
+- Resource accounting
+  - Monitor CPU usage, memory consumption, and thread activity (e.g., via top, htop, or resource profiling tools).
+- Reproducibility
+  - Fix random seeds to ensure reproducible timing measurements (to reduce variance due to stochastic algorithms).
+
+Best practices
+--------------
+
+- Start with conservative parallelism
+  - Begin with n_jobs=1 or a small number of cores to establish a baseline and avoid contention.
+- Profile with realistic data
+  - Use datasets that resemble production scale (in terms of n_samples, n_features, and n_outputs) to gauge performance accurately.
+- Be mindful of memory
+  - Multi-output models can be memory-intensive; monitor RAM and consider data reductions or streaming approaches for very large problems.
+- Use sparse data when possible
+  - If your features are sparse, ensure your estimators and pipelines support sparse matrices to save memory and time.
+- Prefer incremental learning for streaming data
+  - When data arrives over time, partial_fit can offer substantial runtime savings compared to full retraining.
+
+Notes for developers
+--------------------
+
+- The internal design of multi-output and incremental estimators emphasizes correctness and flexibility, sometimes trading off raw speed for wider applicability (support for various base estimators, compatibility with different data types, etc.).
+- If you implement a new estimator or a new strategy for parallelization, consider:
+  - Exposing an n_jobs parameter with sensible defaults.
+  - Avoiding global state that could impede parallel execution.
+  - Providing clear guidance on when parallelism helps and when it may hinder performance.
+  - Ensuring compatibility with threadpoolctl for consistent resource management.
+
+This documentation highlights the core ideas and practical guidance for achieving good computational performance when using the multi-output and incremental-learning capabilities in this codebase.

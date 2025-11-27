@@ -1,0 +1,186 @@
+w_eddist.rst
+=============
+
+w_eddist: Time-resolved transition-event duration distribution
+-------------------------------------------------------------
+
+Overview
+--------
+w_eddist computes the time-resolved distribution of transition-event durations
+from kinetics results produced by WE (Weighted Ensemble) simulations. The tool
+reads pre-computed kinetics data (produced by w_kinetics trace) and builds a
+multi-dimensional histogram of durations, binned in one or more dimensions
+corresponding to the input data.
+
+Key features
+- Parallel-friendly: designed to run with WESTPA’s parallel work managers by
+  default; serial execution is available via a dedicated option.
+- Flexible binning: supports three forms of bin specification to tailor the
+  histogram to the data and to avoid expensive scanning when possible.
+- Mask-aware iteration: can incorporate an iteration-specific mask into dataset
+  access to focus on a subset of data per iteration.
+- Output: produces a per-iteration histogram of transition-event durations and
+  metadata that enables plotting with plothist.
+
+Source data
+-----------
+- Primary data source: results from w_kinetics trace (see the w_kinetics trace
+  command for details on generating this dataset).
+- Kinetics filename: defaults to kintrace.h5. The tooling supports specifying a
+  kinetics data file (the code paths reference kintrace-related defaults and
+  attributes).
+
+Histogram binning
+-----------------
+- By default, histograms use 100 bins per dimension.
+- Bin specification (-b/--bins) supports three forms:
+  1. A single integer N:
+     - N uniformly spaced bins are created in every dimension.
+  2. A comma-separated list of integers N1,N2,...:
+     - N1 bins for the first dimension, N2 for the second, etc.
+  3. A list of lists [[B11, B12, B13, ...], [B21, B22, B23, ...], ...]:
+     - Explicit bin boundaries for each dimension. Boundaries may be non-uniform.
+     - These expressions are evaluated with Python's eval(), with np available
+       (e.g., to specify bins using np.arange()).
+- Notes:
+  - The first two forms (integer or list of integers) trigger a scan of the
+    data to determine min/max values, which can be expensive for large data
+    sets.
+  - The list-of-lists form provides explicit boundaries to avoid full scans.
+  - These bins are for histogram construction only and are unrelated to the
+    bins used to drive WE sampling.
+
+Output format
+-------------
+The output is written to an HDF5 file (default name: pdist.h5) and contains:
+
+- histograms
+  - A normalized multi-dimensional histogram. The first axis corresponds to
+    iterations; remaining axes map to the input data dimensions.
+- /binbounds_0, /binbounds_1, ...
+  - Boundary vectors for each input dimension (first, second, etc.).
+- /midpoints_0, /midpoints_1, ...
+  - Midpoints for each bin along each dimension.
+- n_iter
+  - A vector listing iteration numbers corresponding to the stored histograms.
+
+How it works (architecture overview)
+------------------------------------
+- DurationDataset
+  - A lightweight facade around a dataset (the dsspec data) that integrates a per-iteration
+    mask. get_iter_data(n_iter) returns a shaped view of the data for the given
+    iteration, applying the mask. If no data is available for that iteration, it returns None.
+- _remote_min_max
+  - Computes per-dimension data ranges (min/max) across a specified iteration, using
+    the dataset type to determine numeric bounds. Supports both floating-point and
+    integer dtypes.
+- _remote_bin_iter
+  - Core per-iteration binning function:
+    - Retrieves the per-iteration data for the given iteration.
+    - Applies the duration data to construct an iterated histogram via histnd.
+    - Normalizes the histogram with normhistnd.
+    - Returns the updated histogram for the iteration.
+- WEDDist
+  - The WESTParallelTool-based command class implementing w_eddist.
+  - Handles default parallel execution, progress reporting, and integration with
+    WESTPA’s I/O abstractions.
+  - Exposes command-line options (as described in the docstring section) and
+    coordinates data retrieval, binning, normalization, and output generation.
+
+Parallelization
+---------------
+- The tool uses WESTPA’s parallel work manager by default for scalable processing,
+  including input data reads and per-iteration binning.
+- A --serial option (or equivalent) is available to disable parallel execution when
+  running on devices where parallelism is not advantageous.
+
+Command-line options
+--------------------
+The documentation string describes the following conceptual options:
+
+- -o, --output
+  - Path to the output HDF5 file (default: "pdist.h5").
+  - The output contains histograms, binbound/midpoint metadata, and n_iter.
+
+- -b, --bins
+  - Specifies histogram binning as described under "Histogram binning":
+    - A single integer N (N uniform bins per dimension)
+    - A comma-separated list of integers N1,N2,... (N1 for dim 0, N2 for dim 1, ...)
+    - A list of lists of bin boundaries [[B11, B12, ...], [B21, B22, ...], ...]
+  - If not provided, a default of 100 bins per dimension is used.
+
+- --serial
+  - Run the computation serially (disable default parallel execution).
+
+- Other kinetics-related options
+  - The tool relies on kinetics data generated by w_kinetics trace, with a
+    default kinetics file name kintrace.h5. The exact CLI flag(s) to specify an
+    alternate kinetics file are not shown in the snippet, but the internal
+    attributes indicate a focus on kinetics data management.
+
+Implementation notes
+--------------------
+- The code defines:
+  - DurationDataset: wraps a dataset with an iteration mask to provide masked
+    per-iteration data in a consistent shape (nsegs, 1, 1).
+  - isiterable: utility to check if an object is iterable (used by CLI/config parsing).
+  - _remote_min_max: computes per-dimension min/max bounds for histogram
+    setup, taking into account the dataset's dtype.
+  - _remote_bin_iter: performs the per-iteration binning, leveraging histnd
+    and normhistnd, and returns the per-iteration histogram.
+  - WEDDist: main command class, implements WESTParallelTool integration, progress
+    reporting, and coordination of dataset access, binning, normalization, and
+    output writing.
+
+Practical examples
+------------------
+- Basic usage (default settings):
+  - Computes a time-resolved duration distribution with 100 bins per dimension
+    and writes to the default output file:
+    w_eddist
+
+- Custom bin count (uniform bins, 100 by default, overridden to 200):
+  w_eddist -b 200 -o pdist.h5
+
+- Custom per-dimension bins (explicit boundaries per dimension):
+  w_eddist -b '[[0,1,2,3],[0,5,10]]' -o pdist.h5
+  Note: The expression is evaluated with Python's eval() with numpy available.
+
+- Serial execution (alternative to default parallel run):
+  w_eddist --serial -o pdist.h5 -b 100
+
+What you can do with the output
+-------------------------------
+- Use plothist to visualize the per-iteration histograms:
+  - The output file contains histograms, bin boundaries, and midpoints suitable
+    for generating plots or performing further text/HDF5 processing.
+
+Notes and caveats
+-----------------
+- The data ranges used for binning can be expensive to determine if not explicitly
+  provided via the explicit-bounds form. Use the list-of-lists form to avoid this scan.
+- The masking mechanism (DurationDataset) allows focusing on particular segments
+  and iterations, which is essential when working with masked or selective data.
+
+Relation to other tools
+-----------------------
+- w_kinetics trace: Source for the kinetics results used by w_eddist.
+- plothist: The recommended downstream tool to plot and analyze the produced
+  histograms.
+
+Internal references (conceptual)
+-------------------------------
+- w_eddist relies on histnd (multi-dimensional histogram) and normhistnd (normalize histogram) from westpa.fasthist.
+- Datasets and I/O are managed through westpa.core.h5io interfaces.
+
+Notes for maintainers
+---------------------
+- The DurationDataset and remote binning helpers are central to the
+  implementation. Ensure they gracefully handle empty iterations and
+  out-of-range conditions, returning None or zeroed histograms as appropriate.
+- Keep the CLI documentation synchronized with any changes to default kinetics file names,
+  input masks, or binning strategies.
+
+This document provides the essential information developers and users need to understand
+and use the w_eddist command, including its data model, binning options, and
+output structure.

@@ -1,0 +1,116 @@
+BestEffortCallback
+==================
+
+Overview
+--------
+BestEffortCallback is a live-updating visualization and table-printing callback designed to work with Bluesky-style plans. It subscribes to run documents (start, descriptor, event, and stop) and, on a best-effort basis, builds live plots (per-descriptor) and a LiveTable of readings. It is designed to be robust in the presence of multiple streams, optional plotting, and hints about dimensions, while remaining resilient to incomplete or mixed data streams.
+
+This class is decorated with make_class_safe to gracefully handle exceptions and log them, preventing a single faulty document from breaking an ongoing run.
+
+Key responsibilities
+- Manage an internal state that tracks descriptors, streams, and live visualizations (LivePlot, LiveGrid, LiveScatter).
+- Determine plotting eligibility per descriptor based on user-configurable flags and available data fields.
+- Print high-level run information (headings) when enabled.
+- Offer simple toggles to enable/disable headings, table output, baseline fields, and plots.
+- Maintain per-descriptor collections of live visualization objects and peak statistics (via PeakStats and PeakResults).
+
+Public API
+----------
+Constructor
+- BestEffortCallback(*, fig_factory=None, table_enabled=True, **kwargs)
+  - fig_factory: Optional factory for creating figures/axes (used by plotting backends).
+  - table_enabled: If True, emit a LiveTable for hinted primary fields.
+  - kwargs: Additional options passed through to the superclass (QtAwareCallback).
+
+Public toggles
+- enable_heading() / disable_heading()
+  - Enable or disable printing the run heading (time, IDs) at the top of a new run.
+- enable_table() / disable_table()
+  - Enable or disable printing the hinted readings from the primary stream to a LiveTable.
+- enable_baseline() / disable_baseline()
+  - Enable or disable printing hinted fields from the baseline stream.
+- enable_plots() / disable_plots()
+  - Enable or disable plotting for all streams except those explicitly excluded (see noplot_streams).
+
+Main callback interface
+- __call__(name, doc, *args, **kwargs)
+  - Called for each document that the RunEngine publishes. If all of table, baseline, and plots are disabled, the callback becomes a no-op. Otherwise, delegates to the parent class for standard processing.
+
+Lifecycle methods (high level)
+- start(doc)
+  - Initializes internal state for a new run.
+  - Stores the start document and hints.
+  - Attempts to infer dimensions (independent variables) from motors or time.
+  - Applies a best-effort fallback if explicit dimension hints are missing or inconsistent across streams.
+  - Determines per-run dimension fields and the set of all dimension fields.
+  - Prints a run heading (if enabled) including the transient scan ID and persistent UID.
+- descriptor(doc)
+  - Registers descriptor metadata.
+  - Tracks and prints new streams if table output is enabled.
+  - Determines which fields are available for plotting and/or tabular output.
+  - Applies a heuristic to resolve dimension fields to actual fields when necessary (for legacy or non-standard descriptors).
+  - Excludes independent variables from plotting columns to determine plotting eligibility.
+  - Decides whether to instantiate live plotting objects (LivePlot, LiveGrid, LiveScatter) for this descriptor (this behavior is implied by the internal state and the rest of the module; the shown excerpt focuses on decision logic and field preparation).
+
+Internal state and data structures
+- _start_doc: The starting Run document for the current run.
+- _descriptors: Mapping from descriptor UID to descriptor document.
+- _table: LiveTable instance (when table output is enabled).
+- _heading_enabled: Flag to print the run heading.
+- _table_enabled / _baseline_enabled / _plots_enabled: Flags to control respective outputs.
+- _fig_factory: Optional figure factory for plotting backends.
+- _live_plots / _live_grids / _live_scatters: Dictionaries mapping descriptor UID and data keys to live visualization objects.
+- _peak_stats: Structure mirroring _live_plots to track peak statistics per legend/plot.
+- _cleanup_motor_heuristic: Internal flag used to decide if a motor-dimension heuristic should be cleaned up (i.e., if hints cannot be reliably applied).
+- _stream_names_seen: Set of stream names encountered so far in the run.
+- _buffer: A StringIO buffer used for formatting table output (bottom border handling).
+- _baseline_toggle: Internal toggle used for baseline-related plotting/table logic.
+- overplot: Public option to allow overplotting of data on top of existing plots.
+- noplot_streams: Streams that should not be plotted (default: ['baseline']).
+- omit_single_point_plot: If True and a stream has a single point, plotting for that stream may be suppressed.
+- peaks: Public data holder for peak statistics (via PeakResults).
+- dim_fields / all_dim_fields / dim_stream: Internal representations of the currently active independent variables and their corresponding streams.
+
+Notes on behavior and design
+- The callback attempts to infer and validate dimensions across streams. If dimensions come from multiple streams but cannot be combined, it disables the motor heuristic and falls back to a safe default (time or motors as primary dimension).
+- It avoids plotting when:
+  - Plots are globally disabled, or
+  - The current stream is listed in noplot_streams, or
+  - There are no columns to plot, or
+  - The plan is a single-point plan and omit_single_point_plot is True.
+- The described code path lays the groundwork for per-descriptor LivePlot / LiveGrid / LiveScatter setup, but the excerpt stops short of showing the concrete creation logic. The intended effect is that for each descriptor with suitable data, live visualizations are created and kept in the internal dictionaries for dynamic updates as events arrive.
+
+Usage example
+- Basic usage with Bluesky RunEngine:
+  - from bluesky import RunEngine
+  - from your_module import BestEffortCallback
+  - follow the standard pattern to create and subscribe the callback:
+    - bec = BestEffortCallback(table_enabled=True, fig_factory=your_factory)
+    - RE = RunEngine({})
+    - RE.subscribe(bec)
+  - Then run your plan as usual. The callback will print headings, manage a live table of hinted readings, and produce per-descriptor plots when data is available.
+
+Testing and validation
+- The module documents that testing and interactive usage can be found in:
+  - tests/interactive/best_effort_cb.py
+
+Related components
+- LivePlot, LiveGrid, LiveScatter: plotting backends used to render live visualizations.
+- QtAwareCallback: base class integration with Qt/event loop handling (via the make_class_safe decorator).
+- PeakStats / PeakResults: structures that provide peak-related statistics alongside live plots.
+- hinted_fields: helper (from the surrounding codebase) that identifies which fields are hinted by a descriptor.
+
+Example snippet (conceptual)
+- The following is a simplified illustration of how the class is typically used in code (not a replacement for the real usage in your project):
+  - bec = BestEffortCallback(fig_factory=None, table_enabled=True)
+  - RE = RunEngine({})
+  - RE.subscribe(bec)
+  - RE(plan)  # plan yields events; headings, table, and plots update accordingly
+
+See also
+--------
+- LivePlot, LiveGrid, LiveScatter for plotting backends
+- PeakStats, PeakResults for peak-related data
+- hints and descriptor handling in the surrounding plotting utilities
+
+Note: The documentation reflects the public API and the observable behavior from the provided code excerpt. Some internal implementation details (such as the exact creation of LivePlot objects per descriptor) are implied by the surrounding context and the public state management rather than shown explicitly in the excerpt.

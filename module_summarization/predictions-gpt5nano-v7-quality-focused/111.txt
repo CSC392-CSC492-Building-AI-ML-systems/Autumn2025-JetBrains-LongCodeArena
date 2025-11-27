@@ -1,0 +1,148 @@
+Plans: count, list_scan, and rel_list_scan
+
+This page documents the plan-generation helpers defined in the module. They produce generators that yield from lower-level primitives to drive detectors and motors in a bluesky RunEngine.
+
+count(detectors, num=1, delay=None, *, per_shot=None, md=None)
+--------------------------------------------------------------
+
+Take one or more readings from detectors.
+
+Signature
+- detectors: list of readable objects (e.g., Ophyd objects)
+- num: integer, optional (default 1). The number of readings to take. If None, the plan captures data until canceled.
+- delay: iterable or scalar, optional. Time delay in seconds between successive readings. If an iterable is provided, it must contain at least num - 1 entries.
+- per_shot: callable, optional. Hook for customizing the action of the inner loop (messages per step). Expected signature:
+  def f(detectors: Iterable[OphydObj]) -> Generator[Msg]
+- md: dict, optional. Metadata merged into the plan metadata.
+
+Returns
+- A generator that yields from an inner loop which repeatedly applies per_shot to the detectors.
+
+Behavior and details
+- When num is None, the plan uses an unbounded number of intervals (num_intervals is None).
+- Otherwise, num_intervals equals num - 1.
+- Metadata (_md) is built with:
+  - detectors: list of detector names
+  - num_points: num
+  - num_intervals: as above
+  - plan_args: string representations of the detectors and the numeric argument
+  - plan_name: "count"
+  - hints: a placeholder dict (default includes a time dimension)
+- If per_shot is not provided, it defaults to bps.one_shot.
+- The inner plan uses bps.repeat(partial(per_shot, detectors), num=num, delay=delay), then yields from it.
+
+Notes
+- The plan is designed to be used inside a RunEngine plan context.
+- The default hint includes a primary dimension for time.
+
+Example
+- Take 5 readings from a single detector with a 0.2 s delay between readings:
+  ::python
+     yield from count([det1], num=5, delay=0.2)
+
+- Take 10 readings from two detectors, with per-shot customization:
+  ::python
+     def my_per_shot(dets):
+         # yield messages or perform some action per step
+         yield from some_message_generator(dets)
+
+     yield from count([det1, det2], num=10, delay=0.5, per_shot=my_per_shot)
+
+- Attach metadata
+  ::python
+     md = {'experiment': 'test_run'}
+     yield from count([det1], num=5, md=md)
+
+Related
+- See also list_scan for more complex, multi-motor scanning patterns.
+
+list_scan(detectors, *args, per_step=None, md=None)
+-----------------------------------------------
+
+Scan over one or more variables in steps simultaneously (inner product).
+
+Signature
+- detectors: list of readable objects
+- *args: pairs of (motor, [points]); for each motor, provide a list of target positions
+- per_step: callable, optional. Hook for customizing the action of the inner loop (messages per step). Expected signature:
+  f(detectors, motor, step) -> plan (a generator)
+- md: dict, optional. Metadata merged into the plan metadata.
+
+Behavior and details
+- The number of arguments in *args must be even; otherwise, the plan raises ValueError.
+- Each motor’s position list is converted to a Python list (accepts any finite iterable).
+- All position lists must have the same length. If not, the plan raises ValueError with a descriptive message.
+- The plan builds:
+  - md_args: a flattened list of (repr(motor), pos_list) pairs
+  - motor_names: a list of motor names
+  - _md with:
+    - detectors: detector names
+    - motors: motor_names
+    - num_points: length of the position lists
+    - num_intervals: length - 1
+    - plan_args: includes detectors reprs, args (md_args), and per_step repr
+    - plan_name: "list_scan"
+    - plan_pattern: "inner_list_product"
+    - plan_pattern_module: plan_patterns.__name__
+    - plan_pattern_args: {'args': md_args}
+    - hints: initial empty dict
+- Metadata is updated with any provided md, after ensuring a default structure exists.
+- The function collects x_fields from each motor’s hints, if present, to derive default dimensions. If any x_fields exist, a default dimension hint is added.
+- full_cycler is produced by plan_patterns.inner_list_product(args) and passed to a lower-level scan_nd planner along with per_step and the constructed metadata.
+
+Notes
+- The plan is intended to drive a multi-motor scan where each motor moves to a corresponding value in its points list on each step.
+- The inner scan uses a product of the provided point lists.
+- The per_step hook provides access to dets, the motor being stepped, and the current step.
+
+Examples
+- Two motors, each with three points:
+  ::python
+     detectors = [det1, det2]
+     yield from list_scan(detectors,
+                          motor1, [0, 1, 2],
+                          motor2, [10, 20, 30])
+- With per-step customization and metadata:
+  ::python
+     def step_hook(dets, motor, step):
+         # yield messages or perform per-step actions
+         yield from some_step_messages(dets, motor, step)
+
+     yield from list_scan(detectors,
+                          motor1, [0, 1, 2],
+                          motor2, [10, 20, 30],
+                          per_step=step_hook,
+                          md={'experiment': 'multi-motor-scan'})
+
+- Note on validation:
+  - If the number of (motor, points) pairs is odd, or if any points list lengths differ, the plan raises ValueError with a descriptive message.
+
+See Also
+- See bluesky.plans.rel_list_scan, bluesky.plans.list_grid_scan, bluesky.plans.rel_list_grid_scan for related patterns.
+- The internal plan pattern is managed by plan_patterns.inner_list_product and the overall orchestration by scan_nd.
+
+rel_list_scan(detectors, *args, per_step=None, md=None)
+-------------------------------------------
+
+Scan over one variable in steps relative to the current position.
+
+Documentation
+- This function currently contains a TODO and remains unimplemented in this version.
+- The intended API mirrors list_scan, except that each step moves a motor by a relative offset from its current position.
+
+Status
+- Not implemented yet. It serves as a placeholder for future enhancement.
+
+Notes
+- The function signature and docstring describe the intended behavior and usage, but no actual logic is provided in this version.
+
+Example (future use)
+- Once implemented, usage would resemble:
+  ::python
+     yield from rel_list_scan(detectors,
+                              motor, [0.5, 1.0, -0.5],
+                              per_step=some_hook)
+
+See Also
+- For related patterns, refer to count and list_scan.
+- This placeholder aligns with the project’s plan-pattern ecosystem and is expected to integrate with plan_patterns and scan_nd in a future release.

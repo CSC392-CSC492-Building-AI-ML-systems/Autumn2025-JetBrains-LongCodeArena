@@ -1,0 +1,208 @@
+Feature extraction for model inspection
+======================================
+
+Overview
+--------
+
+This module provides utilities to introspect and extract intermediate features from a model by tracing its execution with Torch FX. It enables you to:
+
+- Identify and extract outputs from internal nodes (layers, operations, or submodules) of a model.
+- Create a new model that, when run, returns a dictionary of selected intermediate features.
+- Discover graph node names that correspond to potential feature extraction points.
+
+Key concepts
+------------
+
+- Node path naming
+  - The tracer records a node name for each operation, represented as a dot-separated path from the top-level module to a leaf operation or leaf module.
+  - The top-level module name is not included in the node name. For example, a ReLU applied inside a submodule might be named simply `relu`.
+
+- Leaf modules
+  - Some modules can be designated as leaves, meaning the tracer will not trace through them. Instead, calls to their forward methods are recorded as single nodes.
+  - This behavior is controlled by the LeafModuleAwareTracer and can be exercised via the tracing process used by the feature extraction utilities.
+
+- Node provenance map
+  - During tracing, each FX node is associated with a node name. This association is stored in a mapping (node_to_qualname) to help users select the appropriate nodes for feature extraction.
+
+- Duplicate node names
+  - If multiple nodes produce the same logical name, a numeric suffix (_{int}) is appended to disambiguate them locally within the parent scope.
+
+Primary building blocks
+-----------------------
+
+- LeafModuleAwareTracer
+  - An FX tracer that allows the user to specify a set of leaf modules. Modules in this set are not traced through; instead, a single node with a forward call to the leaf is created.
+
+- NodePathTracer
+  - An FX tracer that records, for each operation, the node name from which the operation originated.
+  - Maintains a mapping from FX nodes to their node names (node_to_qualname).
+  - Restores the current module qualification context after tracing a leaf node.
+
+- _warn_graph_differences
+  - A helper that compares the node naming between train-time and eval-time traces and warns if there are differences.
+  - This is useful when you want to extract features in both training and evaluation modes and ensure consistency.
+
+- _is_subseq
+  - Utility to check whether one sequence is a subsequence of another, used for generating helpful warnings about graph differences.
+
+API reference
+-------------
+
+create_feature_extractor(model, return_nodes)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Wrap a model with a feature extractor that returns intermediate features.
+
+- Parameters
+  - model (nn.Module): The model to wrap.
+  - return_nodes (Union[List[str], Dict[str, str]]): Specifies which nodes’ outputs to return.
+    - If a list of strings, each listed node name will be included in the output with the same key.
+    - If a dict, keys are the node names to extract and values are the keys under which to store the corresponding outputs in the return dictionary.
+- Returns
+  - nn.Module: A module that, when called with an input tensor (or a small input dictionary if needed), returns a dict containing the requested intermediate feature maps. The dict keys are the names provided via return_nodes (or the original node names if a simple list was supplied).
+
+- Notes
+  - Node names are derived from the internal tracing process and can be inspected using get_graph_node_names(model, input_shape) to discover available options.
+  - If the requested node(s) do not exist in the traced graph, an error will typically be raised during tracing.
+
+- Example
+  - Basic usage with a ResNet-50 backbone:
+    code_block
+    import torch
+    from torchvision.models import resnet50
+    from torchvision.models.feature_extraction import create_feature_extractor, get_graph_node_names
+
+    model = resnet50(weights=None)
+    model.eval()
+
+    # Discover candidate node names for feature extraction
+    node_names = get_graph_node_names(model, input_shape=(3, 224, 224))
+    # For example, extract outputs after layer4 block
+    return_nodes = {"layer4.0.relu": "feat_layer4"}
+
+    feature_extractor = create_feature_extractor(model, return_nodes)
+
+    x = torch.randn(1, 3, 224, 224)
+    feats = feature_extractor(x)
+    print(feats.keys())  # dict with the key 'feat_layer4'
+    code_block
+
+get_graph_node_names(model, input_shape)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Identify candidate node names that can be used with create_feature_extractor.
+
+- Parameters
+  - model (nn.Module): The model to inspect.
+  - input_shape (Tuple[int, int, int]): Shape of a representative input (C, H, W) used to trace the graph.
+
+- Returns
+  - List[str]: A list of node names that correspond to intermediate points in the graph. These names can be used as keys in return_nodes for create_feature_extractor.
+
+- Notes
+  - The function may trace the model to identify a set of plausible feature extraction points. The exact set of names can vary between models and input shapes.
+  - If a mismatch between train and eval graphs is detected, consider tracing in both modes and handle differences with separate return node specifications (see _warn_graph_differences).
+
+- Example
+  - Discover possible nodes for a model:
+    code_block
+    import torch
+    from torchvision.models import resnet18
+    from torchvision.models.feature_extraction import get_graph_node_names
+
+    model = resnet18(weights=None)
+    model.eval()
+
+    names = get_graph_node_names(model, input_shape=(3, 224, 224))
+    print(names[:20])  # show first 20 candidate node names
+    code_block
+
+Important considerations and edge cases
+---------------------------------------
+
+- Graph differences between train and eval
+  - When tracing in different modes (train vs eval), the graph can differ due to layers that behave differently or are only active in certain modes.
+  - Use _warn_graph_differences to warn about such discrepancies, and consider supplying separate return_nodes for train and eval modes if necessary.
+
+- Node naming and disambiguation
+  - Duplicate node names are suffixed with _{int} to maintain uniqueness within the immediate parent scope.
+  - When selecting nodes, prefer using get_graph_node_names to identify stable, unique node paths to avoid conflicts.
+
+- Leaf modules
+  - If certain submodules are marked as leaves, tracing will not descend into them. Outputs will then correspond to the forward result of those leaf modules rather than their internal operations.
+  - This can simplify feature extraction by focusing on higher-level module outputs rather than internal op-levels.
+
+- Robustness and compatibility
+  - Feature extraction relies on FX tracing; dynamic control flow or data-dependent shapes can complicate the extraction. Provide explicit input shapes where required and test on representative inputs.
+  - If you modify the model after tracing, you should re-create the feature extractor to reflect the new graph.
+
+Usage patterns
+--------------
+
+- Inspecting a model
+  - Use get_graph_node_names to discover potential feature points.
+  - Build a feature extractor with create_feature_extractor and select the desired outputs.
+
+- Multiple outputs
+  - Return multiple features by supplying a list of node names or a dict mapping node names to output keys.
+
+- Stable downstream usage
+  - For production usage, prefer stable node names obtained from get_graph_node_names to avoid breakage when the model changes.
+
+Code examples
+-------------
+
+- Example: Basic feature extraction from a pretrained model
+  code_block
+  import torch
+  from torchvision.models import resnet50
+  from torchvision.models.feature_extraction import get_graph_node_names, create_feature_extractor
+
+  model = resnet50(weights=None)
+  model.eval()
+
+  # Discover candidate nodes
+  names = get_graph_node_names(model, input_shape=(3, 224, 224))
+  # Pick a couple of nodes to extract
+  return_nodes = {names[10]: "feat1", names[20]: "feat2"}
+
+  fe_model = create_feature_extractor(model, return_nodes)
+
+  x = torch.randn(1, 3, 224, 224)
+  outs = fe_model(x)
+  print(outs.keys())  # dict with 'feat1' and 'feat2'
+  code_block
+
+- Example: Using leaf_modules to simplify tracing
+  code_block
+  import torch
+  from torchvision.models import resnet18
+  from torchvision.models.feature_extraction import create_feature_extractor
+
+  model = resnet18(weights=None)
+  # Suppose we want to treat the entire 'layer4' block as a leaf
+  leafs = (model.layer4,)
+  fe_model = create_feature_extractor(model, {"layer4": "layer4_out"}, leaf_modules=leafs)
+
+  x = torch.randn(1, 3, 224, 224)
+  out = fe_model(x)
+  print(out)  # {'layer4_out': tensor}
+  code_block
+
+- Example: Tracing in train vs eval modes and warning about differences
+  code_block
+  import torch
+  from torchvision.models import resnet50
+  from torchvision.models.feature_extraction import get_graph_node_names, create_feature_extractor, _warn_graph_differences
+
+  model = resnet50(weights=None)
+  model.train()
+  train_names = get_graph_node_names(model, input_shape=(3, 224, 224))
+  model.eval()
+  eval_names = get_graph_node_names(model, input_shape=(3, 224, 224))
+
+  # If there are differences, _warn_graph_differences will help you decide how to proceed
+  _warn_graph_differences(train_tracer, eval_tracer)  # internal usage example
+  code_block
+
+End of page

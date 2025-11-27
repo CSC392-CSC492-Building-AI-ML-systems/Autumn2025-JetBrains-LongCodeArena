@@ -1,0 +1,175 @@
+# Publishing for Web Review
+
+Overview
+- Web review enables you to publish content from ftrack for external stakeholders to review via a shareable web interface.
+- This guide explains how to publish a review package from the ftrack API client (Python) and how to monitor and manage the published web review.
+- Publishing is performed through the server’s web-review endpoints using authenticated REST requests. The client uses the Session and SessionAuthentication utilities to attach the required ftrack headers automatically.
+
+Prerequisites
+- Access to an ftrack server that supports web review publishing.
+- API credentials (api_key and api_user) with permission to publish web reviews.
+- A target resource to publish (e.g., a Version, a Reviewable entity, or a specific collection of assets) that the server expects to be published for web review.
+- Network connectivity from your client to the ftrack server.
+
+Key concepts
+- Web Review: a server-side object representing a review session for external stakeholders, including metadata (title, description), recipients, and a shareable URL.
+- Publish: the act of creating a web review on the server and attaching the selected content (assets, versions) to that review.
+- Recipients: email addresses or user accounts that should be notified or granted access to the published web review.
+- Status/URL: after publishing, the server returns a URL for the web review and a status that can be monitored (e.g., pending, active, completed).
+
+Getting started: configuring a session for web review publishing
+- Use the existing Session class to connect to the server.
+- Provide server_url, api_key, and api_user (via constructor arguments or environment variables).
+- The SessionAuthentication class attaches the necessary ftrack headers:
+  - ftrack-api-key: your API key
+  - ftrack-user: your API user
+
+Example: creating a session (Python)
+- This is a minimal example of creating a session; the actual web review publish call is performed via REST using the session’s credentials.
+
+  - Pseudo-code (conceptual):
+    - from ftrack_api import Session
+    - session = Session(server_url='https://ftrack.example.com',
+                        api_key='YOUR_API_KEY',
+                        api_user='YOUR_API_USER')
+    - # Use the REST endpoint via requests with SessionAuthentication
+    - import requests
+    - from ftrack_api.auth import SessionAuthentication
+    - auth = SessionAuthentication(session._api_key, session._api_user)
+    - payload = { ... }  # see payload description below
+    - resp = requests.post(
+        session._server_url + '/webreview/publish',
+        json=payload,
+        auth=auth
+      )
+    - resp.raise_for_status()
+    - review = resp.json()
+    - print('Web review URL:', review.get('url'))
+
+Notes:
+- The exact REST endpoint path may vary by server version and configuration; consult your server’s documentation or administrators for the correct path (commonly something like /webreview/publish or /api/webreview/publish).
+- The SessionAuthentication helper is provided to ensure the requests carry the proper ftrack authentication headers.
+
+Payload and API surface for publishing
+- The server expects a payload describing the web review, including:
+  - content identifiers to publish (e.g., version_id, asset IDs, or a project/scoped collection)
+  - metadata for the review (title, description, due date)
+  - recipients (email addresses or ftrack users)
+  - visibility or permissions (e.g., public link, restricted access)
+  - optional metadata (timezone, language, review workflow steps)
+
+Typical payload structure (illustrative; adapt to your server’s contract)
+- Example: publish a Version for web review
+
+  {
+    "content_type": "version",
+    "content_id": "version-123",
+    "title": "Q1 2025 Review – Version 1.2",
+    "description": "Publish for external stakeholder review. Includes updated assets and QA notes.",
+    "recipients": ["external-reviewer@example.com"],
+    "permissions": "link-only",  # or "private", "public"
+    "notes": "Generated from ftrack using the web review workflow",
+    "timezone": "UTC",
+    "callback_url": "https://myapp.example.com/webreview/callback",
+    "attachments": [
+      {"type": "asset", "id": "asset-456"},
+      {"type": "asset", "id": "asset-789"}
+    ]
+  }
+
+- The server will respond with a result containing at least:
+  - url: a shareable web review URL
+  - id: the web review identifier on the server
+  - status: initial status (e.g., "pending" or "active")
+  - created_at / updated_at timestamps
+
+Example: publishing (concrete Python snippet)
+- This snippet shows a minimal end-to-end flow using the Session for credentials and the REST endpoint for publishing. Adapt endpoint paths and payload fields to your environment.
+
+  - import json
+  - import requests
+  - from ftrack_api.authentication import SessionAuthentication  # if available in your environment
+  - from ftrack_api.session import Session  # your local session class
+  - server_url = 'https://ftrack.example.com'
+  - api_key = 'YOUR_API_KEY'
+  - api_user = 'YOUR_API_USER'
+  - session = Session(server_url=server_url, api_key=api_key, api_user=api_user)
+
+  - auth = SessionAuthentication(api_key, api_user)
+  - payload = {
+      "content_type": "version",
+      "content_id": "version-123",
+      "title": "Q1 2025 Review – Version 1.2",
+      "description": "QA review for external stakeholders",
+      "recipients": ["external-reviewer@example.com"],
+      "permissions": "link-only",
+      "attachments": [
+        {"type": "asset", "id": "asset-456"},
+        {"type": "asset", "id": "asset-789"}
+      ],
+      "timezone": "UTC"
+    }
+
+  - endpoint = session._server_url.rstrip('/') + '/webreview/publish'
+  - resp = requests.post(endpoint, json=payload, auth=auth)
+  - resp.raise_for_status()
+  - review = resp.json()
+  - print('Web review published. URL:', review.get('url'), 'Status:', review.get('status'))
+
+Monitoring and updating a published web review
+- After publishing, you may want to monitor status and refresh the published content if needed.
+- Common status values: pending, active, completed, canceled.
+- The server may expose endpoints to query status by the review id:
+  - GET /webreview/status/{review_id}
+  - GET /webreview/{review_id} (retrieve metadata)
+- To refresh or update the review content (e.g., add attachments, update metadata), send a PATCH/PUT request to the review resource or re-publish with updated payload.
+
+Example: polling status (conceptual)
+  - endpoint = session._server_url.rstrip('/') + f'/webreview/status/{review_id}'
+  - resp = requests.get(endpoint, auth=auth)
+  - status = resp.json().get('status')
+  - print('Current status:', status)
+
+Error handling and debugging
+- Validate payload against the server’s expected contract; mismatches will result in 4xx responses with error details in the response body.
+- Use resp.raise_for_status() to surface HTTP errors.
+- Log responses during development to understand the server’s expectations and any required fields.
+- If your environment uses a brokered or proxied network, ensure that the endpoint is reachable and that authentication headers are permitted by proxies.
+
+Best practices
+- Prefer including meaningful metadata (title, description, due date) to help recipients understand the intent of the review.
+- Limit recipients to necessary external stakeholders; consider using time-bound or access-limited links.
+- When updating a published review, consider versioning the content and notifying recipients of changes.
+- Use environment-specific endpoints (e.g., test vs. production) to avoid publishing incomplete content to production.
+
+Error handling strategies
+- Network errors: retry with exponential backoff.
+- Authentication errors: verify api_key/api_user and server URL; ensure the credentials have web review publish permissions.
+- Validation errors: adjust payload to satisfy server’s required fields and constraints (content_id, content_type, recipients, etc.).
+
+Security considerations
+- Do not log sensitive payloads in plaintext in production logs.
+- Use secure channels (HTTPS) for all web review publishing requests.
+- Manage access to recipient lists and review URLs carefully.
+
+Troubleshooting checklist
+- Confirm server supports web review publishing and that the endpoint path is correct for your version.
+- Verify API credentials and that they have publish permissions.
+- Validate payload structure against server documentation or by inspecting server responses.
+- Check server logs for publish-related events if you have access.
+
+References and further reading
+- ftrack session and authentication patterns (Session, SessionAuthentication)
+- Server REST conventions for resource publishing and status endpoints
+- Internal server docs for web review capabilities and lifecycle
+
+Appendix: quick comparison of publish options
+- Direct REST publish (lower-level, requires crafting payload and handling auth)
+  - Pros: maximum control, no higher-level abstractions needed
+  - Cons: requires careful handling of endpoints and payload formats
+- High-level API publish (if provided by your server/client bindings)
+  - Pros: simpler API surface, built-in validation
+  - Cons: depends on available bindings and server support
+
+Note
+- The exact REST endpoints, payload shapes, and status semantics depend on your ftrack server configuration and version. Adapt the example payload and endpoint paths to match your environment. If in doubt, consult your system administrator or the server’s web review API documentation.

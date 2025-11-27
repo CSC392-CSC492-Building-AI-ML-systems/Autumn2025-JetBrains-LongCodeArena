@@ -1,0 +1,183 @@
+# PlotData
+
+A flexible helper to feed plotting functions with data from a variety of sources. PlotData allows you to define which keys to use for plotting (e.g., x, y) while supporting different data structures (dicts, Pandas DataFrames, or, when available, Bokeh ColumnDataSource). It also supports expanding single keys into multiple plot sets, and optional data validation and copying.
+
+## Overview
+
+- Purpose: Enable plotting routines to accept data from multiple formats without copying or restructuring data manually.
+- Data sources: dicts, Pandas DataFrames, and optionally Bokeh ColumnDataSource (if Bokeh is installed).
+- Plot set concept: You can define multiple plot “sets” by providing list-valued keys. PlotData will expand these into separate namedtuples, each representing one plot set.
+- Key features:
+  - Optional rigorous data checks (same_length) across all entries.
+  - Optional data copying to avoid mutating the original data.
+  - Ability to disallow adding new data keys after initialization (strict_data_keys).
+  - Support for iterating over the prepared plot sets.
+  - Integration with Bokeh CDS when available.
+
+## Key concepts and relationships
+
+- ALLOWED_DATA_HOLDERS: Supported input data containers. If Bokeh is installed, ColumnDataSource is allowed in addition to dict and DataFrame.
+- _BOKEH_INSTALLED: Internal flag indicating whether Bokeh is available.
+- _is_bokeh_cds / _copy_bokeh_cds: Helper utilities to detect and copy Bokeh ColumnDataSource objects.
+- PlotData.data: The raw input data (dict, DataFrame, or list of such sources).
+- PlotData.use_column_source, same_length, strict_data_keys, copy_data: Configuration flags controlling behavior.
+- _column_spec: A namedtuple factory used to describe a single plot set (fields correspond to the provided kwargs keys).
+- PlotData.columns: A list of plot-set descriptors; each element is a namedtuple created from the provided kwargs (potentially with per-set values if list-valued inputs were given).
+- data_keys: Returns the field names of the current column specification (the keys you provided on initialization).
+- add_data_key(): Extend the set of data keys for future plots (respecting strict_data_keys).
+
+## Initialization and parameters
+
+Constructor signature:
+- PlotData(data, use_column_source=False, same_length=False, strict_data_keys=False, copy_data=False, **kwargs)
+
+Parameters:
+- data: The source data. Can be a single dict/DataFrame/ColumnDataSource or a list of such sources.
+- use_column_source: If True, data handling may utilize ColumnDataSource semantics (where applicable).
+- same_length: If True and data is dict-like, ensure all keys have arrays of the same length (checked across all entries and normalized if needed).
+- strict_data_keys: If True, do not allow adding new data keys after initialization via add_data_key().
+- copy_data: If True, copy the input data to avoid mutating the originals. Copies are performed per data source; Bokeh CDS are copied via a dedicated routine when available.
+- kwargs: Mapping of data keys to their source specifiers:
+  - Each key name becomes a field in the per-set descriptor (_column_spec).
+  - Values can be:
+    - A string specifying the key in data to use (e.g., x='x').
+    - A list of strings specifying multiple options for that key across sets (e.g., y=['y1', 'y2', 'y3']).
+
+Behavior:
+- If any value in kwargs is a list, PlotData will create multiple plot sets. The number of sets is the maximum length among all list-valued kwargs.
+- For each set, the corresponding field in the per-set descriptor is filled with the element at that index (or the single value if not a list).
+- If no values are lists, a single plot set is created (or one per data source if data is a list).
+
+Return value:
+- None (initialization side effects only).
+
+## Data keys and columns
+
+- _column_spec: A namedtuple class created from the key names in kwargs (e.g., Columns(x='x', y='y')).
+- data_keys: The list of field names in the current _column_spec (i.e., the registered data keys).
+- columns: A list of namedtuples, each representing a plot set. Each namedtuple has attributes named after the provided kwargs keys, with values indicating which data key to pull for that plot set.
+
+Example flow:
+- data = {'x': x_data, 'y1': y1_data, 'y2': y2_data}
+- PlotData(data, x='x', y=['y1', 'y2'])
+- If there are two sets, you will get two descriptors:
+  - First: Columns(x='x', y='y1')
+  - Second: Columns(x='x', y='y2')
+
+## Copying and data integrity
+
+- copy_data:
+  - If data is a list: each element is copied (shallow copy) unless it is a Bokeh CDS, in which case a dedicated Bokeh copy is used.
+  - If data is a single object: it is copied similarly (or copied via Bokeh-specific routine if a CDS).
+- same_length (dict data):
+  - When True, all dictionary entries are normalized to ensure equal lengths across keys (via _normalize_dict_entries, applied to each dict entry in the data).
+  - Useful when plotting multiple series that must align by index.
+
+## Iteration and usage
+
+- PlotData is designed to be iterable. Each iteration yields a data structure (typically a simple object or namedtuple) representing one plot set, with fields corresponding to the provided keys.
+- For the common pattern with x and multiple y-keys, iteration yields an object with attributes named after the kwargs keys (e.g., entry.x and entry.y).
+
+Note: The exact iteration protocol and output type depend on the internal implementation not fully shown in the excerpt. The documented behavior reflects how the columns and plot-set descriptors are constructed.
+
+## Important considerations and edge cases
+
+- Data type constraints:
+  - When Bokeh is installed, ColumnDataSource objects are accepted as data sources; otherwise only dicts and DataFrames are allowed.
+- List-valued kwargs:
+  - All list-valued kwargs must be of compatible lengths to form the same number of plot sets.
+  - If a list length mismatches the computed num_sets, a ValueError is raised during initialization.
+- same_length:
+  - Only applied when the top-level data is a dict (or list of dicts for multiple sources). It normalizes dictionary entries to ensure consistent lengths across keys.
+- strict_data_keys:
+  - If enabled, no new data keys may be added via add_data_key() after initialization.
+- add_data_key:
+  - Appends a new field to the column specification and to every plot set descriptor.
+  - If keys is provided as a list, its length must match the number of sets; otherwise an error is raised.
+  - Behavior for partial implementations may depend on the underlying data structure; see the source for exact semantics.
+
+## Usage examples
+
+Code examples assume numpy as np and optional Bokeh availability.
+
+1) Basic usage with a dict and single x key and multiple y keys
+
+```python
+import numpy as np
+from masci_tools.vis.plot_data import PlotData
+
+x = np.linspace(-10, 10, 100)
+data = {
+    'x': x,
+    'y1': np.sin(x),
+    'y2': np.cos(x),
+}
+pd = PlotData(data, x='x', y=['y1', 'y2'])
+
+for entry in pd:
+    print(entry.x, entry.y)  # 'x' for all sets, 'y1' then 'y2' per set
+```
+
+2) Using a DataFrame with multiple columns
+
+```python
+import pandas as pd
+import numpy as np
+from masci_tools.vis.plot_data import PlotData
+
+df = pd.DataFrame({
+    'x': np.linspace(-5, 5, 50),
+    'y1': np.sin(np.linspace(-5, 5, 50)),
+    'y2': np.cos(np.linspace(-5, 5, 50)),
+})
+
+pd = PlotData(df, x='x', y=['y1', 'y2'])
+
+for entry in pd:
+    # entry.x is 'x' (the key), entry.y is 'y1' or 'y2' per set
+    print(entry.x, entry.y)
+```
+
+3) Copying data to avoid mutation
+
+```python
+data = {'x': x, 'y': y}
+pd = PlotData(data, x='x', y='y', copy_data=True)
+```
+
+4) Enforcing that no new keys are allowed after initialization
+
+```python
+data = {'x': x, 'y': y}
+pd = PlotData(data, x='x', y='y', strict_data_keys=True)
+
+# This would raise a ValueError if attempted:
+# pd.add_data_key('z', keys='z')
+```
+
+5) Ensuring equal lengths across keys (same_length)
+
+```python
+data = {
+    'x': np.arange(10),
+    'y1': np.random.rand(10),
+    'y2': np.random.rand(9),  # intentionally different length
+}
+# This will normalize / validate lengths across keys
+pd = PlotData(data, same_length=True, x='x', y=['y1', 'y2'])
+```
+
+6) Using with Bokeh ColumnDataSource (if Bokeh is installed)
+
+```python
+# Requires Bokeh to be installed
+from bokeh.models import ColumnDataSource
+source = ColumnDataSource(data={'x': np.arange(10), 'y': np.arange(10)})
+pd = PlotData(source, x='x', y=['y'], use_column_source=True)
+for entry in pd:
+    print(entry.x, entry.y)
+```
+
+## Conclusion
+
+PlotData provides a structured and flexible approach to supplying plotting routines with data from various sources. It supports multi-set plotting, data integrity checks, and optional data copying, with thoughtful handling of different input types (dicts, DataFrames, and ColumnDataSource when available). Use it to simplify the preparation of data for plotting while keeping your data handling logic centralized and consistent.

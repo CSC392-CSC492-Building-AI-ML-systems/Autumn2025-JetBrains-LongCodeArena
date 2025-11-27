@@ -1,0 +1,149 @@
+Scheduling Policies in Dask Distributed
+=========================================
+
+This document describes the policies used by Dask’s distributed scheduler to decide:
+- which ready Task to run next on a worker (task preference)
+- which Worker should execute a given Task (worker preference)
+
+It covers the pluggable policy architecture, the principal policy families in use, and practical examples for configuring and extending these policies.
+
+Overview: policy-driven, pluggable scheduling
+----------------------------------------------
+- The distributed scheduler supports multiple scheduling policies via extensions/plugins. This is exposed through a DEFAULT_EXTENSIONS registry, which maps human-friendly extension names to concrete policy classes.
+- Two broad policy dimensions matter for scheduling decisions:
+  - Task preference: when a Task becomes ready to run (all dependencies satisfied), which Task should be selected next to run on an available Worker? This affects latency, fairness, and data locality.
+  - Worker preference: given a ready Task (or a candidate set), which Worker should execute it? This affects load balancing, data locality, and resource utilization.
+- The system is extensible: users can enable, disable, or replace policies by loading different extensions (e.g., for stealing work, for diffusing tasks via shuffles, or for memory-aware scheduling).
+
+Key extension points and what they influence
+---------------------------------------------
+- Stealing policy (WorkStealing)
+  - Addressed by: WorkStealing extension
+  - Purpose: improve load balance by allowing idle or underutilized workers to steal tasks from other workers.
+  - How it affects decisions:
+    - Worker preference: instead of always assigning to a specific “best” worker, the scheduler may allow or encourage cross-worker task movement when beneficial.
+    - Task distribution tends toward global balance, reducing idle time and avoiding hot spots.
+  - Typical usage: to keep all workers busy in heterogeneous workloads or when data locality permits (stealing is constrained by data locality and resource considerations).
+
+- Shuffle policy (ShuffleSchedulerPlugin)
+  - Addressed by: ShuffleSchedulerPlugin extension
+  - Purpose: diffuse scheduling decisions to avoid consistent hotspots and to explore alternative distributions of tasks across workers.
+  - How it affects decisions:
+    - Task selection and/or assignment order can be randomized or re-weighted to prevent overloading a subset of workers.
+    - Encourages more uniform utilization and can improve performance for certain workloads with skewed task distributions.
+
+- Memory and resource-aware extensions
+  - Addressed by: ActiveMemoryManagerExtension, MemorySamplerExtension (and related resource extensions)
+  - Purpose: manage memory pressure and data eviction decisions, influencing when tasks are scheduled or deferred.
+  - How it affects decisions:
+    - Worker preference: scheduling decisions may deprioritize or delay tasks on memory-constrained workers.
+    - Task preference: tasks may be prioritized or deprioritized based on expected memory footprint or data locality.
+
+- Replay and task lifecycle extensions
+  - Addressed by: ReplayTaskScheduler (and related components)
+  - Purpose: ensure reproducible task scheduling behavior in fault-recovery or replay scenarios.
+  - How it affects decisions:
+    - Subtly changes the order or visibility of tasks to the scheduler in replay scenarios.
+
+- Other resource-driven extensions
+  - QueueExtension, SemaphoreExtension, LockExtension, etc.
+  - Purpose: model and enforce resource constraints (e.g., per-worker queues, semaphores, and locks) that influence when and where tasks can run.
+  - How it affects decisions:
+    - Task preference may be constrained by per-resource availability.
+    - Worker preference may be biased toward workers with free semaphore/lock capacity.
+
+Where the policy surface lives in code (high-level)
+---------------------------------------------------
+- DEFAULT_EXTENSIONS maps human-friendly names to concrete policy classes:
+  - "stealing": WorkStealing
+  - "shuffle": ShuffleSchedulerPlugin
+  - "events", "locks", "queues", "variables", "pubsub", "semaphores", etc. (support infrastructure and ancillary scheduling concerns)
+  - "amm" (Active Memory Management) and "memory_sampler" (memory-related heuristics)
+  - "spans" (scheduling spans instrumentation)
+  - "replay-tasks" (ReplayTaskScheduler)
+- The presence of these extensions indicates the modular policy architecture: the scheduler loads and configures these plugins to influence task and worker selection.
+
+Task preference: how the scheduler chooses which Task to run
+------------------------------------------------------------
+Key concepts:
+- Ready tasks vs. blocked tasks
+  - A Task becomes ready when all its dependencies are finished.
+- Priority
+  - Tasks carry a priority value that influences selection when multiple tasks are ready. Higher-priority tasks are favored.
+- Data locality and dependencies
+  - The scheduler tends to prefer tasks whose input data is already on the target Worker, to minimize data transfer.
+- Client perspective
+  - Clients can influence task preference via their “wants_what” behavior (via ClientState). This mechanism tracks which tasks a client wants kept in memory, affecting scheduling pressure and prioritization for that client.
+- Resource awareness
+  - Extensions may push or pull tasks based on per-worker queues, memory pressure, locks, semaphores, and other constraints, altering the effective task preference.
+
+Practical pattern (conceptual)
+- When a Worker becomes idle, the scheduler:
+  - Looks at the ready queue (tasks with all dependencies satisfied).
+  - Selects the highest-priority task that can run given the Worker’s currently available resources.
+  - Optionally considers data locality (prefers tasks whose data resides on the Worker).
+  - May consult the Stealing policy to see if a nearby Worker should steal work instead, depending on the global balance situation.
+
+Worker preference: how the scheduler chooses which Worker executes a Task
+---------------------------------------------------------------------------
+Key concepts:
+- Capacity and occupancy
+  - Each Worker has a capacity (threads, processes) and current load; the scheduler tries to avoid overloading any single Worker.
+- Data locality
+  - Preference for Workers that already hold needed data for the Task to minimize data movement.
+- Memory pressure
+  - Memory availability can push tasks away from memory-constrained Workers to avoid spilling or eviction penalties.
+- Load balancing vs locality trade-off
+  - Policies like WorkStealing balance between keeping all Workers busy and preserving data locality.
+
+Notable policy levers
+- WorkStealing
+  - Primarily a worker-preference mechanism to redistribute tasks and improve utilization.
+  - Reduces idle time by allowing Workers to fetch tasks from peers when local demand is low.
+- ShuffleSchedulerPlugin
+  - Modifies distribution of tasks across Workers to avoid hotspots; can influence both task and worker preference by altering the order of candidate assignments.
+- Memory-aware extensions
+  - Influence which Worker to target for a new Task based on memory usage and data locality.
+- Resource constraints
+  - Per-worker queues, semaphores, and locks constrain where a Task can be dispatched, shaping worker preference.
+
+Configuring and extending policies
+-----------------------------------
+- Extensions are loaded via configuration and the DEFAULT_EXTENSIONS registry.
+- Enabling a policy typically involves activating its extension name (e.g., stealing, shuffle) in the scheduler’s extension mechanism.
+- Example configuration (conceptual):
+  - Enable stealing to balance load:
+    distributed.scheduler.extensions:
+      - stealing
+  - Enable shuffle to diffuse tasks:
+    distributed.scheduler.extensions:
+      - shuffle
+- You can combine extensions to tailor scheduling behavior to your workload (e.g., memory-sensitive, data-locality-aware, and load-balanced strategies together).
+
+Developer-oriented notes
+--------------------------
+- The scheduling policy surface is implemented as a collection of SchedulerPlugin-like components (extensions) that hook into the scheduler’s decision points.
+- Task state and lifecycle (e.g., released, waiting, queued, processing, memory, erred) provide the hooks for when and how policies influence decisions.
+- The client state (ClientState) tracks client-specific interests (wants_what) that can shape scheduling pressure and task preference for a given client’s workload.
+- The policy mix is visible in the DEFAULT_EXTENSIONS mapping, which shows the primary policy players in the current codebase:
+  - "stealing": WorkStealing
+  - "shuffle": ShuffleSchedulerPlugin
+  - "spans": SpansSchedulerExtension
+  - "amm": ActiveMemoryManagerExtension
+  - "memory_sampler": MemorySamplerExtension
+  - "replay-tasks": ReplayTaskScheduler
+  - and several infrastructure extensions (locks, queues, pubsub, semaphores, events, etc.)
+
+Examples and quick references
+------------------------------
+- Task preference influences (high level):
+  - Priority-aware selection: higher-priority ready tasks are chosen first.
+  - Data locality bias: prefer sending tasks to workers that already hold their input data.
+  - Client pressure: keep favored tasks in memory for a client that is actively using results.
+
+- Worker preference influences (high level):
+  - WorkStealing redistributes tasks away from busy workers to idle ones.
+  - Shuffle diffusion reduces hotspot formation and can improve overall utilization.
+  - Memory-aware decisions move tasks away from memory-constrained workers to avoid thrashing.
+
+This documentation reflects the scheduling-policy surface as implemented via the extensions in the provided codebase, emphasizing the separation of concerns between task selection (which ready task to run) and worker selection (which worker runs it), and illustrating how pluggable extensions govern these decisions.

@@ -1,0 +1,157 @@
+# Multiclass and Multioutput Algorithms
+
+Introduction
+- This module provides meta-estimators that extend single-output estimators to handle multiple targets simultaneously. By wrapping a base estimator, these tools enable multioutput regression and multioutput classification, as well as dependent-target modeling through classifier/regressor chaining.
+
+Overview of estimators
+- MultiOutputRegressor
+  - Purpose: Fit one independent regressor per target variable.
+  - Key behavior: For a dataset with shape (n_samples, n_outputs) in y, a separate clone of the base estimator is trained for each output column.
+  - API highlights:
+    - __init__(estimator, n_jobs=None)
+    - fit(X, y, sample_weight=None, **fit_params)
+    - predict(X)
+    - estimators_: list of fitted regressors, one per target
+  - When to use: When targets are independent and you want a simple, parallelizable extension of a regressor to multiple outputs.
+
+- MultiOutputClassifier
+  - Purpose: Fit one independent classifier per target label/column.
+  - Key behavior: Similar to MultiOutputRegressor but for classification; trains a separate classifier for each target column of y.
+  - API highlights:
+    - __init__(estimator, n_jobs=None)
+    - fit(X, y, sample_weight=None, **fit_params)
+    - predict(X)
+    - estimators_: list of fitted classifiers
+  - When to use: For multi-target classification where targets are binary or multiclass per column, and you want independent classifiers per target.
+
+- ClassifierChain
+  - Purpose: Train classifiers in a chain, where each classifier’s input is augmented with predictions of preceding targets in a specified order.
+  - Key behavior: The base estimator is cloned per chain link; during training, for each target in the specified order, the feature set is augmented with the previously predicted targets.
+  - Important parameters (typical):
+    - estimator: base estimator supporting fit/predict
+    - order: sequence of target indices to model (None means random order)
+    - use_partial_fit: enable partial_fit if supported by estimator
+    - random_state: for reproducibility of the chain order
+    - verbose: scalar for logging
+  - API highlights:
+    - __init__(estimator, order=None, use_partial_fit=False, random_state=None, verbose=0)
+    - fit(X, y, **fit_params)
+    - predict(X)
+    - n_features_in_: inferred from X
+  - When to use: Useful when targets are correlated and predictive performance can benefit from modeling dependencies between targets.
+
+- RegressorChain
+  - Purpose: Analogous to ClassifierChain but for regression targets.
+  - Key behavior: Targets are modeled sequentially; each regressor receives as input the original features plus predictions of previously modeled targets.
+  - API highlights mirror ClassifierChain, with appropriate regression semantics.
+  - When to use: For multi-output regression where targets exhibit interdependencies that can be exploited by chaining predictions.
+
+Internal helpers and design notes
+- _fit_estimator(estimator, X, y, sample_weight=None, **fit_params)
+  - Clones and fits a single estimator on X and a 1-D y vector for one target.
+- _partial_fit_estimator(...)
+  - Supports partial_fit when available, enabling incremental learning across chained steps or streaming data.
+- _available_if_estimator_has(attr)
+  - Utility to expose estimators only if sub-estimators provide required attributes (fit, predict, etc.).
+- _MultiOutputEstimator
+  - Abstract base class for multioutput meta-estimators; defines common parameter constraints (estimator must have fit and predict, n_jobs optional) and initialization.
+
+Important parameters
+- estimator
+  - The base estimator used to model each target. It must support fit(X, y) and predict(X). For chaining, the estimator should ideally support augmenting features or be usable in a wrapper form.
+- n_jobs
+  - Number of parallel jobs to run for fitting individual target estimators (where applicable). Helps scale MultiOutputRegressor and MultiOutputClassifier.
+- order (ClassifierChain / RegressorChain)
+  - Sequence specifying the modeling order of targets. If None, a random order is chosen (seeded by random_state).
+- use_partial_fit
+  - If True, attempts to use partial_fit for online/incremental learning when the underlying estimator supports it.
+- random_state
+  - Seed for reproducibility of chain order and any randomization inside the chain.
+- verbose
+  - Controls the level of logging output during training.
+
+Return values and attributes
+- fit returns self to enable chaining.
+- estimators_ (for MultiOutputRegressor / MultiOutputClassifier)
+  - A list containing the fitted sub-estimators, one per target.
+- n_features_in_
+  - Number of features seen during fit (inferred from X).
+- predict / predict_proba (where applicable)
+  - predict returns an array with shape (n_samples, n_outputs) for multioutput estimators.
+  - For classifier-based meta-estimators, predict_proba may be available if the base estimator supports probability estimates.
+
+Usage examples
+- MultiOutputRegressor with a simple regressor
+  - Purpose: Fit a separate regressor for each target column.
+  - Example:
+    code_block
+    from sklearn.datasets import make_regression
+    from sklearn.linear_model import LinearRegression
+    from sklearn.multioutput import MultiOutputRegressor
+
+    X, y = make_regression(n_samples=200, n_features=20, n_targets=3, random_state=0)
+    base = LinearRegression()
+    mor = MultiOutputRegressor(base, n_jobs=-1)
+    mor.fit(X, y)
+    preds = mor.predict(X[:5])
+    print(preds.shape)  # (5, 3)
+
+- MultiOutputClassifier
+  - Purpose: Train a separate classifier for each target column.
+  - Example:
+    code_block
+    from sklearn.datasets import make_classification
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.multioutput import MultiOutputClassifier
+
+    X, Y = make_classification(n_samples=500, n_features=20, n_classes=3, n_outputs=2, random_state=0)
+    base = LogisticRegression(max_iter=1000)
+    morc = MultiOutputClassifier(base)
+    morc.fit(X, Y)
+    preds = morc.predict(X[:5])
+    print(preds.shape)  # (5, 2)
+
+- ClassifierChain
+  - Purpose: Exploit dependencies between target labels by chaining classifiers.
+  - Example:
+    code_block
+    from sklearn.datasets import make_multilabel_classification
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.multioutput import ClassifierChain
+
+    X, Y = make_multilabel_classification(n_samples=200, n_features=20, n_classes=4, random_state=0)
+    base = LogisticRegression(max_iter=1000)
+    chain = ClassifierChain(base, order=[0, 2, 1, 3], random_state=0)
+    chain.fit(X, Y)
+    preds = chain.predict(X[:5])
+    print(preds.shape)  # (5, 4)
+
+- RegressorChain
+  - Purpose: Apply chaining to multioutput regression problems.
+  - Example:
+    code_block
+    from sklearn.datasets import make_regression
+    from sklearn.linear_model import LinearRegression
+    from sklearn.multioutput import RegressorChain
+
+    X, Y = make_regression(n_samples=200, n_features=20, n_targets=3, random_state=0)
+    base = LinearRegression()
+    chain = RegressorChain(base, order=[2, 0, 1], random_state=0)
+    chain.fit(X, Y)
+    preds = chain.predict(X[:5])
+    print(preds.shape)  # (5, 3)
+
+Notes and considerations
+- Independence vs. dependency:
+  - MultiOutputRegressor / MultiOutputClassifier model each target independently, which is simple and parallelizable but ignores potential correlations between targets.
+- Chains leverage inter-target information but introduce sensitivity to the specified order; experimentation with different orders or using a random_state for reproducibility is recommended.
+- Partial fitting:
+  - If the base estimator supports partial_fit, use_partial_fit can enable incremental training across chain steps or data streams.
+- Computational considerations:
+  - For many targets, training a separate model per target can be memory-intensive; use n_jobs to parallelize where appropriate and monitor resource usage.
+- Edge cases:
+  - y must be 2D with shape (n_samples, n_outputs) for most meta-estimators.
+  - ClassifierChain/RegressorChain require reasonable priors on target correlations to gain benefits from chaining.
+
+End of documentation
+

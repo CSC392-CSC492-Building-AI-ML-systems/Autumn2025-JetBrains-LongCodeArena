@@ -1,0 +1,201 @@
+Understanding sessions
+======================
+
+This document explains how the Session class in the ftrack_api module works and how to use it when interacting with an ftrack server. It covers initialization, required parameters, authentication, caching, event hub behavior, and common usage patterns.
+
+Overview
+--------
+
+A Session represents an isolated interaction context with an ftrack server. It manages authentication headers, a layered caching layer, operation tracking, and optional integration with an event hub. Accessing entity attributes can automatically fetch data from the server when needed (controlled by auto_populate).
+
+Key components you interact with:
+
+- SessionAuthentication: attaches authentication headers to HTTP requests.
+- Session: container for server interaction settings, credentials, caching, and operation tracking.
+
+Authentication (SessionAuthentication)
+--------------------------------------
+
+The SessionAuthentication object injects the necessary authentication headers into each HTTP request sent to the server.
+
+- Headers added:
+  - ftrack-api-key: the API key
+  - ftrack-user: the API user
+
+Usage example:
+- Attach authentication to a requests session:
+  - api = SessionAuthentication(api_key, api_user)
+  - request = requests.Request('GET', url)
+  - prepared = api(request.prepare())  # headers include authentication
+
+Code reference:
+- __call__(self, request) updates the request headers with:
+  - 'ftrack-api-key': self.api_key
+  - 'ftrack-user': self.api_user
+
+Initialization and required parameters
+--------------------------------------
+
+Create a Session with the minimum required information. The constructor accepts several optional parameters, but the following three are required for a working session:
+
+- server_url: URL of the ftrack server (including port if needed)
+- api_key: API key for authentication
+- api_user: API user name
+
+Initialization flow (highlights from the code):
+
+- If server_url is not provided, the constructor looks for FTRACK_SERVER in the environment.
+- If server_url remains unspecified, it raises a TypeError.
+- If api_key is not provided, it looks for FTRACK_API_KEY or the legacy FTRACK_APIKEY in the environment.
+- If api_key remains unspecified, it raises a TypeError.
+- If api_user is not provided, it looks for FTRACK_API_USER in the environment or uses Python’s getpass to determine the current user. If still not found, it raises a TypeError.
+
+Code reference (constructor signature):
+- __init__(self, server_url=None, api_key=None, api_user=None, auto_populate=True,
+           plugin_paths=None, cache=None, cache_key_maker=None,
+           auto_connect_event_hub=None, schema_cache_path=None,
+           plugin_arguments=None)
+
+Example: basic session
+- session = ftrack_api.Session(
+    server_url='https://example.ftrack',
+    api_key='your_api_key',
+    api_user='your_api_user'
+  )
+
+Environment variable convenience
+--------------------------------
+
+If you prefer not to pass credentials directly, you can rely on environment variables:
+
+- FTRACK_SERVER for server_url
+- FTRACK_API_KEY for api_key (also checks FTRACK_APIKEY for backward compatibility)
+- FTRACK_API_USER for api_user
+
+Example:
+- os.environ['FTRACK_SERVER'] = 'https://example.ftrack'
+- os.environ['FTRACK_API_KEY'] = 'your_api_key'
+- os.environ['FTRACK_API_USER'] = 'your_api_user'
+- session = ftrack_api.Session()
+
+Behavior and features
+---------------------
+
+auto_populate
+- When True (default), accessing entity attributes may trigger automatic fetching of data from the server if not already present.
+
+plugin_paths
+- A list of filesystem paths to search for plugins. If not provided, a default lookup path (via environment) is used.
+
+cache and layered caching
+- The Session can receive a cache object or a callable. If provided, it is added to a pre-configured layered cache with a top-level MemoryCache. This layered approach ensures fast in-memory access while enabling secondary caches as needed.
+- The top-level memory cache reduces the need for repeated server round-trips for frequently accessed data.
+
+cache_key_maker
+- Used to generate stable keys for objects stored in the cache.
+- If not provided, the default is StringKeyMaker.
+
+Default behavior example:
+- A MemoryCache sits at the top of a pre-configured layered cache:
+  - top-level: MemoryCache
+  - subsequent layers: any provided or default caches
+- If you supply a custom cache, it participates in this layered structure rather than replacing it entirely.
+
+cache_key_maker example:
+- session.cache_key_maker = ftrack_api.cache.StringKeyMaker()
+
+auto_connect_event_hub
+- Controls whether an embedded event hub is automatically connected to the event server in the background.
+- When True, publishing and subscribing to non-local events are available immediately after session creation.
+- When False, only local events are available until you explicitly connect the hub (EventHub.connect).
+
+schema caching
+- schema_cache_path enables caching of ftrack schema information on disk.
+- If set to a folder path, the schema cache stores data there.
+- If unset, environment variable FTRACK_API_SCHEMA_CACHE_PATH can be used.
+- If set to False, schema caching is disabled entirely.
+
+plugin_arguments
+- An optional mapping of keyword arguments passed to plugin registration functions discovered by the session.
+- If a plugin has a signature that cannot accept the provided arguments, the discovery mechanism reduces the arguments to those that the plugin accepts and logs a warning.
+
+Recording operations (pending actions)
+---------------------------------------
+
+The Session tracks operations in two related attributes:
+
+- recorded_operations: an ftrack_api.operation.Operations() instance representing currently pending operations.
+- record_operations: a boolean flag (default True) indicating whether new operations should be recorded.
+
+Usage example:
+- To inspect or manage pending operations:
+  - ops = session.recorded_operations
+  - session.record_operations = False  # pause recording
+
+Common usage patterns
+---------------------
+
+- Basic usage:
+
+  - session = ftrack_api.Session(
+      server_url='https://example.ftrack',
+      api_key='abc123',
+      api_user='alice'
+    )
+  - # Use session to query entities, manage caches, publish events, etc.
+
+- Using environment variables:
+
+  - os.environ['FTRACK_SERVER'] = 'https://example.ftrack'
+  - os.environ['FTRACK_API_KEY'] = 'abc123'
+  - os.environ['FTRACK_API_USER'] = 'alice'
+  - session = ftrack_api.Session()
+
+- Disable schema caching:
+
+  - session = ftrack_api.Session(schema_cache_path=False)
+
+- Provide a custom cache:
+
+  - from ftrack_api.cache import MemoryCache
+  - session = ftrack_api.Session(cache=MemoryCache())
+
+- Use a custom cache key maker:
+
+  - from ftrack_api.cache import StringKeyMaker
+  - session = ftrack_api.Session(cache_key_maker=StringKeyMaker())
+
+Notes and caveats
+-----------------
+
+- If required credentials are not supplied (server_url, api_key, or api_user), the constructor raises TypeError with guidance on how to provide them.
+- The event hub connection is performed in a background thread to improve startup time. Plugins requiring a connected hub should verify status explicitly.
+- Subscribing to events does not require a connected hub; publishing and subscribing to non-local events require the hub to be connected (if auto_connect_event_hub is enabled, this happens automatically in the background).
+
+Reference: important attributes and methods
+-------------------------------------------
+
+- SessionAuthentication
+  - __init__(api_key, api_user): stores credentials
+  - __call__(request): adds ftrack-api-key and ftrack-user headers to the request
+
+- Session
+  - __init__(server_url, api_key, api_user, auto_populate, plugin_paths, cache, cache_key_maker, auto_connect_event_hub, schema_cache_path, plugin_arguments): main initialization routine
+  - Properties used by clients:
+    - _server_url: server URL
+    - _api_key: API key
+    - _api_user: API user
+    - recorded_operations: pending operations
+    - record_operations: whether to record new operations
+    - cache_key_maker: key maker for cache entries
+
+Code references
+---------------
+
+- Authentication header attachment:
+  - class SessionAuthentication(requests.auth.AuthBase)
+  - def __call__(self, request): updates request.headers with authentication values
+
+- Session initialization parameters (signature shown above)
+
+This documentation captures the essential behavior and configuration options for Understanding sessions, focusing on how to create, configure, and use a session for interacting with an ftrack server.

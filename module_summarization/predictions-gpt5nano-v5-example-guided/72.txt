@@ -1,0 +1,176 @@
+# metrics — Distance Metrics Utilities
+
+## Overview
+This module provides core helper functions used for validating and preparing inputs to pairwise distance computations. It ensures that inputs X and Y are converted to safe, numeric representations (arrays or sparse matrices), checks dimensionality and compatibility, and handles precomputed distance matrices when applicable. The utilities are designed to be used by higher-level pairwise distance metrics to enforce consistent input handling and to raise informative errors when inputs are invalid.
+
+Key functions include:
+- _return_float_dtype(X, Y): Determine the appropriate floating dtype based on X and Y.
+- check_pairwise_arrays(X, Y, …): Validate and prepare X and Y for pairwise distance computations.
+- check_paired_arrays(X, Y): Prepare X and Y for paired distance metrics.
+
+## Key Components
+
+### _return_float_dtype(X, Y)
+Determine the appropriate floating dtype for inputs X and Y. If both inputs are float32, it returns float32; otherwise, it returns a default floating dtype (float).
+
+Code excerpt
+```python
+def _return_float_dtype(X, Y):
+    """
+    1. If dtype of X and Y is float32, then dtype float32 is returned.
+    2. Else dtype float is returned.
+    """
+    if not issparse(X) and not isinstance(X, np.ndarray):
+        X = np.asarray(X)
+
+    if Y is None:
+        Y_dtype = X.dtype
+    elif not issparse(Y) and not isinstance(Y, np.ndarray):
+        Y = np.asarray(Y)
+        Y_dtype = Y.dtype
+    else:
+        Y_dtype = Y.dtype
+
+    if X.dtype == Y_dtype == np.float32:
+        dtype = np.float32
+    else:
+        dtype = float
+
+    return X, Y, dtype
+```
+
+### check_pairwise_arrays(X, Y, *, precomputed=False, dtype=None, accept_sparse="csr", force_all_finite=True, copy=False)
+Set X and Y appropriately and check inputs for pairwise (non-precomputed) distances.
+
+- If Y is None, Y is treated as a pointer to X (not copied).
+- If Y is provided, both X and Y are validated and converted to the requested dtype.
+- When precomputed is True, X is treated as a distance matrix with shape compatibility checked against Y.
+- Otherwise, X and Y must have matching feature dimensions.
+
+Signature and behavior (highlights)
+```python
+def check_pairwise_arrays(
+    X,
+    Y,
+    *,
+    precomputed=False,
+    dtype=None,
+    accept_sparse="csr",
+    force_all_finite=True,
+    copy=False,
+):
+    """Set X and Y appropriately and checks inputs.
+
+    If Y is None, it is set as a pointer to X (i.e. not a copy).
+    If Y is given, this does not happen.
+    All distance metrics should use this function first to assert that the
+    given parameters are correct and safe to use.
+
+    Specifically, this function first ensures that both X and Y are arrays,
+    then checks that they are at least two dimensional while ensuring that
+    their elements are floats (or dtype if provided). Finally, the function
+    checks that the size of the second dimension of the two arrays is equal, or
+    the equivalent check for a precomputed distance matrix.
+    """
+    X, Y, dtype_float = _return_float_dtype(X, Y)
+
+    estimator = "check_pairwise_arrays"
+    if dtype is None:
+        dtype = dtype_float
+
+    if Y is X or Y is None:
+        X = Y = check_array(
+            X,
+            accept_sparse=accept_sparse,
+            dtype=dtype,
+            copy=copy,
+            force_all_finite=force_all_finite,
+            estimator=estimator,
+        )
+    else:
+        X = check_array(
+            X,
+            accept_sparse=accept_sparse,
+            dtype=dtype,
+            copy=copy,
+            force_all_finite=force_all_finite,
+            estimator=estimator,
+        )
+        Y = check_array(
+            Y,
+            accept_sparse=accept_sparse,
+            dtype=dtype,
+            copy=copy,
+            force_all_finite=force_all_finite,
+            estimator=estimator,
+        )
+
+    if precomputed:
+        if X.shape[1]!= Y.shape[0]:
+            raise ValueError(
+                "Precomputed metric requires shape "
+                "(n_queries, n_indexed). Got (%d, %d) "
+                "for %d indexed." % (X.shape[0], X.shape[1], Y.shape[0])
+            )
+    elif X.shape[1]!= Y.shape[1]:
+        raise ValueError(
+            "Incompatible dimension for X and Y matrices: "
+            "X.shape[1] == %d while Y.shape[1] == %d" % (X.shape[1], Y.shape[1])
+        )
+
+    return X, Y
+```
+
+### check_paired_arrays(X, Y)
+Set X and Y appropriately and check inputs for paired distances.
+
+- This function is intended for paired distance metrics and should be invoked before computing such distances.
+- It ensures that both inputs are arrays, have at least two dimensions, and that their elements are floats. The implementation ensures inputs are in a suitable state for subsequent pairing distance calculations (details are in the source).
+
+Code excerpt (docstring portion)
+```python
+def check_paired_arrays(X, Y):
+    """Set X and Y appropriately and checks inputs for paired distances.
+
+    All paired distance metrics should use this function first to assert that
+    the given parameters are correct and safe to use.
+
+    Specifically, this function first ensures that both X and Y are arrays,
+    then checks that they are at least two dimensional while ensuring that
+    their elements are floats. Finally, the
+```
+
+## Usage
+
+- Prepare inputs for standard (non-precomputed) pairwise distances:
+```
+# Example usage
+X = np.array([[1.0, 2.0], [3.0, 4.0]])
+Y = None  # will be treated as X
+safe_X, safe_Y = check_pairwise_arrays(X, Y)
+```
+
+- Use precomputed distances:
+```
+# X is a precomputed distance matrix of shape (n_queries, n_indexed)
+X = np.random.rand(5, 5)
+Y = np.random.rand(5, 5)  # or None if appropriate for the context
+safe_X, safe_Y = check_pairwise_arrays(X, Y, precomputed=True)
+```
+
+- Prepare inputs for paired distance metrics:
+```
+safe_X, safe_Y = check_paired_arrays(X, Y)
+```
+
+## Details
+
+- Accepts sparse inputs via the accept_sparse parameter (default: "csr"). If the input is sparse but not in an allowed format, it will be converted to the first listed format.
+- force_all_finite controls whether np.inf, np.nan, and pd.NA are allowed. It can be True, False, or "allow-nan".
+- dtype allows forcing a specific floating dtype for computations; otherwise, a suitable float dtype is chosen by _return_float_dtype.
+- copy determines whether forced copies may be created during conversion.
+- When using precomputed distances, shapes must align as described in the docstring to ensure valid distance computations.
+
+Notes
+- These utilities rely on internal validation utilities such as check_array and _return_float_dtype to ensure robust handling of both dense and sparse inputs.
+- Clear error messages are raised for shape or dtype mismatches to aid debugging in higher-level distance computations.

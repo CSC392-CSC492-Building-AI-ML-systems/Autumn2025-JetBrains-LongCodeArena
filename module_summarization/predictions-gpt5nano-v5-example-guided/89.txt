@@ -1,0 +1,165 @@
+# augmentations
+
+## Overview
+This module defines a standard suite of augmentations used by AutoAugment policy for ImageNet, RandAugment and TrivialAugmentWide. The augmentations are implemented in terms of DALI operators.
+
+The `@augmentation` decorator handles computation of the decorated transformation's parameter. When called, the decorated augmentation expects:
+- a single positional argument: batch of samples
+- `magnitude_bin` and `num_magnitude_bins` instead of the parameter.
+The parameter is computed as if by calling
+`mag_to_param(magnitudes[magnitude_bin] * ((-1) ** random_sign))`, where
+`magnitudes = linspace(mag_range[0], mag_range[1], num_magnitude_bins)`.
+
+The augmentations in this module are defined with example setups passed to `@augmentation`. The parameters can be easily adjusted. For instance, to increase the magnitudes range of `shear_x` from 0.3 to 0.5, you can create
+`my_shear_x = shear_x.augmentation(mag_range=(0, 0.5))`.
+
+Code in this module relies on NVIDIA DALI and numpy, and is designed to be used as part of a pipeline of augmentations.
+
+## Key Components
+
+- warp_x_param
+- warp_y_param
+  - Helper parameter mappings used by the augmentation decorator to translate a magnitude into the required parameter for the transform.
+
+- shear_x
+  - Mag range: (0, 0.3)
+  - Randomly negate magnitude
+  - Parameter mapping: warp_x_param
+  - Applies a horizontal shear to the input data using a transformation matrix produced by `fn.transforms.shear`.
+
+- shear_y
+  - Mag range: (0, 0.3)
+  - Randomly negate magnitude
+  - Parameter mapping: warp_y_param
+  - Applies a vertical shear to the input data using a transformation matrix produced by `fn.transforms.shear`.
+
+- translate_x
+  - Mag range: (0, 1)
+  - Randomly negate magnitude
+  - Parameter mapping: warp_x_param
+  - Uses the input shape to compute a relative translation offset: `offset = rel_offset * shape[1]`, then applies a translation via `fn.transforms.translation`.
+
+- translate_x_no_shape (name="translate_x")
+  - Variant without requiring `shape` in the argument list (uses internal handling for batch shape)
+  - Similar to translate_x but can be used with a fixed offset
+
+- translate_y
+  - Mag range: (0, 1)
+  - Randomly negate magnitude
+  - Parameter mapping: warp_y_param
+  - Uses the input shape to compute a relative vertical translation: `offset = rel_offset * shape[0]`
+
+- translate_y_no_shape (name="translate_y")
+  - Variant without requiring `shape` in the argument list
+  - Similar to translate_y but can be used with a fixed offset
+
+- rotate
+  - Mag range: (0, 30)
+  - Randomly negate magnitude
+  - Keeps the output size by default (`rotate_keep_size=True`)
+  - Applies rotation using `fn.rotate` with `keep_size` behavior
+
+- shift_enhance_range
+  - Internal helper
+  - Maps a magnitude in [0, 1] to [1, 2] to align with the intuitive strength of enhancers (brightness, contrast, color, sharpness)
+
+- brightness
+  - Mag range: (0, 0.9)
+  - Randomly negate magnitude
+  - Parameter mapping: shift_enhance_range
+  - Applies brightness adjustment via `fn.brightness`
+
+- contrast
+  - Mag range: (0, 0.9)
+  - Randomly negate magnitude
+  - Parameter mapping: shift_enhance_range
+  - Implements contrast adjustment following the PIL implementation concept, with a center derived from the image mean and a channel-wise weighted sum
+  - Uses an inline computation of the contrast center to avoid extra host-to-device transfers
+
+> Example usage of parameter mappings:
+> - `warp_x_param(magnitude)` returns `[magnitude, 0]`
+> - `warp_y_param(magnitude)` returns `[0, magnitude]`
+> - `shift_enhance_range(magnitude)` returns `1 + magnitude`
+
+## Usage
+
+- Basic usage with built-in augmentations:
+  - Import the module:
+    - from nvidia.dali.auto_aug.core import augmentation
+    - import your_module_containing_augmentations as augmentations
+  - Apply a standard augmentation to a batch:
+    - batch = ...  # a batch of images
+    - out = augmentations.shear_x(batch, magnitude_bin=3, num_magnitude_bins=11, fill_value=128, interp_type=None)
+
+- Create a custom augmentation by adjusting magnitude range:
+  - my_shear_x = augmentations.shear_x.augmentation(mag_range=(0, 0.5))
+  - out = my_shear_x(batch, magnitude_bin=4, num_magnitude_bins=11, fill_value=128, interp_type=None)
+  - This overrides the default magnitude range for the underlying augmentation.
+
+- Example with translate_x (no_shape variant):
+  - batch = ...  # a batch of images
+  - out = augmentations.translate_x(batch, magnitude_bin=2, num_magnitude_bins=11, fill_value=128, interp_type=None)
+  - For translated offsets, the magnitude drives the relative offset through the batch geometry.
+
+- Example with rotate:
+  - batch = ...
+  - out = augmentations.rotate(batch, magnitude_bin=5, num_magnitude_bins=11, fill_value=128, interp_type=None)
+
+- Example for brightness/contrast:
+  - batch = ...
+  - out_brightness = augmentations.brightness(batch, magnitude_bin=4, num_magnitude_bins=11, fill_value=128)
+  - out_contrast = augmentations.contrast(batch, magnitude_bin=6, num_magnitude_bins=11, fill_value=128)
+
+Notes:
+- The decorator expects the decorated function to be called with a single batch argument and magnitude specification via `magnitude_bin` and `num_magnitude_bins`. Additional keyword arguments (e.g., fill_value, interp_type) pass through to the underlying DALI operators.
+- The mag_range and mag_to_param mappings are defined per augmentation to enable flexible control over the magnitude parameter and its translation to the transform parameter.
+- The module relies on numpy and NVIDIA DALI.
+
+Code snippets from the module (for reference):
+
+- Magnitude-to-parameter mapping helpers:
+  - def warp_x_param(magnitude): return [magnitude, 0]
+  - def warp_y_param(magnitude): return [0, magnitude]
+
+- Example augmentations using the decorator:
+  - @augmentation(mag_range=(0, 0.3), randomly_negate=True, mag_to_param=warp_x_param)
+    def shear_x(data, shear, fill_value=128, interp_type=None):
+        mt = fn.transforms.shear(shear=shear)
+        return fn.warp_affine(data, matrix=mt, fill_value=fill_value, interp_type=interp_type,
+                              inverse_map=False)
+
+  - @augmentation(mag_range=(0, 0.3), randomly_negate=True, mag_to_param=warp_y_param)
+    def shear_y(data, shear, fill_value=128, interp_type=None):
+        mt = fn.transforms.shear(shear=shear)
+        return fn.warp_affine(data, matrix=mt, fill_value=fill_value, interp_type=interp_type,
+                              inverse_map=False)
+
+  - @augmentation(mag_range=(0., 1.), randomly_negate=True, mag_to_param=warp_x_param)
+    def translate_x(data, rel_offset, shape, fill_value=128, interp_type=None):
+        offset = rel_offset * shape[1]
+        mt = fn.transforms.translation(offset=offset)
+        return fn.warp_affine(data, matrix=mt, fill_value=fill_value, interp_type=interp_type,
+                              inverse_map=False)
+
+  - @augmentation(mag_range=(0., 1.), randomly_negate=True, mag_to_param=warp_y_param)
+    def translate_y(data, rel_offset, shape, fill_value=128, interp_type=None):
+        offset = rel_offset * shape[0]
+        mt = fn.transforms.translation(offset=offset)
+        return fn.warp_affine(data, matrix=mt, fill_value=fill_value, interp_type=interp_type,
+                              inverse_map=False)
+
+  - @augmentation(mag_range=(0, 30), randomly_negate=True)
+    def rotate(data, angle, fill_value=128, interp_type=None, rotate_keep_size=True):
+        return fn.rotate(data, angle=angle, fill_value=fill_value, interp_type=interp_type,
+                         keep_size=rotate_keep_size)
+
+  - @augmentation(mag_range=(0, 0.9), randomly_negate=True, mag_to_param=shift_enhance_range)
+    def brightness(data, parameter):
+        return fn.brightness(data, brightness=parameter)
+
+  - @augmentation(mag_range=(0, 0.9), randomly_negate=True, mag_to_param=shift_enhance_range)
+    def contrast(data, parameter):
+        mean = fn.reductions.mean(data, axis_names="HW", keep_dims=True)
+        rgb_weights = types.Constant(np.array([0.299, 0.587, 0.114], dtype=np.float32))
+        center = fn.reductions.sum(mean * rgb_weights, axis_names="C", keep_dims=True)
+        return fn.cast_like(center + (data - center) * parameter, data)

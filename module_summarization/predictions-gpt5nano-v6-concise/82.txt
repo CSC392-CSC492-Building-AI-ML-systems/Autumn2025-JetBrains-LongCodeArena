@@ -1,0 +1,195 @@
+# BaseUser (Piccolo) — Authentication User Model
+
+Overview
+- BaseUser is a foundational user model designed for authentication workflows within Piccolo.
+- It provides username, email, password hashing (PBKDF2-HMAC-SHA256), login management, and basic user flags (active, admin, superuser).
+- Passwords are stored securely in a hashed form with a salt and a configurable iteration count.
+
+Model summary
+- Class: BaseUser(Table, tablename="piccolo_user")
+- Primary key: id (Serial)
+- Fields:
+  - username: Varchar(100), unique
+  - password: Secret(255) – stored hashed via PBKDF2
+  - first_name: Varchar, nullable
+  - last_name: Varchar, nullable
+  - email: Varchar(255), unique
+  - active: Boolean, default False
+  - admin: Boolean, default False
+  - superuser: Boolean, default False
+  - last_login: Timestamp, nullable, default None
+- Internal constants:
+  - _min_password_length = 6
+  - _max_password_length = 128
+  - _pbkdf2_iteration_count = 600_000 (recommended by OWASP)
+
+Key concepts
+- Password handling: Passwords are stored as strings in the format pbkdf2_sha256$<iterations>$<salt>$<hash>.
+- Salt: Random 16-byte hex salt generated per user unless explicitly provided.
+- Hashing: Uses PBKDF2-HMAC-SHA256 with configurable iterations.
+- Safety: If a password is set programmatically and already hashed (starts with pbkdf2_sha256), it is not rehashed.
+
+Public API
+
+Class methods
+
+- get_salt()
+  - Returns a new hex salt string.
+  - Example: BaseUser.get_salt() -> "9f2a...a7"
+
+- get_readable()
+  - Returns a Readable for display purposes (primarily for admin/UI).
+  - Example:
+    - Readable(template="%s", columns=[cls.username])
+
+- _validate_password(password: str)
+  - Validates a raw password string.
+  - Enforces minimum/maximum length and rejects pre-hashed inputs.
+  - Raises ValueError on invalid password.
+
+- update_password_sync(user, password)
+  - Sync wrapper around update_password.
+  - Usage: BaseUser.update_password_sync("alice", "newpass123")
+
+- update_password(user, password)
+  - Async method to update a user’s password.
+  - user can be a username (str) or a user id (int).
+  - Validates the new password, hashes it, and updates the database.
+  - Raises ValueError if user is not a valid id/username.
+
+- hash_password(password, salt="", iterations=None)
+  - Hashes a raw password for storage.
+  - Returns the stored password string: pbkdf2_sha256$<iterations>$<salt>$<hash>
+  - If salt is not provided, a new one is generated.
+  - If iterations is not provided, uses _pbkdf2_iteration_count.
+  - Raises ValueError if the password length is too long.
+
+- split_stored_password(password)
+  - Splits a stored password into components: [algorithm, iterations, salt, hash].
+  - Validates that exactly 4 components exist.
+  - Returns a list of strings.
+  - Raises ValueError on invalid input.
+
+- login_sync(username, password)
+  - Sync wrapper around login.
+  - Usage: user_id = BaseUser.login_sync("alice", "password123")
+
+- login(username, password)
+  - Async authentication method.
+  - Verifies user exists and password matches.
+  - If successful, updates last_login timestamp.
+  - Returns the user id on success, or None on failure.
+  - Handles:
+    - Excessively long username or password (logs a warning and returns None)
+    - Password hash upgrading: if an older hash is used, rehash using current iterations.
+
+Instance behavior
+
+- __init__(**kwargs)
+  - If a plaintext password is provided, and it does not start with pbkdf2_sha256, it will be hashed automatically before the base initialization.
+  - This makes creating users with plaintext passwords convenient, while preserving security for existing hashes.
+
+- __setattr__(name, value)
+  - Ensures that when the password attribute is set, it is stored hashed (unless already hashed).
+
+Usage examples
+
+1) Setup (create tables)
+- Before using BaseUser, ensure the database schema exists:
+  - from piccolo.engine import create_engine
+  - from piccolo.relationships import create_db_and_tables
+
+  # Assuming your Piccolo app is configured
+  await create_db_and_tables()
+
+2) Create a new user (password provided in plaintext)
+- The password will be hashed automatically during initialization.
+
+```python
+from baseuser import BaseUser  # adjust import path as needed
+
+user = BaseUser(
+    username="alice",
+    email="alice@example.com",
+    first_name="Alice",
+    last_name="Example",
+    password="s3cureP@ss!"
+)
+await user.save()
+# The stored password is a PBKDF2 hash with salt and iterations.
+```
+
+3) Authenticate a user (login)
+```python
+user_id = await BaseUser.login("alice", "s3cureP@ss!")
+if user_id is not None:
+    print(f"Logged in user id: {user_id}")
+else:
+    print("Login failed")
+```
+
+4) Update a user’s password
+- Async version
+```python
+await BaseUser.update_password("alice", "n3wP@ssw0rd")
+```
+
+- Sync helper
+```python
+BaseUser.update_password_sync("alice", "n3wP@ssw0rd")
+```
+
+5) Retrieve a user’s display value
+```python
+# Useful for admin UIs or logs
+readable = BaseUser.get_readable()
+# Typically used within admin tooling; the Readable provides a string representation.
+```
+
+6) Password hashing details
+- The stored format is: pbkdf2_sha256$<iterations>$<salt>$<hash>
+- Example:
+  - pbkdf2_sha256$600000$4a3f...$9a4b... (salt and hash shortened for readability)
+- The class enforces:
+  - Minimum password length (6)
+  - Maximum password length (128)
+  - Rejection of inputs that appear to be pre-hashed when provided as raw passwords
+
+7) Handling last login
+- Successful login updates the last_login field to the current timestamp.
+
+Security and compatibility notes
+
+- Hashing algorithm: PBKDF2-HMAC-SHA256
+- Iteration count: 600,000 (as per OWASP guidance in the code comments)
+- Salt: 16-byte hex string generated via secrets.token_hex
+- Password policy:
+  - Enforces length bounds
+  - Rejects strings that look hashed when used as plaintext
+- Backwards compatibility:
+  - If the stored hash uses an older iteration count, login will still verify, and the code can be extended to rehash on success to upgrade the iteration count automatically (the current implementation updates only when used, and may not rehash automatically unless called elsewhere).
+
+Notes on usage with Piccolo
+- This model is designed to be used within Piccolo’s ORM workflows.
+- You can combine with Piccolo’s query API (select, update, insert) for complex flows.
+- get_readable is provided for UI-friendly representations.
+
+Generating documentation for this module
+- If you’re using Sphinx:
+  - Enable autodoc for the module (or include the code docstrings for BaseUser).
+  - Build HTML: sphinx-build -b html docs build/html
+- If you maintain reStructuredText (.rst) docs:
+  - Use a dedicated baseuser.rst page with sections mirroring this guide.
+  - Include code blocks with examples for quick reference.
+- Testing docs:
+  - Ensure examples included in the docs run in a minimal test environment (mock DB or a test database).
+
+See also
+- Piccolo ORM: Tables, Columns, and the update/query APIs
+- OWASP Password Storage Cheat Sheet (for iteration counts and hashing best practices)
+
+Appendix: Common pitfalls
+- Providing a pre-hashed password as input to create a user will raise an error: the code detects pbkdf2_sha256-prefixed strings and warns if misused as plaintext.
+- Passwords longer than 128 characters will raise ValueError during hashing.
+
+End of documentation.

@@ -1,0 +1,118 @@
+# Random Projection transformers: A simple and efficient dimensionality reduction
+
+This documentation describes the Random Projection transformers implemented for fast, scalable dimensionality reduction. Random projections reduce the number of features with minimal loss of pairwise distances, trading tiny accuracy for substantial gains in computation time and memory usage. The approach is grounded in the Johnson–Lindenstrauss lemma, which guarantees that a small set of points in high-dimensional space can be mapped into a lower-dimensional space so that pairwise distances are preserved up to a small distortion.
+
+- Core idea: project data from n_features to n_components using a random matrix, preserving distances (with high probability).
+- Benefit: low computational cost and memory footprint compared to dense SVD or PCA on large datasets.
+- Limitation: introduces controlled distortion in distances; suitable when exact reconstruction is not required.
+
+References to theory and implementation are provided in-line with the API and usage examples.
+
+## Theory and guarantees
+
+- Johnson–Lindenstrauss lemma: A set of n_samples points in high-dimensional space can be mapped to a lower-dimensional space of dimensionality n_components such that pairwise distances are preserved within a factor (1 ± eps) with high probability. Formally:
+  - (1 - eps) ||u - v||^2 ≤ ||p(u) - p(v)||^2 ≤ (1 + eps) ||u - v||^2
+  - Here, p is the projection by a random matrix (Gaussian or sparse Achlioptas-like), and eps ∈ (0, 1).
+- The minimal number of components to achieve a given eps is approximately:
+  - n_components ≥ 4 log(n_samples) / (eps^2 / 2 - eps^3 / 3)
+- The embedding dimension is independent of the original feature count and depends on the number of samples and the allowed distortion eps.
+
+See also: Johnson–Lindenstrauss lemma (reference materials and external link available in the implementation).
+
+## API overview
+
+- Classes
+  - GaussianRandomProjection: dense Gaussian random projection
+  - SparseRandomProjection: sparse random projection (Achlioptas-like)
+- Utility
+  - johnson_lindenstrauss_min_dim(n_samples, eps=0.1): compute a safe minimal dimension for a given dataset size and distortion
+
+Key parameters:
+- n_components: target dimensionality after projection (positive integer)
+- random_state: seed or RNG for reproducibility
+- density (SparseRandomProjection only): controls sparsity of the random projection matrix
+  - density = 'auto' or a float in (0, 1], with 'auto' interpreted as 1 / sqrt(n_features)
+- eps (via johnson_lindenstrauss_min_dim): maximum distortion allowed in the embedding (for planning n_components)
+
+Internal helpers you might encounter:
+- _gaussian_random_matrix(n_components, n_features, random_state): generate the dense Gaussian projection matrix with entries ~ N(0, 1 / n_components)
+- _check_density(density, n_features): validate density and apply 'auto' default
+- _check_input_size(n_components, n_features): validate positive sizes
+
+Notes:
+- The transformers implement fit/transform and fit_transform interfaces.
+- They rely on safe sparse-dense dot products for memory efficiency when inputs are sparse.
+
+## How to use
+
+Basic example: Gaussian (dense) random projection
+- Purpose: quickly reduce dimensionality of a dense feature matrix
+- Typical usage: choose n_components smaller than n_features; preserve distances approximately
+
+Code example:
+- from sklearn.random_projection import GaussianRandomProjection
+- rp = GaussianRandomProjection(n_components=100, random_state=42)
+- X_reduced = rp.fit_transform(X)
+
+Sparse random projection example
+- Useful when input X is sparse and you want to maintain sparsity in the projection
+- from sklearn.random_projection import SparseRandomProjection
+- rp = SparseRandomProjection(n_components=100, density='auto', random_state=42)
+- X_reduced = rp.fit_transform(X)
+
+Compute a safe target dimension using the JL bound
+- from sklearn.random_projection import johnson_lindenstrauss_min_dim
+- n_components = johnson_lindenstrauss_min_dim(n_samples=X.shape[0], eps=0.1)
+- This yields an integer (or array-like) number of components guaranteed to provide an eps-embedding with high probability
+
+Examples from the implementation (for reference):
+- johnson_lindenstrauss_min_dim(1e6, eps=0.5) -> 663
+- johnson_lindenstrauss_min_dim(1e6, eps=[0.5, 0.1, 0.01]) -> [663, 11841, 1112658]
+- johnson_lindenstrauss_min_dim([1e4, 1e5, 1e6], eps=0.1) -> [7894, 9868, 11841]
+
+## Choosing parameters
+
+- n_components
+  - Larger n_components preserves more distances but reduces speedup.
+  - Use the JL bound to estimate a safe minimum when you want to guarantee a distortion bound.
+- density (SparseRandomProjection only)
+  - density='auto' defaults to 1 / sqrt(n_features)
+  - For very sparse data, sparse projections can yield substantial memory and speed benefits
+  - Higher density reduces sparsity of the projection; trade-off between speed, memory, and accuracy
+- random_state
+  - Fix for reproducibility across runs and experiments
+
+## Practical considerations
+
+- When to use Gaussian vs Sparse
+  - GaussianRandomProjection is straightforward and works well when you can afford a dense projection in memory.
+  - SparseRandomProjection preserves sparsity and is often preferred for very large, sparse datasets.
+- Distortion and downstream tasks
+  - Random projections preserve distances with high probability, which can be sufficient for clustering, nearest-neighbor, and some linear models.
+  - For tasks requiring exact feature structure or interpretability of components, consider alternative methods (e.g., PCA) at the cost of higher computation.
+- Data validation
+  - The transformers expect 2D input arrays with numeric features.
+  - They implement input checks and may issue warnings if dimensionality is problematic.
+
+## Internals (for maintainers)
+
+- The projection matrices are generated on demand via helper functions:
+  - _gaussian_random_matrix creates a dense matrix with entries drawn from N(0, 1.0 / n_components)
+  - Density checks normalize sparse matrices and ensure valid sparsity levels
+- Transform steps rely on safe sparse-dense dot products to handle both dense and sparse inputs efficiently
+- Random state is obtained via check_random_state to ensure reproducibility
+- Input validation and error reporting align with the library’s standards:
+  - Illegal n_components or n_features raise ValueError
+  - DataDimensionalityWarning may be raised when dimensional changes imply potential issues with the data
+
+## References
+
+- Johnson–Lindenstrauss lemma
+  - See the implementation notes and external references in the codebase
+  - Useful link: https://en.wikipedia.org/wiki/Johnson%E2%80%93Lindenstrauss_lemma
+
+## See also
+
+- Other dimensionality reduction techniques for comparison (PCA, SVD)
+- Distance-preserving embeddings and randomized linear algebra
+

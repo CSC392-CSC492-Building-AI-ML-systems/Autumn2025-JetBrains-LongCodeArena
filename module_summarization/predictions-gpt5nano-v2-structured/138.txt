@@ -1,0 +1,181 @@
+Array Best Practices
+====================
+
+This guide outlines practical recommendations for using dask.array effectively, with notes on backend dispatch, chunking, masked arrays, and common patterns that scale.
+
+Overview
+--------
+
+Dask arrays are built for out-of-core and parallel computation. They are lazy by default and operate on chunked NumPy arrays. Key ideas:
+
+- Break large arrays into chunks to fit memory and enable parallel computation.
+- Use high-level Dask operations (instead of per-element Python loops) to build efficient task graphs.
+- Leverage backend dispatch to customize implementations for different backends (NumPy, CuPy, etc.). See the dispatch lookups defined in the array module (concatenate, tensordot, einsum, empty, divide, percentile, numel, nannumel, to_numpy_dispatch, to_cupy_dispatch) and backends.py for extensibility.
+
+Backend Dispatch and Extensibility
+----------------------------------
+
+Dask uses a Dispatch-based mechanism to allow backend-specific implementations of core array operations. The following dispatch lookups are defined for array operations:
+
+- concatenate_lookup
+- tensordot_lookup
+- einsum_lookup
+- empty_lookup
+- divide_lookup
+- percentile_lookup
+- numel_lookup
+- nannumel_lookup
+- to_numpy_dispatch
+- to_cupy_dispatch
+
+Purpose
+
+- Delegates implementations to the appropriate backend (NumPy, CuPy, or a custom backend).
+- Enables contributing new backends by registering implementations for these lookups.
+
+Usage pattern (conceptual)
+
+- Implementations are registered with the corresponding Dispatch objects.
+- Example (pseudo-code):
+
+  from dask.array import concatenate_lookup
+
+  class MyBackend:
+      pass
+
+  @concatenate_lookup.register(MyBackend)
+  def _concat(x, axis=0):
+      # backend-specific implementation
+      ...
+
+See backends.py for concrete reference and contribution guidelines.
+
+Chunking and Memory Management
+------------------------------
+
+Chunk size selection is the most critical tuning parameter. Practical guidance:
+
+- Aim for chunks that are large enough to amortize scheduling overhead, but small enough to fit memory with your workload.
+- A common starting point is to target tens to hundreds of megabytes per chunk, depending on available RAM and the operation being performed.
+- Align chunking with the axis of the most expensive reductions or transforms when possible.
+
+Example
+
+.. code-block:: python
+
+    import numpy as np
+    import dask.array as da
+
+    # Large array broken into manageable chunks
+    x = da.from_array(np.random.random((10000, 10000)), chunks=(1000, 1000))
+    y = x + 1
+    z = y.mean(axis=0)
+
+    # Trigger computation (partial graphs are built lazily)
+    result = z.compute()
+
+Blockwise vs map_blocks
+-----------------------
+
+- Prefer high-level operations that preserve chunking semantics (e.g., sum, mean, dot, etc.) over manual map_blocks where possible.
+- map_blocks is powerful for custom elementwise operations or for applying a NumPy function that has no direct Dask equivalent.
+
+Example: simple elementwise operation
+
+.. code-block:: python
+
+    import numpy as np
+    import dask.array as da
+
+    a = da.from_array(np.arange(6).reshape(2, 3), chunks=(1, 3))
+    b = a.map_blocks(np.sin)
+    b.compute()
+
+Masking and Masked Arrays (numpy.ma)
+------------------------------------
+
+Dask provides wrappers to work with masked arrays in a chunk-aware manner, preserving masks across computations. The codebase includes helpers that integrate numpy.ma semantics with Dask arrays, enabling:
+
+- masked operations that respect the mask
+- safe conversions and fillings of masked values
+- utilities to extract data or masks
+
+Key patterns
+
+- Use the masked array helpers (e.g., masked_equal, masked_invalid, masked_where, masked_values, fix_invalid, getdata, getmaskarray) to operate on masked data lazily.
+- Use map_blocks to apply NumPy masked array functions while keeping the mask aligned with data.
+
+Example
+
+.. code-block:: python
+
+    import numpy as np
+    import dask.array as da
+    from dask.array import ma as dam  # masked-array helpers
+
+    # A small masked array
+    a = np.ma.array([[1, 2, np.nan], [4, np.nan, 6]], mask=[[0, 0, 1], [1, 0, 0]])
+    A = da.from_array(a, chunks=(1, 3))
+
+    # Fill masked values lazily (preserve mask in computation)
+    filled = dam.filled(A, fill_value=-1)
+    result = filled.compute()
+    # result is a NumPy masked array with masked values filled
+
+    # Alternatively, compute with masked_invalid to drop or handle invalids
+    invalid = dam.masked_invalid(A)
+    invalid_result = invalid.compute()
+
+Performance and Best Practices
+------------------------------
+
+- Prefer vectorized operations over Python loops. Build graphs using high-level da APIs.
+- Use reductions with explicit axes when possible (e.g., mean, sum, max). They are optimized and parallelizable.
+- When combining large arrays, align operations to minimize intermediate data movement.
+- If a result is small enough to fit into memory, you can call .compute() or .to_cpu() to obtain a NumPy array; otherwise, consider streaming or writing results to disk in chunks.
+- For GPU acceleration, consider using CuPy-backed backends via the to_cupy_dispatch pathway (when available). Convert to Cupy arrays with the appropriate dispatch once your workflow requires GPU memory.
+
+Examples: Common Workflows
+---------------------------
+
+- Computation with large arrays
+
+.. code-block:: python
+
+    import numpy as np
+    import dask.array as da
+
+    # Build a large array with a sensible chunk size
+    A = da.from_array(np.random.random((50000, 5000)), chunks=(5000, 1000))
+    B = A.T @ A  # tensor/matrix-like operation
+    mean_vals = B.mean(axis=0)
+    result = mean_vals.compute()  # triggers computation
+
+- Convert to NumPy or move to CuPy
+
+.. code-block:: python
+
+    # To NumPy (when the result fits in memory)
+    np_result = result  # already computed as NumPy array in the previous example
+
+    # To CuPy (if using a CuPy-enabled backend)
+    # from dask.array import to_cupy_dispatch
+    # cu_result = to_cupy_dispatch(np.asarray(result))  # pseudo-illustrative
+
+Extending and Contributing Backends
+-----------------------------------
+
+If you have a backend (e.g., CuPy, or a custom accelerator) you can integrate it by registering backend-specific implementations for the dispatch lookups described above. See backends.py in the codebase for concrete guidance and examples.
+
+Notes
+-----
+
+- The documentation and examples here assume typical workloads and environments. Always tailor chunk sizes and compute strategies to your actual memory budget and compute resources.
+- The masked array helpers are designed to preserve and manipulate masks across chunked computations, enabling scalable handling of incomplete or invalid data.
+
+Further Reading
+--------------
+
+- Dask array core concepts: chunking, graphs, and lazy evaluation
+- Dask-backed reductions and reductions with axis specification
+- Masked arrays integration in Dask for scalable data with missing values

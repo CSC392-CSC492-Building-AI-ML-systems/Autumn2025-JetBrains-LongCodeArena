@@ -1,0 +1,206 @@
+Generate documentation for this module
+=====================================
+
+
+Overview
+--------
+
+The orm.collections module provides the machinery for instrumenting and
+tracking mutations to collections of mapped ORM entities. It enables
+arbitrary container types (including built-in types) to participate as
+relationship-backed collections without requiring inheritance from a
+specific base class.
+
+Key ideas
+
+- Instrumentation by decoration: two families of decorators are exposed.
+  - Annotation decorators: mark the role of a method (appender, remover,
+    iterator, converter, internally_instrumented) and take no arguments.
+  - Recipe decorators: provide a declarative way to map method signatures
+    to collection events (e.g., adds, removes_return). These decorators
+    require parentheses, even when no arguments are supplied.
+- Targeted decoration: in addition to generic recipes, the module also
+  provides a set of hand-tuned decorations that wrap typical list/set/dict
+  mutation methods to emit the appropriate ORM events efficiently.
+- Runtime instrumenting: a given collection class is dynamically extended
+  at mapper compilation time. If the class is a built-in, a trivial
+  subclass is substituted to host the instrumentation. The resulting
+  instrumented class exposes consistent events for append and remove
+  operations.
+- Relationship integration: a relationship can specify collection_class
+  as a type or as a factory function returning an instance. The
+  collection_class is instrumented once to determine the concrete type
+  involved. If the factory returns a built-in type, it is adapted to an
+  instrumented instance.
+- Internal plumbing: the module defines helpers and protocols that tie
+  together adapters, appenders, removers, iterators, and converters.
+
+Usage patterns
+--------------
+
+1) Annotating a simple append operation
+
+   The appender decorator marks a method as the collection appender. The
+   method typically accepts a single argument representing the item to be
+   added to the collection.
+
+   .. code-block:: python
+
+      from sqlalchemy.orm.collections import collection
+
+      class MyClass:
+          def __init__(self):
+              self.data = []
+
+          @collection.appender
+          def append_item(self, item):
+              self.data.append(item)
+
+2) Declarative event mapping with recipe decorators
+
+   The adds(...) decorator maps a method to the event of adding an entity to
+   the collection. The removes_return() decorator maps to removal logic that
+   returns the removed item.
+
+   .. code-block:: python
+
+      from sqlalchemy.orm.collections import collection
+
+      class MyClass:
+          @collection.adds("entity")  # or a positional index or key parameter
+          def insert(self, position, entity):
+              self.data.insert(position, entity)
+
+          @collection.removes_return()
+          def pop(self):
+              return self.data.pop()
+
+3) Instrumenting an existing collection type
+
+   If you extend a known type like list, the instrumented API typically
+   reuses existing instrumented methods (e.g., append, pop). Custom,
+   non-decorated methods may be recognized and instrumented as needed.
+
+   .. code-block:: python
+
+      class QueueIsh(list):
+          def push(self, item):
+              self.append(item)
+
+          def shift(self):
+              return self.pop(0)
+
+   The append and pop methods are already instrumented by virtue of the list
+   interface; additional decoration is generally unnecessary.
+
+4) Using a custom collection_class in a relationship
+
+   You can point a relationship at a custom collection class, or a factory that
+   returns one. The factory is invoked once to produce a specimen, and the
+   type of that specimen is instrumented.
+
+   .. code-block:: python
+
+      class InstrumentedList(list):
+          pass
+
+      class MyEntity(Base):
+          ...
+
+      class MyClass:
+          items = relationship("MyEntity", collection_class=InstrumentedList)
+
+Notes on internal APIs and concepts
+------------------------------------
+
+- _AdaptedCollectionProtocol: protocol describing the capabilities of an instrumented
+  collection, including:
+  - _sa_adapter: the CollectionAdapter instance that manages event firing
+  - _sa_appender, _sa_remover: callables that trigger append/remove events
+  - _sa_iterator: method used for iterating the collection
+  - _sa_converter: a callable that can convert between internal and external views
+
+- _CollectionConverterProtocol: protocol for a converter that, given a collection,
+  returns a possibly transformed collection. This is used to adapt or wrap a
+  collection as needed by the ORM.
+
+- collection (class): namespace housing the decorators and helper utilities
+  for collection instrumentation. The two major categories are:
+  - Annotating decorators: appender, remover, iterator, converter, internally_instrumented
+  - Recipe decorators: adds, removes_return, and friends
+
+- Thread-safety: instrumentation initialization uses a global mutex
+  (__instrumentation_mutex) to coordinate concurrent instrumentation during
+  mapper compilation.
+
+- Instrumentation lifecycle: classes are instrumented at mapper compilation time.
+  If a class is a built-in, a trivial subclass is substituted to host the
+  instrumentation.
+
+- collection_adapter: a helper that exposes the owning object and provides
+  explicit control over firing append/remove events when implementing custom
+  mutation methods.
+
+Examples
+--------
+
+- Basic recipe-based instrumentation:
+
+  .. code-block:: python
+
+     from sqlalchemy.orm.collections import collection
+
+     class MyContainer:
+         @collection.adds(1)
+         def store(self, item):
+             self.data.append(item)
+
+- A collection class produced by a factory function:
+
+  .. code-block:: python
+
+     def make_container():
+         return InstrumentedList()
+
+     class MappedClass(Base):
+         items = relationship("Item", collection_class=make_container)
+
+Generating documentation for this module
+-----------------------------------------
+
+To generate HTML (or other formats) documentation for this module with Sphinx:
+
+1) Ensure autodoc and the relevant extension setup are present in your docs
+   configuration (conf.py), e.g.:
+   - extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon']
+
+2) In your docs source, include a directive to document this module, e.g.:
+   .. automodule:: sqlalchemy.orm.collections
+      :members:
+      :undoc-members:
+      :show-inheritance:
+
+3) Build the docs:
+   - Using Makefile (commonly available in the docs tree):
+     $ make html
+   - Or directly with sphinx-build:
+     $ sphinx-build -b html sourcedir builddir
+
+4) Regenerate after code changes:
+   - Re-run the build command above to refresh the generated docs.
+
+Cross-references
+-----------------
+
+- See also: sqlalchemy.orm.collections.MappedCollection
+- See also: sqlalchemy.orm.collections.KeyFuncDict
+- See also: sqlalchemy.orm.CollectionAttributeImpl
+
+Notes
+-----
+
+- The collection module is designed to allow arbitrary types (including Python
+  built-ins) to participate as ORM-managed collections without requiring a
+  common base class. Instrumentation is performed at mapper compilation time
+  and may adapt built-in types via trivial subclassing where appropriate.
+

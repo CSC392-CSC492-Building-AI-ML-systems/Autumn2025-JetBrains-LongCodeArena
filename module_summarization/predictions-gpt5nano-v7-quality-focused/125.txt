@@ -1,0 +1,160 @@
+FITS Headers
+============
+
+Overview
+--------
+A FITS header is a collection of 80-character header cards that describe the data
+stored in a FITS file. Each card contains a keyword, a value, and an optional
+comment. Cards are interpreted according to conventions defined by the FITS
+standard, and common keywords include SIMPLE, BITPIX, NAXIS, NAXISn, EXTEND, and
+EXTNAME. This documentation focuses on how headers are represented, validated,
+and manipulated within the codebase, with emphasis on verification, error
+reporting, and change notifications.
+
+Header representation in the library
+------------------------------------
+- Headers expose a structured, programmatic view of the card images. Each
+  keyword/value pair is represented in a way that is convenient to access and
+  modify from Python.
+- A key design aspect is accurate reporting of indexing. The system explicitly
+  notes that FITS uses one-based indexing in the standard, but the underlying
+  tooling in this codebase adopts zero-based indexing. This distinction is
+  surfaced in verification messages to avoid confusion when debugging.
+- For internal changes, the code employs a notifier mechanism to broadcast updates
+  to listening components. This enables components to react when a header card is
+  added, removed, or modified.
+
+Verification and error handling
+-------------------------------
+The verification system validates header values and reports problems in a structured
+way. It is designed to:
+- Detect invalid or inconsistent header values.
+- Offer flexible handling strategies via verification options.
+- Provide clear, hierarchical reports of errors.
+
+Key concepts
+- VerifyError and VerifyWarning: exception and warning classes used by the verification system.
+- VERIFY_OPTIONS: supported verification modes. Options may be combined with + (e.g., fix+warn) to control both fixing and reporting behavior.
+- _Verify.run_option: internal helper that executes a single verification action (fixing, reporting, or neither).
+- _Verify.verify(option): top-level API to verify all values on an instance. Valid options include
+  ignore, warn, exception, fix, silentfix, and combinations such as fix+warn, silentfix+ignore, etc.
+- _ErrList: a nested list structure that holds verification messages and their
+  hierarchical context. It supports streaming as lines for user-facing reports.
+
+What happens during verification
+- If option is "ignore", verification yields no output.
+- Verification results are collected into an _ErrList structure. Messages are then
+  formatted into a readable report and either warned or raised as an exception
+  depending on the chosen option.
+- Special handling exists for “silent” variants to suppress reporting while still
+  applying fixes when possible.
+
+Usage patterns
+- Basic verification (warns on issues):
+  - Instantiate a header-like object that implements the required _verify method.
+  - Call verify("warn") to emit warnings for problems.
+
+- Fixing with reporting (auto-fixable issues are fixed; problems are reported):
+  - Use verify("fix+warn"), which applies fixes via a user-supplied fix() function and emits warnings for remaining issues.
+
+- Silent fixing:
+  - Use verify("silentfix+ignore") to fix all fixable issues without producing any reports.
+
+Code example: a simple header verifier
+--------------------------------------
+The following example demonstrates how to plug a simple verifier into a header-like object.
+It assumes you implement _verify to return an _ErrList and that your header is accessible
+as a mapping-like object.
+
+.. code-block:: python
+
+    from astropy.io.fits.headers import _Verify, _ErrList, VerifyWarning, VerifyError
+    import warnings
+
+    class SimpleHeaderVerifier(_Verify):
+        def __init__(self, header):
+            self.header = header
+
+        def _verify(self, option="warn"):
+            errs = _ErrList(unit="Header")
+
+            # Example check: BITPIX must be present and positive
+            bitpix = self.header.get("BITPIX", None)
+            if bitpix is None:
+                errs.append((True, "BITPIX header is missing"))
+            elif not isinstance(bitpix, int) or bitpix <= 0:
+                errs.append((True, f"Invalid BITPIX value: {bitpix}"))
+
+            # You can add more checks here and nest errors with _ErrList if needed
+
+            return errs
+
+    # Example usage
+    header = {"BITPIX": -8}
+    verifier = SimpleHeaderVerifier(header)
+
+    # Report warnings for issues
+    with warnings.catch_warnings():
+        warnings.simplefilter("always", VerifyWarning)
+        verifier.verify("warn")
+
+Reporting and errors
+--------------------
+- Messages are collected into a structured, reader-friendly report. Each
+  top-level item is prefixed with a header, and nested structures (if any) are
+  indented to convey hierarchy.
+- The report includes a note about zero-based indexing to avoid confusion with
+  FITS conventions.
+- If a problem is unfixable or the chosen option dictates, a VerifyError may be raised.
+
+Notifier mixin and header changes
+--------------------------------
+Notifiers enable parts of the system to react to changes in header state. The
+NotifierMixin provides:
+- A set of underscored APIs for internal use (e.g., _add_listener, _notify).
+- A convention where listeners implement methods named
+  _update_change_type(*args, **kwargs) to handle updates (e.g., on header changes).
+
+Example usage
+- Subclass a header-like object from NotifierMixin.
+- Register a listener that implements the expected update method.
+- Call _notify to broadcast changes when a card is added, removed, or modified.
+
+.. code-block:: python
+
+    from astropy.io.fits.headers import NotifierMixin
+
+    class Header(NotifierMixin):
+        def __init__(self):
+            self._listeners = []
+
+        def _add_listener(self, listener):
+            self._listeners.append(weakref.ref(listener))
+
+        def _notify(self, change_type, *args, **kwargs):
+            for ref in list(self._listeners):
+                listener = ref()
+                if listener is None:
+                    continue
+                update = getattr(listener, f"_update_{change_type}", None)
+                if update is not None:
+                    update(*args, **kwargs)
+
+    class Listener:
+        def _update_change(self, *args, **kwargs):
+            print("Header changed:", args, kwargs)
+
+Tips and best practices
+- Use the verification system to catch header issues early during read, write, or modify operations.
+- When fixing issues automatically, supply a fix function that performs deterministic corrections.
+- Leverage silentfix variants to apply fixes without cluttering logs, then inspect results manually if needed.
+- Subscribe to header changes with NotifierMixin to keep dependent components in sync.
+
+Notes
+-----
+- The verification system surfaces a user-facing message stream that includes
+  a note about zero-based indexing to align with internal representations.
+- The codebase is licensed under a BSD-style license; see the project LICENSE or
+  PYFITS.rst for details.
+
+This documentation covers the core concepts and practical usage of FITS headers within the library, focusing on header structure, verification, reporting, and change notification.

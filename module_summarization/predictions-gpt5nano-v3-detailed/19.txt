@@ -1,0 +1,144 @@
+w_crawl.rst
+
+w_crawl: Crawl a WESTPA dataset with per-iteration work
+
+Introduction
+------------
+The w_crawl command provides a framework to apply a user-supplied callable to every iteration in a WESTPA dataset. It is designed for postprocessing, dataset cleanup, or any per-iteration operation that can be expressed as "do X for iteration N, then do something with the result." Tasks are executed in parallel by iteration, and no ordering guarantees are provided for task completion.
+
+Overview of key concepts
+------------------------
+- WESTPACrawler: A base class for coordinating crawling activity on the master node. It exposes hooks for initialization, per-iteration result handling, and finalization.
+- WCrawl: The main command implementation. It wires together:
+  - Data reading (WESTDataReader) and iteration range selection (IterRangeSelection)
+  - A user-provided per-iteration task (task_callable)
+  - An optional crawler instance (subclass of WESTPACrawler) to coordinate results
+  - A parallel task executor to run per-iteration tasks asynchronously
+- _remote_task: A wrapper used to execute the per-iteration task remotely. It opens data backing for read access and calls the user-provided function with the iteration data.
+
+Core classes and relationships
+------------------------------
+- WESTPACrawler
+  - Purpose: Base class for coordinating crawl execution on the master.
+  - Methods (to implement in subclasses):
+    - initialize(iter_start, iter_stop): Called before any tasks are dispatched.
+    - process_iter_result(n_iter, result): Called for each completed per-iteration task.
+    - finalize(): Called after all tasks have been dispatched and results processed.
+- WCrawl (subclass of WESTParallelTool)
+  - Attributes:
+    - progress: ProgressIndicatorComponent to track and display progress.
+    - data_reader: WESTDataReader to access dataset metadata and data.
+    - iter_range: IterRangeSelection to determine the range of iterations to process.
+    - crawler: Optional instance of a WESTPACrawler (defaults to a no-op base class if not provided).
+    - task_callable: Callable loaded from the user-specified task path.
+  - Methods:
+    - add_args(parser): Registers CLI arguments for data reading, iteration range, crawler instance, and the task callable.
+    - process_args(args): Loads task_callable; optionally loads a crawler instance; otherwise uses the base WESTPACrawler.
+    - go(): Main execution loop. Initializes the crawler, dispatches per-iteration tasks, processes results via the crawler, and finalizes the crawler.
+- _remote_task
+  - A helper that obtains a shared data manager, opens backing in read mode, and runs taskfn(n_iter, iter_group) for the given iteration, returning (n_iter, result).
+
+Parameters, return values, and behavior
+---------------------------------------
+- task_callable: The per-iteration function to execute for every iteration in [iter_start, iter_stop). Signature:
+  - def task_callable(n_iter, iter_group): return any, where iter_group provides access to iteration-specific data.
+  - Return value is passed to the crawler via process_iter_result(n_iter, result).
+- crawler_instance (optional): A subclass of WESTPACrawler provided as a module path to coordinate initialization, per-iteration results, and finalization. If omitted, a no-op WESTPACrawler is used.
+- Iteration range: Determined by IterRangeSelection and the dataset reader. The command operates over [iter_start, iter_stop).
+- Parallel execution: Tasks are dispatched in parallel; completion order is not guaranteed. The wrapper _remote_task ensures each worker has read access to the dataset for its iteration.
+- Returns: The command itself does not return a value. Results are communicated to the crawler via process_iter_result. The per-iteration task return value is the second element of the tuple (n_iter, result) produced by _remote_task.
+
+Usage notes and edge cases
+--------------------------
+- If no iterations are specified (iter_stop <= iter_start), no tasks are dispatched; initialization and finalization hooks still run.
+- Exceptions raised by the task_callable will propagate through the parallel task framework; consider handling errors within the task callable or within your crawler’s process_iter_result.
+- iter_group abstraction: The per-iteration data provided to task_callable is accessed through iter_group. Use the available interface to read per-iteration state without modifying the shared dataset.
+- Data access: Each per-iteration task opens the dataset backing in read mode; ensure your task_callable does not attempt to write to shared state unless you have synchronized coordination in your crawler.
+- Performance considerations: The degree of parallelism is governed by WESTPA’s parallel tool configuration (e.g., max_queue_len). Large payloads in per-iteration results may impact memory and network usage; design task callables to return compact results when possible.
+
+API reference (high level)
+--------------------------
+- WESTPACrawler
+  - initialize(iter_start, iter_stop): Optional setup before dispatch.
+  - finalize(): Optional cleanup after all tasks and results are processed.
+  - process_iter_result(n_iter, result): Handle the result from a completed per-iteration task.
+- WCrawl
+  - prog: Command name ('w_crawl').
+  - description: Short description of the tool and usage model.
+  - add_args(parser): Register CLI arguments for data access, iteration range, task callable, and optional crawler instance.
+  - process_args(args): Resolve task_callable and optional crawler instance; instantiate default crawler if not provided.
+  - go(): Orchestrate initialization, task dispatch, result processing, and finalization.
+
+Usage examples
+--------------
+Minimal usage (no crawler coordination; only per-iteration task):
+- Task function (in module tasks.py):
+  def process_iteration(n_iter, iter_group):
+      # Example per-iteration work; read data from iter_group as needed
+      return {'iteration': n_iter, 'value': 0}
+
+- Run:
+  w_crawl -t tasks.process_iteration
+
+Example with a custom crawler to aggregate per-iteration results:
+- Crawler (in module crawlers.py):
+  from westpa.w_crawl import WESTPACrawler
+
+  class MyCrawler(WESTPACrawler):
+      def initialize(self, iter_start, iter_stop):
+          self.best_score = None
+
+      def process_iter_result(self, n_iter, result):
+          score = result.get('score') if isinstance(result, dict) else None
+          if score is not None:
+              if self.best_score is None or score > self.best_score:
+                  self.best_score = score
+
+      def finalize(self):
+          print("Best score across iterations:", self.best_score)
+
+- Task (in module tasks.py):
+  def evaluate(n_iter, iter_group):
+      # Compute a per-iteration score using iter_group
+      score = n_iter  # placeholder example
+      return {'score': score}
+
+- Run:
+  w_crawl -t tasks.evaluate -c crawlers.MyCrawler
+
+Notes
+-----
+- The task_callable must be accessible as a module-level function or object path resolvable by the loader used in get_object.
+- The crawler instance, if provided, must be a subclass of WESTPACrawler and is instantiated by the loader passed via --crawler-instance.
+
+Code snippets
+-------------
+- Core execution loop (conceptual, refer to WCrawl.go for exact implementation):
+  def go(self):
+      iter_start = self.iter_range.iter_start
+      iter_stop = self.iter_range.iter_stop
+      iter_count = iter_stop - iter_start
+      self.data_reader.open('r')
+      pi = self.progress.indicator
+      with pi:
+          pi.operation = 'Initializing'
+          self.crawler.initialize(iter_start, iter_stop)
+
+          try:
+              pi.new_operation('Dispatching tasks & processing results', iter_count)
+              task_gen = ((_remote_task, (n_iter, self.task_callable), {}) for n_iter in range(iter_start, iter_stop))
+              for future in self.work_manager.submit_as_completed(task_gen, self.max_queue_len):
+                  n_iter, result = future.get_result(discard=True)
+                  if self.crawler is not None:
+                      self.crawler.process_iter_result(n_iter, result)
+                  pi.progress += 1
+          finally:
+              pi.new_operation('Finalizing')
+              self.crawler.finalize()
+
+Code locations
+--------------
+- The w_crawl command is implemented in the WCrawl class, extending WESTParallelTool.
+- The per-iteration task wrapper is _remote_task, which opens the data backing in read mode and executes the user-provided function with the iteration’s data group.
+
+End of documentation.

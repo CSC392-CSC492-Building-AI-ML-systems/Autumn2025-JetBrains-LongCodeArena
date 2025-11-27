@@ -1,0 +1,70 @@
+w_direct
+--------
+
+Direct kinetics analysis for WESTPA
+
+Overview
+- w_direct converts flux data from a WESTPA simulation into state-to-state rates, fluxes, and populations, with optional confidence intervals. It operates on data produced by trajectory tracing and binning files and outputs results into an HDF5 file (default direct.h5).
+- It provides two subcommands:
+  - init: calculate state-to-state kinetics by tracing trajectories (produces raw flux-related datasets).
+  - kinetics: generate average rates/fluxes from a completed run, with optional evolution-mode data.
+
+Input and output
+- Required input (for init): an assignments file (usually assign.h5) that provides trajectory labeling. The output file is direct.h5 by default.
+- The output file direct.h5 (produced by init and/or used by kinetics) contains:
+  - /conditional_fluxes [iteration][state][state]
+    Floating-point macrostate-to-macrostate fluxes (not normalized by the initial macrostate population).
+  - /conditional_arrivals [iteration][stateA][stateB]
+    Integer counts of trajectories arriving at stateB from stateA per iteration.
+  - /total_fluxes [iteration][state]
+    Floating-point total flux into each state per iteration.
+  - /arrivals [iteration][state]
+    Integer counts of trajectories arriving at each state per iteration.
+  - /duration_count [iteration]
+    Integer number of recorded event durations in each iteration.
+  - /durations [iteration][event duration]
+    Structured data for transition event durations ending in an iteration:
+      istate
+      fstate
+      duration
+      weight
+    Note: duration weights are the trajectory weight at the end of the transition and are not normalized by the initial state's population.
+- Normalization to obtain rates is not performed by the raw fluxes; instead, use the w_direct kinetics subcommand to normalize while accounting for statistical fluctuations and correlations. Target fluxes (total flux into a state) do not require normalization.
+
+init subcommand
+- Purpose: calculate state-to-state kinetics by tracing trajectories.
+- Default files: output file direct.h5, kinetics data also stored in direct.h5 by default; uses the assignments file for bin information.
+- Implementation notes:
+  - Uses a custom evaluation block (_rate_eval_block) to compute rate estimates for each pair of states.
+  - For each pair (istate, jstate) with istate != jstate:
+    - Builds a dataset that includes the relevant population data and extracts the necessary cross-state flux information.
+    - Calls a Monte Carlo bootstrap-based estimator (mcbs_ci_correl) with:
+      - estimator: sequence_macro_flux_to_rate
+      - estimator_kwargs: istate, jstate
+      - alpha, n_sets, autocorrel_alpha, do_correl, mcbs_enable
+      - subsample: mean
+    - Collects CI results and records them in the output as part of the rate estimation.
+- Result: a direct.h5 file containing the conditional fluxes, arrivals, total fluxes, and durations (as described above).
+
+kinetics subcommand
+- Purpose: generate average rate and flux values from the full set of data, with errors.
+- Prerequisites: bin assignments (usually assign.h5) and kinetics data (direct.h5) must already exist from a previous run (init).
+- Output file structure (within direct.h5 by default):
+  - /avg_rates [state,state]
+    Average state-to-state rates with associated errors (structured dataset).
+  - /avg_total_fluxes [state]
+    Average total flux into each state with errors (structured dataset).
+  - /avg_conditional_fluxes [state,state]
+    Average state-to-state fluxes with errors (structured dataset).
+- If evolution mode is requested (via the appropriate flag in the real tool):
+  - /rate_evolution [window][state][state]
+    Datasets describing rate evolution over time windows (structured data), with confidence intervals when enabled.
+- Note: This subcommand provides the averaged view across the selected window of iterations, collapsing the per-iteration data produced by init into smooth estimates with uncertainty.
+
+Notes
+- The w_direct tool is designed to work with data produced by other WESTPA components (binning/assignments and direct kinetics data). It emphasizes that raw conditional fluxes are not normalized by initial populations; normalization to obtain rates is performed by the kinetics subcommand, which also incorporates statistical uncertainty and correlation effects.
+- The internal rate computation uses a dedicated evaluation block that leverages mcbs_ci_correl to estimate confidence intervals for the rate estimates, using sequence_macro_flux_to_rate as the estimator.
+
+Usage hints
+- Use init to generate the raw flux-related datasets into direct.h5 from your assignments and trajectory data.
+- Use kinetics to obtain normalized rates and flux values with uncertainties, and to optionally produce evolution-mode rate data. Ensure you have the necessary input files (assignments and kinetics data) in place prior to running kinetics.

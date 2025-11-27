@@ -1,0 +1,136 @@
+ASDF Tree Search Utilities
+==========================
+
+Overview
+--------
+This module provides the AsdfSearchResult class, the primary interface for searching
+and manipulating ASDF trees after performing an initial search. It is designed to
+be used fluently: start with a search operation on an ASDF file, then refine the
+results with subsequent searches, format the rendered output, or replace
+matched leaf values.
+
+Key concepts
+- AsdfSearchResult: Represents the result of a search across an ASDF tree. It can be further narrowed
+  by additional search criteria, formatted for display, or used to replace matched leaf values.
+- NotSet: A sentinel used to indicate that a parameter should remain unconstrained or retain its current value.
+- Pattern and matching: The search API supports string patterns (regular expressions), explicit values, and type checks.
+
+Public API
+-----------
+
+AsdfSearchResult
+----------------
+The core object returned by ASDF search operations. It encapsulates:
+- identifiers: The path identifiers (keys/indices) to nodes in the tree that have been reached so far.
+- node: The current node or leaf corresponding to those identifiers.
+- filters: A list of filter callables that are applied to each candidate node to decide if it should be retained.
+- parent_node: The parent container of the current node, used for in-place replacement.
+- max_rows, max_cols: Rendering constraints for displaying the tree.
+- show_values: Whether to render primitive leaf values in the display.
+
+Constructors
+- AsdfSearchResult(identifiers, node, filters=[], parent_node=None, max_rows=DEFAULT_MAX_ROWS, max_cols=DEFAULT_MAX_COLS, show_values=DEFAULT_SHOW_VALUES)
+
+Notes:
+- filters: A cumulative list of filter callbacks. Each callback takes (node, identifiers[-1]) and returns True to retain the node.
+- Defaults are provided by _display: DEFAULT_MAX_ROWS, DEFAULT_MAX_COLS, DEFAULT_SHOW_VALUES.
+
+Public methods
+
+1) format(max_rows=NotSet, max_cols=NotSet, show_values=NotSet)
+   - Purpose: Change the formatting parameters of the rendered tree without changing the search results.
+   - Parameters:
+     - max_rows: Maximum number of display lines. Accepts int, tuple, None, or NotSet. None means display all lines.
+     - max_cols: Maximum line length. Accepts int, None, or NotSet. None means no limit.
+     - show_values: Whether to render primitive values. Accepts bool or NotSet.
+   - Behavior:
+     - If a parameter is NotSet, the current value is retained.
+     - Returns a new AsdfSearchResult with updated formatting.
+   - Example:
+     - result2 = result.format(max_rows=200, show_values=False)
+
+2) search(key=NotSet, type=NotSet, value=NotSet, filter=None)
+   - Purpose: Narrow the search results by additional criteria.
+   - Parameters:
+     - key: NotSet, str, or any object.
+       - NotSet: unconstrained key/index.
+       - str: treated as a regular expression against the node key/index string.
+       - any other object: equality against the key/index.
+     - type: NotSet, str, pattern, or builtins.type.
+       - NotSet: unconstrained type.
+       - str or Pattern: match against the fully qualified type name of the node.
+       - builtins.type: node must be an instance of this type.
+     - value: NotSet, str, or any object.
+       - NotSet: unconstrained value.
+       - str: treated as a regular expression against the node’s string representation (special handling for containers).
+       - any other object: equality against the node’s value.
+     - filter: Optional callable taking (node, identifier) and returning True to retain the node.
+   - Behavior:
+     - Supports composition of filters: each call adds a new filter to the chain.
+     - Returns a new AsdfSearchResult with the consolidated filters.
+   - Notes:
+     - Patterns are compiled and used to match against either the identifier (key/index) or the node type/value.
+     - For value matching with a Pattern, containers are excluded (to avoid matching on string representations that include child values).
+   - Example:
+     - result2 = result.search(key="foo.*", type="int", value=NotSet, filter=None)
+
+3) replace(value)
+   - Purpose: In-place replacement of all leaf nodes in the current search result that pass all filters.
+   - Parameter:
+     - value: The new value to assign at each matched leaf node.
+   - Behavior:
+     - Walks the tree breadth-first to collect all (identifier, parent) pairs for leaf nodes that pass all filters.
+     - Replaces the corresponding leaf entries in their parent containers with value.
+   - Example:
+     - result.replace(None)  # Set all matched leaves to None
+
+4) node (property)
+   - Purpose: Retrieve the leaf node when the search yields exactly one result.
+   - Behavior:
+     - If the search identifies a unique leaf, returns that leaf node.
+     - If the result represents multiple nodes, behavior is not specified here (based on typical usage patterns, access to node is intended for single-result scenarios).
+
+Internal helpers (not part of the public API)
+---------------------------------------------
+- _maybe_compile_pattern(query)
+  - If query is a string, compiles it into a regular expression (Pattern).
+  - Otherwise, returns the query as-is.
+- _safe_equals(a, b)
+  - Robust equality check with exception safety. Returns False if comparison raises.
+- _get_fully_qualified_type(value)
+  - Returns the fully qualified type name for a value.
+  - Built-in types use just their type name; user-defined types include module name (module.name).
+
+Implementation details and behavior notes
+---------------------------------------
+- Pattern handling:
+  - Keys/identifiers: If key is a Pattern, it is matched against the string form of the identifier. If no match, the node is excluded.
+  - Types: If type is a Pattern, the fully qualified node type name is matched against the regex. If type is a builtins.type, an isinstance check is performed.
+  - Values: If value is a Pattern, and the node is a container, the match is skipped to avoid matching on container string representations. Otherwise, the string form of the node is matched against the pattern.
+- NotSet semantics:
+  - NotSet is used to indicate “no constraint” for a parameter. When provided as an argument to format or search, the current value is preserved or unconstrained as appropriate.
+- Filtering:
+  - The search method aggregates filters; each filter examines a node and its identifier and returns True to keep the node.
+  - A final result retains nodes only if all accumulated filters pass.
+- Replacement:
+  - replace(value) traverses the tree breadth-first; only leaves that pass all filters are replaced with the given value.
+  - This relies on a tree traversal helper (_walk_tree_breadth_first) defined elsewhere in the package.
+
+Usage patterns
+--------------
+- Start with an initial search (via ASDF file API) to obtain an AsdfSearchResult.
+- Refine results with successive .search(...) calls to apply more constraints.
+- Adjust rendering with .format(...) to tailor output for inspection or debugging.
+- Mutate matching leaves with .replace(new_value) when manipulating data stored in an ASDF tree.
+
+Example usage (conceptual)
+- res = asdf_file.search("data")  # initial search
+- res = res.search(type="float", key=".*value.*")  # narrow by type and key name
+- res = res.format(max_rows=100, show_values=False)  # format display
+- res.replace(0.0)  # replace all matched leaves with 0.0
+
+Notes
+-----
+- This documentation reflects the public API surface and the behavior described by the code.
+- The actual rendering and tree walking utilities (render_tree, _walk_tree_breadth_first, etc.) live in other modules and are not shown here.
+- See related modules for display formatting and node schema information when integrating results into richer documentation or UI rendering.

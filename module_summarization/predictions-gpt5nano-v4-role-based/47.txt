@@ -1,0 +1,199 @@
+contingency_tables.rst
+======================
+
+Overview
+--------
+
+This module provides utilities for analyzing two-way contingency tables
+(i.e., frequency tables cross-classified by two categorical variables). The
+primary public API shown in this excerpt centers on the Table class, which
+wraps a contingency table and exposes methods to perform common statistical
+tests (notably tests of independence for nominal data and tests targeting
+ordinal association).
+
+Key helpers and design notes:
+
+- The data model represents counts in a 2-D table. Internally, counts are
+  stored as a NumPy array of float64 for numerical stability.
+- If any cell count is zero and shift_zeros is enabled, zeros are replaced
+  by 0.5 to avoid issues with certain test procedures.
+- A small internal helper, _make_df_square, can reindex a DataFrame to be
+  square (same row and column labels in the same order) by taking the union
+  of row/column labels and filling missing cells with zeros.
+- Results from tests are returned in a lightweight container (_Bunch) that
+  provides convenient attributes and readable text representations.
+
+Public API
+----------
+
+class Table
+  A two-way contingency table with utility methods for statistical testing.
+
+  Construction
+  - __init__(self, table, shift_zeros=True)
+    - table: array_like
+      A contingency table of shape (r, c) with counts.
+    - shift_zeros: bool
+      If True and any cell count is zero, add 0.5 to all values in the table.
+    - Behavior:
+      - The original table is cached as table_orig.
+      - The internal numeric table is stored as self.table (dtype float64).
+
+  - __str__(self)
+    - Returns a human-readable summary including the shape and the numeric table.
+
+  - from_data(cls, data, shift_zeros=True)
+    - Classmethod to construct a Table from raw data.
+    - data: array_like or pandas.DataFrame
+      If a DataFrame is provided, the contingency table is created using the
+      first two columns via pandas.crosstab(data.iloc[:, 0], data.iloc[:, 1]).
+      Otherwise, data[:, 0] and data[:, 1] are used.
+    - shift_zeros: bool
+      See constructor documentation.
+    - Returns: Table instance
+
+  - test_nominal_association(self)
+    - Purpose: Assess independence for nominal factors using a chi-squared test.
+    - Implementation details (as observed):
+      - statistic = sum of chi-square contributions over all cells.
+      - df = (number of rows - 1) * (number of columns - 1)
+      - pvalue = 1 - chi2.cdf(statistic, df)
+    - Returns: A _Bunch with attributes:
+      - statistic: float
+      - df: int
+      - pvalue: float
+
+  - test_ordinal_association(self, row_scores=None, col_scores=None)
+    - Purpose: Assess independence for ordered (ordinal) factors via a linear-by-linear (trend) test.
+    - Parameters:
+      - row_scores: array_like (length must equal number of rows)
+      - col_scores: array_like (length must equal number of columns)
+      - If None, defaults to 0, 1, 2, ... across rows/columns respectively.
+    - Behavior:
+      - Validates that the lengths of the score vectors match table dimensions.
+      - Computes a weighted test statistic:
+        statistic = row_scores^T * (self.table) * col_scores
+      - Returns: A _Bunch with attributes including at least:
+        - statistic: float
+        - null_mean: float
+        - null_sd: float
+        - zscore: float
+        - pvalue: float
+      - Note: The excerpt shows the computation of the statistic and some auxiliary
+        quantities; the full implementation is not shown in the provided snippet.
+
+Internal helpers
+----------------
+
+def _make_df_square(table)
+  - Purpose: Normalize a pandas DataFrame to a square contingency table.
+  - Behavior:
+    - If table is not a DataFrame, it is returned unchanged.
+    - If the DataFrame is not square (i.e., its row and column indices differ),
+      the function computes ix = sorted union of the index and columns, and reindexes
+      both axes to ix, filling missing cells with 0.
+    - The resulting table is reordered so that rows and columns share the same order.
+  - Returns: A possibly modified DataFrame that is square and aligned.
+
+class _Bunch
+  A lightweight container used to return test results in a convenient
+  attribute-accessible form.
+
+  - __repr__ and __str__
+    - __repr__ returns a brief marker indicating that results are contained.
+    - __str__ prints the stored attributes in a sorted, aligned format.
+
+Usage examples
+--------------
+
+Basic nominal association test
+
+.. code-block:: python
+
+    import numpy as np
+    from contingency_tables import Table
+
+    # Example 2x2 contingency table
+    table = np.array([[10, 20],
+                      [5,  15]])
+
+    T = Table(table)
+    res = T.test_nominal_association()
+    print("Chi-square statistic:", res.statistic)
+    print("Degrees of freedom:", res.df)
+    print("P-value:", res.pvalue)
+
+Construct a Table from raw data
+
+.. code-block:: python
+
+    import pandas as pd
+    from contingency_tables import Table
+
+    # Raw data: two categorical variables encoded in columns
+    data = pd.DataFrame({
+        "A": ["x", "y", "x", "y", "x"],
+        "B": ["u", "u", "v", "v", "u"]
+    })
+
+    T = Table.from_data(data)
+    res = T.test_nominal_association()
+    print(res.pvalue)
+
+Ordinal association test (linear-by-linear)
+
+.. code-block:: python
+
+    import numpy as np
+    from contingency_tables import Table
+
+    table = np.array([[12, 3, 0],
+                      [4,  8, 2],
+                      [0,  1, 5]], dtype=float)
+
+    T = Table(table)
+    stat_res = T.test_ordinal_association()  # default scores 0,1,2 and 0,1,2
+    print("Statistic:", stat_res.statistic)
+    print("P-value:", stat_res.pvalue)
+
+Notes and design considerations
+-------------------------------
+
+- The statistical tests implemented here assume the observed units are
+  independent and identically distributed, with each unit classified by two
+  categorical variables (the typical two-way contingency table model).
+- When zeros appear in the table, many tests can be unstable or undefined.
+  The shift_zeros option provides a simple adjustment by adding 0.5 to all
+  cells in such cases (in the constructor).
+- The module’s docstring mentions additional classes (e.g., SquareTable,
+  Table2x2, StratifiedTable) and tests (McNemar’s test, Cochran’s q test),
+  which are referenced for context but are not fully shown in the provided excerpt.
+  The public API documented here reflects the components visible in this code
+  excerpt.
+
+Dependencies
+------------
+
+- numpy
+- pandas
+- scipy (for chi-square distribution and related statistics)
+- statsmodels (decorator cache_readonly is imported and available for use)
+
+See Also
+--------
+
+- scipy.stats.chi2_contingency
+- statsmodels.graphics.mosaicplot.mosaic
+
+Notes on implementation details
+-------------------------------
+
+- Table.__init__ caches the original input as table_orig and stores a floating-point
+  representation in self.table for subsequent numerical computations.
+- The _make_df_square helper is designed for preprocessing DataFrames when a square
+  representation is required, such as aligning row and column labels before certain tests.
+- The _Bunch class provides a lightweight, readable container for test results.
+
+This documentation reflects the API and behavior exposed by the provided code
+excerpt. If fuller functionality (additional classes and tests) is needed, please
+reference the complete module source.

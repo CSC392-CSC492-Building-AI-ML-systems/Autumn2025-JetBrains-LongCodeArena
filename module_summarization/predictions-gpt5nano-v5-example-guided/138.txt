@@ -1,0 +1,186 @@
+# Array Best Practices
+
+## Overview
+
+This module demonstrates practical approaches for using array operations with Dask, focusing on backend dispatch for core operations and robust handling of masked arrays (numpy.ma) within chunked computations. It provides dispatch hooks to route operations to appropriate backends and a suite of helpers to work with masked data in a Dask array context.
+
+## Key Components
+
+- Backend operation dispatchers
+  - concatenate_lookup = Dispatch("concatenate")
+  - tensordot_lookup = Dispatch("tensordot")
+  - einsum_lookup = Dispatch("einsum")
+  - empty_lookup = Dispatch("empty")
+  - divide_lookup = Dispatch("divide")
+  - percentile_lookup = Dispatch("percentile")
+  - numel_lookup = Dispatch("numel")
+  - nannumel_lookup = Dispatch("nannumel")
+  - to_numpy_dispatch = Dispatch("to_numpy_dispatch")
+  - to_cupy_dispatch = Dispatch("to_cupy_dispatch")
+
+  How this helps: These Dispatch objects enable backend-specific implementations (e.g., NumPy, CuPy) for common array operations in Dask arrays. Registering implementations allows optimized behavior per backend.
+
+- Masked array interoperability with Dask
+  - normalize_masked_array: integrates masked array tokens for token-based normalization.
+  - filled: replace masked elements with a fill value across a Dask array.
+  - _wrap_masked: internal helper to adapt numpy.ma.masks to blockwise operations across blocks.
+  - masked_greater, masked_greater_equal, masked_less, masked_less_equal, masked_not_equal: binary masked comparisons adapted for Dask blocks.
+  - masked_equal: masked equality with scalar values (value must be scalar).
+  - masked_invalid, masked_inside, masked_outside, masked_where: common masked-array predicates and masking patterns applied in a blockwise fashion.
+  - masked_values: apply masking with specific values (with tolerance and shrink options).
+  - fix_invalid, getdata, getmaskarray: helpers to manage and retrieve masked data and masks.
+
+## Usage
+
+Below are representative excerpts illustrating how these components are defined and used within the module.
+
+- Backend dispatchers (definition)
+
+```python
+concatenate_lookup = Dispatch("concatenate")
+tensordot_lookup = Dispatch("tensordot")
+einsum_lookup = Dispatch("einsum")
+empty_lookup = Dispatch("empty")
+divide_lookup = Dispatch("divide")
+percentile_lookup = Dispatch("percentile")
+numel_lookup = Dispatch("numel")
+nannumel_lookup = Dispatch("nannumel")
+to_numpy_dispatch = Dispatch("to_numpy_dispatch")
+to_cupy_dispatch = Dispatch("to_cupy_dispatch")
+```
+
+- Normalize masked arrays for tokenization
+
+```python
+@normalize_token.register(np.ma.masked_array)
+def normalize_masked_array(x):
+    data = normalize_token(x.data)
+    mask = normalize_token(x.mask)
+    fill_value = normalize_token(x.fill_value)
+    return (data, mask, fill_value)
+```
+
+- Fill masked values across a Dask array
+
+```python
+@derived_from(np.ma)
+def filled(a, fill_value=None):
+    a = asanyarray(a)
+    return a.map_blocks(np.ma.filled, fill_value=fill_value)
+```
+
+- Internal wrapper to apply masked operations blockwise
+
+```python
+def _wrap_masked(f):
+    @wraps(f)
+    def _(a, value):
+        a = asanyarray(a)
+        value = asanyarray(value)
+        ainds = tuple(range(a.ndim))[::-1]
+        vinds = tuple(range(value.ndim))[::-1]
+        oinds = max(ainds, vinds, key=len)
+        return blockwise(f, oinds, a, ainds, value, vinds, dtype=a.dtype)
+
+    return _
+```
+
+- Masked comparisons (examples)
+
+```python
+masked_greater = _wrap_masked(np.ma.masked_greater)
+masked_greater_equal = _wrap_masked(np.ma.masked_greater_equal)
+masked_less = _wrap_masked(np.ma.masked_less)
+masked_less_equal = _wrap_masked(np.ma.masked_less_equal)
+masked_not_equal = _wrap_masked(np.ma.masked_not_equal)
+```
+
+- Masked equality (scalar value only)
+
+```python
+@derived_from(np.ma)
+def masked_equal(a, value):
+    a = asanyarray(a)
+    if getattr(value, "shape", ()):
+        raise ValueError("da.ma.masked_equal doesn't support array `value`s")
+    inds = tuple(range(a.ndim))
+    return blockwise(np.ma.masked_equal, inds, a, inds, value, (), dtype=a.dtype)
+```
+
+- Masked invalids and predicates
+
+```python
+@derived_from(np.ma)
+def masked_invalid(a):
+    return asanyarray(a).map_blocks(np.ma.masked_invalid)
+
+@derived_from(np.ma)
+def masked_inside(x, v1, v2):
+    x = asanyarray(x)
+    return x.map_blocks(np.ma.masked_inside, v1, v2)
+
+@derived_from(np.ma)
+def masked_outside(x, v1, v2):
+    x = asanyarray(x)
+    return x.map_blocks(np.ma.masked_outside, v1, v2)
+
+@derived_from(np.ma)
+def masked_where(condition, a):
+    cshape = getattr(condition, "shape", ())
+    if cshape and cshape != a.shape:
+        raise IndexError(
+            "Inconsistant shape between the condition and the input (got %s and %s)"
+            % (cshape, a.shape)
+        )
+    condition = asanyarray(condition)
+    a = asanyarray(a)
+    ainds = tuple(range(a.ndim))
+    cinds = tuple(range(condition.ndim))
+    return blockwise(
+        np.ma.masked_where, ainds, condition, cinds, a, ainds, dtype=a.dtype
+    )
+```
+
+- Additional masked utilities
+
+```python
+@derived_from(np.ma)
+def masked_values(x, value, rtol=1e-05, atol=1e-08, shrink=True):
+    x = asanyarray(x)
+    if getattr(value, "shape", ()):
+        raise ValueError("da.ma.masked_values doesn't support array `value`s")
+    return map_blocks(
+        np.ma.masked_values, x, value, rtol=rtol, atol=atol, shrink=shrink
+    )
+```
+
+```python
+@derived_from(np.ma)
+def fix_invalid(a, fill_value=None):
+    a = asanyarray(a)
+    return a.map_blocks(np.ma.fix_invalid, fill_value=fill_value)
+
+@derived_from(np.ma)
+def getdata(a):
+    a = asanyarray(a)
+    return a.map_blocks(np.ma.getdata)
+
+@derived_from(np.ma)
+def getmaskarray(a):
+    a = asanyarray(a)
+    return a.map_blocks(np.ma.getmaskarray)
+```
+
+## Details
+
+- Dispatchers are designed to route operations to the appropriate backend (e.g., NumPy, CuPy). Registering backend-specific implementations with these Dispatch objects enables optimized and backend-consistent behavior across chunks.
+
+- The masked array utilities bridge numpy.ma semantics with Dask’s chunked architecture, applying operations blockwise or via blockwise composition to maintain correctness while leveraging parallelism.
+
+- masked_equal enforces that the right-hand side value is scalar; using an array as value raises a ValueError.
+
+- The _wrap_masked helper demonstrates how to adapt 2-D+ masked operations to operate over blockwise chunks by determining appropriate axes for the operation.
+
+- All functions shown rely on underlying Dask primitives such as asanyarray, map_blocks, and blockwise to ensure compatibility with Dask’s task graphs and chunked execution model.
+
+For further details and advanced usage, refer to the surrounding codebase where these dispatchers and masked-array utilities are integrated into Dask’s array routines.

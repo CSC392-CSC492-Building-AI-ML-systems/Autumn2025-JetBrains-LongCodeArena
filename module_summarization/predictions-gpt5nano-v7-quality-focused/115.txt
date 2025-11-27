@@ -1,0 +1,203 @@
+Overview
+--------
+
+This document describes the global ASDF configuration facilities provided by the config module. It centers on AsdfConfig, a container for ASDF configuration options that affects how resources, extensions, and default behavior are handled across the library. Users typically interact with the global configuration through get_config and config_context (not shown in this excerpt) rather than constructing AsdfConfig directly.
+
+Key defaults (module scope)
+---------------------------
+
+These constants define the default values used by AsdfConfig unless overridden by user configuration.
+
+- DEFAULT_VALIDATE_ON_READ = True
+- DEFAULT_DEFAULT_VERSION = str(versioning.default_version)
+- DEFAULT_LEGACY_FILL_SCHEMA_DEFAULTS = True
+- DEFAULT_IO_BLOCK_SIZE = -1  # auto
+- DEFAULT_ARRAY_INLINE_THRESHOLD = None
+
+API SUMMARY
+-----------
+
+AsdfConfig acts as a central registry for:
+
+- Resource mappings (in-memory, URI-to-bytes mappings)
+- Extensions (registered ASDF extensions)
+- Global defaults (default ASDF Standard version, IO block size, etc.)
+
+The class uses a reentrant lock to ensure thread-safety for mutations and lazy initialization for lazily-loaded components.
+
+AsdfConfig: Core Concepts
+-------------------------
+
+- Resource mappings represent user-registered mappings that map string resource URIs to byte content. These mappings participate in resource resolution and can take precedence over mappings loaded from entry points.
+- Resource manager aggregates resources from the registered mappings and any runtime-added mappings.
+- Extensions represent loaded ASDF extensions, including their URIs and packages. Extensions can also be added or removed at runtime.
+- Default version controls the ASDF Standard version used for newly created files.
+- IO block size controls how data is read from and written to files. A value of -1 delegates to the filesystem’s preferred block size.
+- The framework uses a locking strategy to ensure safe, lazy initialization and updates of internal state.
+
+Documentation by API area
+-------------------------
+
+Resource Mappings
+^^^^^^^^^^^^^^^^^
+
+Resource mappings map ASDF resource URIs to their content. The following API surfaces are available:
+
+resource_mappings (property)
+- Returns: list of ResourceMappingProxy
+- Behavior: Lazily loads the default resource mappings from entry points. If modified, the cached value is updated under the protection of a lock.
+
+add_resource_mapping(mapping)
+- Purpose: Register a new resource mapping. The new mapping takes precedence over all previously registered mappings.
+- Parameter:
+  - mapping: collections.abc.Mapping
+    Map of str resource URI to bytes content
+- Notes:
+  - The mapping is wrapped via ResourceMappingProxy.maybe_wrap before insertion.
+  - The new mapping is placed at the front of the list; other mappings are shifted accordingly.
+  - Resets the internal resource_manager so it will be rebuilt on next access.
+
+remove_resource_mapping(mapping=None, *, package=None)
+- Purpose: Remove a registered resource mapping.
+- Parameters:
+  - mapping: optional Mapping
+  - package: optional str
+- Behavior:
+  - At least one of mapping or package must be provided.
+  - If mapping is provided, it is wrapped for comparison.
+  - If package is provided, only mappings whose package_name matches are removed.
+  - Updates the internal list and resets the resource manager.
+
+reset_resources()
+- Purpose: Reset resource mappings to the defaults (entry point-provided mappings).
+- Behavior: Sets internal mappings and manager to None so they reload on next access.
+
+resource_manager (property)
+- Returns: ResourceManager
+- Behavior: Lazily constructs a ResourceManager from the current resource mappings. The ResourceManager is rebuilt when mappings change.
+
+Extensions
+^^^^^^^^^^
+
+Extensions represent registered ASDF extensions, including their URIs and packaging.
+
+extensions (property)
+- Returns: list of ExtensionProxy
+- Behavior: Lazily loads registered extensions from entry points.
+
+add_extension(extension)
+- Purpose: Register a new extension. The new extension takes precedence over existing ones.
+- Parameter:
+  - extension: AsdfExtension or Extension
+- Notes:
+  - The extension is wrapped via ExtensionProxy.maybe_wrap.
+  - The new extension is prepended to the list.
+
+remove_extension(extension=None, *, package=None)
+- Purpose: Remove a registered extension.
+- Parameters:
+  - extension: AsdfExtension, Extension, or str (URI pattern), optional
+  - package: optional str
+- Behavior:
+  - At least one of extension or package must be provided.
+  - If extension is a string, removal matches via URI pattern using util.uri_match.
+  - If extension is an ExtensionProxy, removal matches by object identity.
+  - If package is provided, only extensions from that package are removed.
+  - Updates the extensions list accordingly.
+
+reset_extensions()
+- Purpose: Reset extensions to the defaults provided by entry points.
+- Behavior: Sets _extensions to None so they are reloaded on next access.
+
+Default Version
+^^^^^^^^^^^^^^^
+
+default_version (property)
+- Returns: str
+- Behavior: Gets the default ASDF Standard version used for new files.
+
+default_version (setter)
+- Purpose: Sets the default ASDF Standard version used for new files.
+- Parameter:
+  - value: str
+- Behavior: Validates the provided version string via validate_version(value) before storing it.
+
+IO Block Size
+^^^^^^^^^^^^^
+
+io_block_size (property)
+- Returns: int
+- Behavior: Gets the block size used when reading and writing files.
+  - -1 means “use the filesystem’s preferred block size.”
+
+io_block_size (setter)
+- Purpose: Sets the block size used when reading and writing files.
+- Parameter:
+  - value: int
+- Behavior: Stores the provided value (no additional validation shown in the excerpt).
+
+Usage Examples
+--------------
+
+Get and inspect the global configuration
+- Retrieve the AsdfConfig singleton (via module API, typically asdf.get_config)
+- Access resource mappings and extensions, and read defaults
+
+  from asdf import get_config
+
+  cfg = get_config()
+
+  # Inspect defaults
+  print(cfg.default_version)
+  print(cfg.io_block_size)
+
+  # Access resource mappings
+  mappings = cfg.resource_mappings
+  print(len(mappings))
+
+  # Access extensions
+  exts = cfg.extensions
+  print(len(exts))
+
+Register a new resource mapping (takes precedence)
+  new_mapping = {"asdf://example.org/resource": b"content"}
+  cfg.add_resource_mapping(new_mapping)
+
+Remove a resource mapping by mapping
+  cfg.remove_resource_mapping(mapping=new_mapping)
+
+Reset resource mappings to defaults
+  cfg.reset_resources()
+
+Register a new extension (takes precedence)
+  from asdf.extension import Extension
+  new_ext = Extension(uri="asdf://example.org/ext", package="mypkg")
+  cfg.add_extension(new_ext)
+
+Remove extensions by package
+  cfg.remove_extension(package="mypkg")
+
+Reset extensions to defaults
+  cfg.reset_extensions()
+
+Change default ASDF version
+  cfg.default_version = "1.8.0"  # use a valid, supported version string
+
+Set IO block size
+  cfg.io_block_size = 4096  # or -1 to auto
+
+Notes on global access
+----------------------
+
+- Use get_config() to obtain the global AsdfConfig instance.
+- Prefer config_context() when you need temporary overrides within a scope.
+- Changes affect subsequent ASDF operations that rely on resources, extensions, and defaults.
+
+Advanced topics
+---------------
+
+- Thread safety: All mutating operations acquire a reentrant lock to prevent races in multi-threaded environments.
+- Lazy initialization: Resource mappings, extensions, and the resource manager are loaded on first access, which helps reduce startup cost.
+- Precedence: Newly added resource mappings and extensions get highest precedence over existing ones to allow runtime customization without modifying entry-point defaults.
+
+This documentation reflects the public API surface visible in the code excerpt for AsdfConfig and its related defaults and operations. For complete behavior and integration details, refer to the broader ASDF configuration module in the repository.

@@ -1,0 +1,122 @@
+# Auto Augment
+
+## Overview
+This module provides the functionality to apply predefined AutoAugment policies to batches of images or videos using NVIDIA DALI. It exposes a primary function to select a policy and apply it to a DataNode, along with a convenience wrapper for the most common policy (imageNet). Policies are sourced from NVIDIA's auto augmentation implementations and support optional translation-based magnitudes that depend on the input shape.
+
+Key policies available:
+- image_net
+- reduced_image_net
+- svhn
+- reduced_cifar10
+
+The module handles input validation, optional translation behavior based on shape, and padding/interpolation behavior for transform operations.
+
+## Key Components
+- auto_augment(data, policy_name='image_net', shape=None, fill_value=128, interp_type=None, max_translate_abs=None, max_translate_rel=None, seed=None)  
+  Applies one of the predefined AutoAugment policies to the provided batch (DataNode). Supports optional shape-based translation magnitudes. Performs validation on policy_name and shape usage. Returns a transformed DataNode.
+  - policy_name: One of 'image_net', 'reduced_image_net', 'svhn', 'reduced_cifar10'
+  - shape: Optional; DataNode or (height, width). When provided, translation magnitudes can depend on the shape.
+  - max_translate_abs: Optional int or (int, int); only valid when shape is not provided. Default behavior uses magnitudes up to 250 pixels.
+  - max_translate_rel: Optional float or (float, float); only valid when shape is provided. Default magnitudes can shift up to the entire canvas if set to 1.
+  - fill_value: Padding value for warp operations (translation, rotation, shear). Use None to pad with border value (clamped).
+  - interp_type: Interpolation method for warp operations. Typical values: types.INTERP_LINEAR, types.INTERP_NN.
+  - seed: Seed for reproducible sampling of operations and magnitudes.
+  - Returns: A DataNode containing the transformed batch.
+
+- auto_augment_image_net(data, shape=None, fill_value=128, interp_type=None, max_translate_abs=None, max_translate_rel=None, seed=None)  
+  Convenience wrapper that applies the image_net policy via auto_augment.
+  - See auto_augment for parameter descriptions. This calls:
+    auto_augment(data, "image_net", shape, fill_value, interp_type, max_translate_abs, max_translate_rel, seed)
+
+- _DataNode (DataNode alias)  
+  The DataNode type representing batches of data (images or videos) within a DALI pipeline.
+
+- Policy retrieval and translation handling  
+  The module maps policy names to policy constructors (get_image_net_policy, get_reduced_image_net_policy, get_svhn_policy, get_reduced_cifar10_policy) and handles shape-related translation constraints. Policies that do not rely on image shape (notably 'reduced_image_net') are treated specially.
+
+- Error handling  
+  The function validates policy_name and disallows shape-related arguments for policies that do not use translation magnitudes dependent on shape.
+
+- Dependencies  
+  Requires numpy (import check at import time). Policies are sourced from NVIDIA DALI’s auto_aug module.
+
+## Usage
+
+Basic usage with the most common policy (image_net):
+
+```python
+import numpy as np
+import nvidia.dali.types as types
+from nvidia.dali.data_node import DataNode
+from nvidia.dali.auto_aug import auto_augment
+
+# batch is a DataNode containing a batch of images (HWC, uint8)
+# Example: apply image_net policy with shape-based translation and linear interpolation
+out = auto_augment(
+    data=batch,
+    policy_name='image_net',
+    shape=(224, 224),
+    fill_value=128,
+    interp_type=types.INTERP_LINEAR,
+    max_translate_abs=50,
+    seed=123
+)
+```
+
+Convenience usage with the image_net policy (no shape-based translation):
+
+```python
+from nvidia.dali.auto_aug import auto_augment_image_net
+
+out = auto_augment_image_net(
+    data=batch,
+    shape=None,
+    fill_value=128,
+    interp_type=None,  # defaults to linear interpolation
+    max_translate_abs=None,
+    max_translate_rel=None,
+    seed=42
+)
+```
+
+Using a policy that does not depend on image shape (reduced_image_net):
+
+```python
+out = auto_augment(
+    data=batch,
+    policy_name='reduced_image_net',
+    shape=None,          # must be None or omitted
+    fill_value=128,
+    interp_type=types.INTERP_LINEAR,
+    seed=42
+)
+```
+
+Note: If you specify a shape for a policy that does not rely on shape-based translations (e.g., 'reduced_image_net'), an exception is raised.
+
+## Details
+
+- Policies
+  - image_net: Full AutoAugment policy (as described in the AutoAugment paper).
+  - reduced_image_net: A lighter variant that does not rely on image shape for magnitudes.
+  - svhn: AutoAugment policy tailored to the SVHN dataset.
+  - reduced_cifar10: A reduced variant of the CIFAR-10 policy.
+
+- Shape and Translation Magnitudes
+  - When shape is provided, max_translate_rel controls the maximum fraction of the shape that the translation can traverse.
+  - When shape is not provided, max_translate_abs controls the maximum pixel translation magnitude.
+  - The first element of a tuple controls height translation; the second controls width translation.
+
+- Padding and Interpolation
+  - fill_value specifies the padding value for transformed regions created by translation, rotation, or shear.
+  - interp_type selects the interpolation algorithm for warp operations. Supported values include types.INTERP_LINEAR and types.INTERP_NN.
+
+- Error Handling
+  - Invalid policy_name results in a descriptive exception listing valid options.
+  - Supplying shape-related arguments for policies that do not use shape-based translations raises an exception.
+
+- Implementation notes
+  - The module wires policy selection to corresponding policy factories (get_image_net_policy, get_reduced_image_net_policy, get_svhn_policy, get_reduced_cifar10_policy) and then applies the chosen policy to the input DataNode via apply_auto_augment (internal helper).
+  - It enforces input validity and passes through augmentation parameters such as fill_value, interp_type, and shape when applicable.
+
+If you need deeper customization of the augmentation policies, you can explore the underlying policy builders (get_image_net_policy, get_reduced_image_net_policy, get_svhn_policy, get_reduced_cifar10_policy) within the NVIDIA DALI auto_aug module.

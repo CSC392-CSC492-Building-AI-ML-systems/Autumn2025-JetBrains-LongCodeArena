@@ -1,0 +1,152 @@
+BaseUser
+========
+
+A basic user model for authentication using Piccolo ORM.
+
+Overview
+--------
+BaseUser is a Piccolo Table that provides a simple, pluggable user model with
+built-in password hashing and authentication support. It stores common user
+attributes (username, email, names, etc.) and handles secure password storage
+using PBKDF2 with SHA-256.
+
+Table
+-----
+- Name: piccolo_user
+
+Attributes
+----------
+- id: Serial
+- username: Varchar(length=100, unique=True)
+- password: Secret(length=255)
+- first_name: Varchar(null=True)
+- last_name: Varchar(null=True)
+- email: Varchar(length=255, unique=True)
+- active: Boolean(default=False)
+- admin: Boolean(default=False, help_text="An admin can log into the Piccolo admin GUI.")
+- superuser: Boolean(default=False, help_text="If True, this user can manage other users' passwords in the Piccolo admin GUI.")
+- last_login: Timestamp(null=True, default=None, required=False, help_text="When this user last logged in.")
+
+Internal constants
+------------------
+- _min_password_length = 6
+- _max_password_length = 128
+- _pbkdf2_iteration_count = 600_000
+
+Initialization
+--------------
+__init__(**kwargs)
+- If a password is provided and it does not already look like a hashed value
+  (i.e., does not start with "pbkdf2_sha256"), the password is hashed on
+  initialization.
+
+Salt generation
+---------------
+get_salt()
+- Returns a new random 16-byte salt as a hex string.
+
+Readable representation
+-----------------------
+get_readable() -> Readable
+- Returns a Readable object that represents a row, using the username field.
+
+Password validation
+-------------------
+_validate_password(password: str)
+- Validates a raw (unhashed) password.
+- Checks:
+  - password is provided
+  - length within [_min_password_length, _max_password_length]
+  - password is not already hashed (must not start with "pbkdf2_sha256")
+
+Password updates
+----------------
+update_password_sync(user, password)
+- Sync wrapper for update_password.
+
+update_password(user, password)
+- Async method to update a user’s password.
+- user can be a username (str) or a user id (int).
+- Validates the new password, hashes it, and updates the database.
+
+Password hashing
+----------------
+hash_password(password: str, salt: str = "", iterations: Optional[int] = None) -> str
+- Hashes the raw password for storage.
+- Uses PBKDF2-HMAC-SHA256.
+- Output format: "pbkdf2_sha256$<iterations>$<salt>$<hash>"
+- Enforces maximum password length and computes a salt if none provided.
+- Uses default iterations if not specified (600,000).
+
+Attribute setting
+-----------------
+__setattr__(name: str, value: Any)
+- If setting the password and it is not already hashed, it is hashed
+  before being stored.
+
+Stored password handling
+------------------------
+split_stored_password(password: str) -> List[str]
+- Splits a stored password string into [algorithm, iterations, salt, hash].
+- Validates the format and raises ValueError on invalid input.
+
+Authentication
+--------------
+login_sync(username: str, password: str) -> Optional[int]
+- Sync wrapper for login.
+
+login(username: str, password: str) -> Optional[int]
+- Async authentication method.
+- Verifies that the user exists (by username) and that the provided
+  password matches the stored hash.
+- If authentication succeeds, updates last_login and returns the user id.
+- Returns the user id on success, or None if authentication fails.
+
+Usage examples
+--------------
+Creating a user (password will be hashed automatically if provided in plain text):
+.. code-block:: python
+
+   user = await BaseUser.insert(
+       username="jdoe",
+       password="s3cur3P@ss",
+       email="jdoe@example.com",
+       first_name="John",
+       last_name="Doe",
+       active=True
+   ).run()
+
+Updating a password:
+.. code-block:: python
+
+   await BaseUser.update_password("jdoe", "N3wP@ssw0rd").run()
+
+Sync variant:
+.. code-block:: python
+
+   BaseUser.update_password_sync("jdoe", "N3wP@ssw0rd")
+
+Logging in:
+.. code-block:: python
+
+   user_id = await BaseUser.login("jdoe", "N3wP@ssw0rd")
+   if user_id is not None:
+       print(f"Authenticated user id: {user_id}")
+   else:
+       print("Authentication failed")
+
+Security notes
+--------------
+- Passwords are stored using PBKDF2-HMAC-SHA256 with a high iteration count
+  (default 600,000) and a per-password random salt.
+- Do not pass already-hashed passwords to create or update; the class enforces
+  and warns if a hashed password is provided inadvertently.
+- The initialization path hashes plain-text passwords passed via kwargs.
+
+See also
+--------
+- Piccolo Table and field types (Serial, Varchar, Secret, Boolean, Timestamp)
+- Readable utility for human-friendly table representations
+
+This module provides the BaseUser class, which can be extended or used directly
+for authentication-related user management within applications built on Piccolo.

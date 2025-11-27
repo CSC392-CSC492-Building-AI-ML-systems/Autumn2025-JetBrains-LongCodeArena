@@ -1,0 +1,193 @@
+# ASDF Configuration API
+
+## Overview
+This module provides the central configuration container for ASDF. It exposes a singleton-like configuration accessible via get_config and config_context, and it defines the AsdfConfig class, which manages:
+- resource mappings (custom resources, added at runtime or via entry points)
+- resource manager (which integrates mappings)
+- extensions (registered ASDF extensions)
+- default ASDF Standard version for new files
+- I/O block size and related behavior
+
+All configuration is designed to be thread-safe and lazily initialized to minimize startup costs.
+
+Key constants define sensible defaults and are used to initialize new AsdfConfig instances.
+
+## Key Components
+
+- AsdfConfig
+  - Container for ASDF configuration options.
+  - Thread-safe, lazy-loading properties for resource mappings and extensions.
+  - Methods to modify registered mappings and extensions, with precedence behavior:
+    - New resource mappings and extensions take precedence over previously registered items.
+  - Properties:
+    - resource_mappings: list[ResourceMappingProxy] (lazy-loaded from entry points)
+    - resource_manager: ResourceManager (built from resource_mappings)
+    - extensions: list[ExtensionProxy] (lazy-loaded from entry points)
+    - default_version: str (validated on set)
+    - io_block_size: int
+- DEFAULT_* constants
+  - DEFAULT_VALIDATE_ON_READ = True
+  - DEFAULT_DEFAULT_VERSION = str(versioning.default_version)
+  - DEFAULT_LEGACY_FILL_SCHEMA_DEFAULTS = True
+  - DEFAULT_IO_BLOCK_SIZE = -1  # auto
+  - DEFAULT_ARRAY_INLINE_THRESHOLD = None
+
+- get_config, config_context
+  - Public API to access and temporarily override configuration (exported in __all__).
+
+- Resource and Extension Management
+  - Resource mappings can be added or removed with fine-grained control, including package-based removal.
+  - Extensions can be added or removed, with URI-based matching support for removal.
+
+## Usage
+
+- Access the global configuration (do not construct AsdfConfig directly):
+  ```python
+  from asdf import get_config, config_context
+
+  cfg = get_config()
+  ```
+
+- Inspect registered resource mappings (lazy-loaded from entry points on first access):
+  ```python
+  mappings = cfg.resource_mappings
+  ```
+
+- Add a new resource mapping (new mapping takes precedence):
+  ```python
+  mapping = {
+      "asdf://example/resource": b"example content",
+  }
+  cfg.add_resource_mapping(mapping)
+
+  # The new mapping is now the first in the list and used first by ResourceManager.
+  ```
+
+- Remove a resource mapping (by mapping or by package):
+  ```python
+  # Remove a specific mapping
+  cfg.remove_resource_mapping(mapping=my_mapping)
+
+  # Remove all mappings provided by a package
+  cfg.remove_resource_mapping(package="my_package")
+  ```
+
+- Reset mappings to defaults (entry-point-provided mappings):
+  ```python
+  cfg.reset_resources()
+  ```
+
+- Access the resource manager (built from current mappings):
+  ```python
+  rm = cfg.resource_manager
+  ```
+
+- Manage extensions (new extensions take precedence):
+  ```python
+  ext = ExtensionProxy.maybe_wrap(my_extension)
+  cfg.add_extension(ext)
+
+  # Remove by package or by extension instance
+  cfg.remove_extension(package="my_package")
+  cfg.remove_extension(extension=ext)
+  ```
+
+- Reset extensions to entry-point defaults:
+  ```python
+  cfg.reset_extensions()
+  ```
+
+- Configure default ASDF version for new files (validated on set):
+  ```python
+  cfg.default_version = "1.9.0"
+  ```
+
+- Configure IO block size (block size for reading/writing):
+  ```python
+  cfg.io_block_size = 4096  # or -1 to use filesystem default
+  ```
+
+- Temporarily override configuration with config_context (context manager usage may vary; see implementation for specifics):
+  ```python
+  with config_context():
+      temp_cfg = get_config()
+      temp_cfg.default_version = "1.8.0"
+  # Exiting the context restores prior configuration
+  ```
+
+## Details
+
+- AsdfConfig is designed as a container for configuration options and is not typically instantiated directly by users. Instead, use get_config to access the global configuration and config_context to manage temporary changes.
+- Thread-safety is implemented with a re-entrant lock (self._lock) to guard lazy initialization and updates to:
+  - resource_mappings
+  - resource_manager
+  - extensions
+- Resource mappings are loaded lazily from entry points via entry_points.get_resource_mappings and cached for subsequent access.
+- Extensions are loaded lazily from entry points via entry_points.get_extensions and cached for subsequent access.
+- Precedence rules:
+  - When adding a resource mapping or an extension, the new item is inserted at the beginning of the respective list so that the new item takes precedence over previously registered ones.
+- Removal behavior:
+  - Removal can target a specific mapping/extension or all items from a given package.
+  - For extensions, removing by URI pattern can be performed by providing a string URI pattern; internal matching uses util.uri_match.
+- Default values:
+  - DEFAULT_VALIDATE_ON_READ controls whether validation occurs on read by default.
+  - DEFAULT_DEFAULT_VERSION defines the initial default ASDF Standard version used for new files.
+  - DEFAULT_LEGACY_FILL_SCHEMA_DEFAULTS controls legacy schema default filling behavior.
+  - DEFAULT_IO_BLOCK_SIZE specifies the default I/O block size; -1 means auto.
+  - DEFAULT_ARRAY_INLINE_THRESHOLD configures inlining behavior for arrays.
+
+The following excerpt from the code illustrates key behaviors:
+
+- Inserting a new resource mapping at the beginning (high precedence):
+  ```python
+  def add_resource_mapping(self, mapping):
+      with self._lock:
+          mapping = ResourceMappingProxy.maybe_wrap(mapping)
+
+          # Insert at the beginning of the list so that
+          # ResourceManager uses the new mapping first.
+          resource_mappings = [mapping] + [r for r in self.resource_mappings if r != mapping]
+          self._resource_mappings = resource_mappings
+          self._resource_manager = None
+  ```
+
+- Removal condition for resource mappings (by mapping and/or package):
+  ```python
+  def remove_resource_mapping(self, mapping=None, *, package=None):
+      # ... validation omitted for brevity ...
+      def _remove_condition(m):
+          result = True
+          if mapping is not None:
+              result = result and m == mapping
+          if package is not None:
+              result = result and m.package_name == package
+          return result
+
+      with self._lock:
+          self._resource_mappings = [m for m in self.resource_mappings if not _remove_condition(m)]
+          self._resource_manager = None
+  ```
+
+- Default version setter (validation applied on set):
+  ```python
+  @property
+  def default_version(self):
+      return self._default_version
+
+  @default_version.setter
+  def default_version(self, value):
+      self._default_version = validate_version(value)
+  ```
+
+- IO block size property (getter and setter):
+  ```python
+  @property
+  def io_block_size(self):
+      return self._io_block_size
+
+  @io_block_size.setter
+  def io_block_size(self, value):
+      self._io_block_size = value
+  ```
+
+This documentation summarizes how the configuration system operates and how to interact with it to customize resource handling, extensions, and general ASDF behavior. For full API details, refer to the source comments and method docstrings in config.rst.

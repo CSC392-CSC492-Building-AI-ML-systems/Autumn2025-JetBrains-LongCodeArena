@@ -1,0 +1,116 @@
+Imputation with Multiple Imputation by Chained Equations (MICE)
+---------------------------------------------------------------
+
+This module provides an implementation of the MICE approach for handling missing data in statistical analyses. It enables iterative imputation of missing values using regression models (one per variable with missing data), supports predictive mean matching, and allows combining results from multiple imputations with an analysis model.
+
+Introduction
+- Purpose: Provide a flexible, extensible framework for performing multiple imputation via chained equations, including data handling, imputation model specification, perturbation methods, and results combination.
+- Core idea: Iteratively model each variable with missing values given the others, imputing values in a chained sequence, repeating across cycles to produce multiple complete datasets, and optionally fitting an analysis model and combining estimates.
+
+Terminology
+- Analysis model: The statistical model fit to the imputed data for inference (e.g., regression). If not specified, the focus is on producing imputed datasets.
+- Imputation model: A regression model used to impute a missing value for a given variable (the focus variable), conditioned on other variables.
+- Perturbation method: How parameter estimates used in imputations are perturbed to reflect uncertainty. Examples include:
+  - gaussian: draw parameters from a Gaussian approximation to the posterior (default).
+  - boot: use parameters from a bootstrapped fit.
+- Predictive Mean Matching (PMM): The preferred imputation method used to fill missing values for a focus variable by drawing observed values with similar predicted means.
+- MICEData: A wrapper around a pandas DataFrame that manages per-variable imputation models and progression through imputation cycles.
+- MICE: Orchestrates the full multiple imputation workflow, including running imputations, fitting the analysis model, and combining results.
+- MICEResults: The object returned after combining results from multiple imputations, providing summary statistics and inferential quantities.
+
+Class structure
+- PatsyFormula
+  - A lightweight wrapper around a string to be interpreted as a Patsy formula.
+  - Purpose: Provide a simple, consistent way to pass regression formulas to imputation models.
+  - Key attribute:
+    - formula: the formula string with an implicit “0 +” prefix to indicate no intercept unless specified.
+
+- MICEData
+  - Purpose: Wrap a pandas DataFrame and manage the per-variable imputation models and cycles.
+  - Constructor
+    - __init__(data, perturbation_method='gaussian', k_pmm=20, history_callback=None)
+      - data: Pandas DataFrame to be imputed (copied internally).
+      - perturbation_method: default perturbation method for imputation models (e.g., 'gaussian' or 'boot').
+      - k_pmm: number of nearest neighbors to use in predictive mean matching.
+      - history_callback: optional function invoked after each complete imputation cycle; the function receives the MICEData instance and its return value is stored in a history list.
+  - Key attributes
+    - data: current imputed data (DataFrame), accessible for inspection or export.
+    - history: collection of items produced by history_callback across cycles (if provided).
+  - Important methods (as illustrated by the module docstring examples)
+    - set_imputer(variable, formula=None, model=None, perturbation_method=None, k=None)
+      - Configure the imputation model for a specific variable (the focus variable) with a regression formula or a custom model.
+    - update_all()
+      - Perform an imputation cycle across all variables that have missing values, updating the imputed values in place.
+    - __iter__()
+      - Allow iteration over imputations, enabling usage like: for data in imp: ...
+    - Implicit behavior
+      - On entry, the provided DataFrame is copied; subsequent updates overwrite the working dataset.
+      - When used in conjunction with MICE, fitted analysis models and results may be saved, while MICEData itself is optimized to minimize memory usage.
+  - Notes
+    - By default memory usage is conservative: relatively little historical state is kept between iterations.
+    - The history_callback hook enables saving intermediate imputed datasets or derived features for downstream analysis.
+
+- MICE
+  - Purpose: Execute the full multiple imputation workflow using a MICEData instance and an analysis model specification, then combine results.
+  - Expected behavior (as described in the module docstring):
+    - Run the imputation cycles (as provided by MICEData) to generate multiple imputed datasets.
+    - Fit the specified analysis model to each imputed dataset.
+    - Combine parameter estimates and standard errors across imputations into a single MICEResults object.
+    - Provide a summary method (on MICEResults) to reveal key estimands and inferential quantities.
+  - Typical usage pattern:
+    - Create MICEData with data and configure imputations.
+    - Instantiate MICE with the MICEData instance and a specification for the analysis model.
+    - Run the imputation and analysis, then call combine or summary to retrieve results.
+
+Usage examples
+- Example 1: Produce imputed datasets and save them to disk
+  - This demonstrates configuring an imputer for a variable and iterating imputations.
+  - Code:
+    >>> import mice  # module name as suggested by examples
+    >>> imp = mice.MICEData(data)
+    >>> imp.set_imputer('x1', formula='x2 + np.square(x2) + x3')
+    >>> for j in range(20):
+    ...     imp.update_all()
+    ...     imp.data.to_csv('data%02d.csv' % j)
+
+- Example 2: Iterate over imputed datasets
+  - Code:
+    >>> imp = mice.MICEData(data)
+    >>> j = 0
+    >>> for data in imp:
+    ...     data.to_csv('data%02d.csv' % j)
+    ...     j += 1
+
+Important considerations and edge cases
+- Memory usage
+  - MICEData is designed to be memory-efficient by default; it copies the input data on entry and then overwrites in place during iterations.
+  - If you need to preserve intermediate imputations, implement a history_callback to capture and store them.
+- Perturbation methods
+  - gaussian perturbation samples parameter estimates from a Gaussian approximation of the fit, enabling uncertainty capture without re-fitting for each imputation.
+  - boot perturbation uses fitted parameters from bootstrap-resampled data, which can diversify imputations.
+- Formula and model specification
+  - Imputation models may be specified using formulas (via Patsy) or custom models.
+  - The default imputation model is ordinary least squares (OLS) with a formula that includes main effects of the remaining variables.
+  - Predictive Mean Matching (PMM) is the current standard method used for imputing missing values in a focus variable.
+- Missing data patterns and diagnostics
+  - The module provides plotting utilities and history hooks for diagnosing missing data patterns and imputation performance.
+  - While defaults are sensible, practitioners should inspect imputation diagnostics and consider tuning k_pmm, perturbation_method, and model specifications for robust results.
+- Edge conditions
+  - If all values for a variable are missing, PMM cannot operate; ensure proper handling or imputation strategy for such cases.
+  - Formula compatibility with the data types and transformations (e.g., square terms) should be verified to avoid incompatibilities in Patsy-formulated regressions.
+
+Implementation notes
+- The module’s primary classes are designed to work together:
+  - MICEData manages the per-variable imputation models and the iterative cycle.
+  - MICE coordinates the imputation process with an analysis model and result combination.
+  - PatsyFormula provides a simple integration point for user-specified regression formulas.
+- Referenced references (Schafer, Raghunathan et al., SAS PMM guide, Gelman et al.) provide theoretical background and practical guidance for multiple imputation with diagnostics.
+
+References
+- JL Schafer: Multiple Imputation: A Primer, Stat Methods Med Res, 1999.
+- TE Raghunathan et al.: A Multivariate Technique for Multiply Imputing Missing Values Using a Sequence of Regression Models, Survey Methodology, 2001.
+- SAS Institute: Predictive Mean Matching Method for Monotone Missing Data, SAS 9.2 User's Guide, 2014.
+- A Gelman et al.: Multiple Imputation with Diagnostics (mi) in R: Opening Windows into the Black Box, Journal of Statistical Software, 2009.
+
+Notes
+- The documentation reflects the intended API as described in the module docstring, including the example usage snippets embedded in the source. The actual implementation may evolve; refer to the codebase for the exact method signatures and behavior.

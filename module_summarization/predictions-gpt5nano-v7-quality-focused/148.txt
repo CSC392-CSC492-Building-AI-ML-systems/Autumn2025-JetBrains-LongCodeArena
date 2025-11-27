@@ -1,0 +1,121 @@
+# HDF5 Parser: General reader transformations
+
+This document explains the predefined transformations used by the general HDF5 reader in Masci-tools. The transforms operate on datasets read from HDF5 files and support inputs as h5py.Dataset, numpy arrays, or dictionaries of datasets.
+
+Overview
+- Purpose: Provide common, reusable operations for reading and transforming HDF5 data.
+- Input types supported:
+  - h5py.Dataset
+  - numpy.ndarray
+  - dict with values of the above types (each value is transformed independently)
+- Behavior: Each transformation is registered on HDF5Reader and can be invoked by name. Transformations wrap exceptions and raise HDF5TransformationError on failure.
+- Attribute-aware transforms: Some transformations can depend on a previously processed attribute value. The system tracks such transforms via an attribute-transforms registry.
+
+Transformation mechanism
+- Registration
+  - Decorator: hdf5_transformation(attribute_needed)
+  - Each decorated function gets registered in HDF5Reader._transforms under its function name.
+  - If attribute_needed is True, the function name is additionally recorded in HDF5Reader._attribute_transforms.
+- Error handling
+  - Each transform is wrapped so that any exception raises HDF5TransformationError with a descriptive message.
+- Usage pattern
+  - Transforms are invoked by name from the HDF5Reader’s transformation registry, e.g.:
+    - HDF5Reader._transforms['get_shape'](dataset)
+    - HDF5Reader._transforms['index_dataset'](dataset, index)
+
+Available transformations
+Note: All functions are registered as transforms via the decorator in this module.
+
+- get_first_element(dataset)
+  - Description: Returns the first element of the dataset.
+  - Behavior:
+    - If dataset is a dict: applies to each value and returns {key: value[0]}.
+    - Otherwise: returns dataset[0].
+
+- index_dataset(dataset, index)
+  - Description: Returns the n-th element of the dataset.
+  - Behavior:
+    - If dataset is a dict: returns {key: data[index]} for each item.
+    - Otherwise: returns dataset[index].
+
+- slice_dataset(dataset, slice_arg)
+  - Description: Slices the dataset with the given slice argument.
+  - Behavior:
+    - If dataset is a dict: returns {key: data[slice_arg]} for each item.
+    - Otherwise: returns dataset[slice_arg].
+
+- get_shape(dataset)
+  - Description: Gets the shape of the dataset.
+  - Behavior:
+    - If dataset is a dict: returns {key: data.shape} for each item.
+    - Otherwise: returns dataset.shape.
+
+- get_name(dataset, full_path=False)
+  - Description: Gets the name of the dataset.
+  - Behavior:
+    - For lists or numpy arrays: raises ValueError (dataset must be a h5py.Dataset).
+    - If dataset is a dict:
+      - full_path=True: {key: data.name}
+      - full_path=False: {key: data.name.split('/')[-1]}
+      - For non-dict: full_path=True: dataset.name; else: dataset.name.split('/')[-1]
+  - Note: This transform is designed to work with single datasets or dictionaries of datasets.
+
+- tile_array(dataset, n_repeats)
+  - Description: Repeats the array using numpy.tile.
+  - Behavior:
+    - If dataset is a dict: returns {key: np.tile(dataset, n_repeats) for key, data in dataset.items()}
+      - Important: In this implementation, the tiling uses the outer dataset variable, not the per-entry value. This may not be the intended per-entry tiling.
+    - Otherwise: returns np.tile(dataset, n_repeats)
+
+- repeat_array(dataset, n_repeats)
+  - Description: Repeats each element of the array using numpy.repeat.
+  - Behavior:
+    - If dataset is a dict: returns {key: np.repeat(dataset, n_repeats) for key, data in dataset.items()}
+      - As with tile_array, the implementation repeats the outer dataset variable for dict inputs, which likely differs from per-entry repetition.
+    - Otherwise: returns np.repeat(dataset, n_repeats)
+
+- get_all_child_datasets(group, ignore=None, contains=None)
+  - Description: Collects all child datasets contained in the given group.
+  - Parameters:
+    - group: an h5py group-like object
+    - ignore: string or iterable of strings; keys containing any of these phrases are ignored
+    - contains: string or iterable of strings; only keys containing all phrases are kept
+  - Behavior:
+    - Normalizes ignore to a set; accepts a single string
+    - Iterates over group items and selects those that are h5py.Dataset instances
+    - Returns a dict {key: val} mapping dataset names to h5py.Dataset objects
+  - Example:
+    - datasets = get_all_child_datasets(group, ignore='backup', contains='prop')
+
+Practical examples
+
+- Basic shape retrieval for a simple dataset
+  - shape = HDF5Reader._transforms['get_shape'](dataset)
+
+- Shape retrieval for a dictionary of datasets
+  - shapes = HDF5Reader._transforms['get_shape'](datasets_dict)
+
+- Getting the first element from a nested dictionary of datasets
+  - first = HDF5Reader._transforms['get_first_element'](datasets_dict)
+
+- Getting names for a single dataset or a dictionary
+  - name = HDF5Reader._transforms['get_name'](dataset, full_path=False)
+  - names = HDF5Reader._transforms['get_name'](datasets_dict, full_path=True)
+
+- Getting all child datasets from a group with filters
+  - child_datasets = HDF5Reader._transforms['get_all_child_datasets'](group, ignore='temp', contains='data')
+
+Caveats and notes
+- Dict-path behavior
+  - Some transforms implement per-entry operations for dictionaries. Ensure to verify the expected shape of the output (dict vs. scalar) for your use case.
+- tile_array and repeat_array caveat
+  - In the current code, the dict-path implementation uses the outer dataset variable when tiling/repeating, not each inner value. This likely results in incorrect per-entry tiling/repetition. Use with caution or adjust if per-entry behavior is required.
+- Error handling
+  - All registered transforms raise HDF5TransformationError when an exception occurs. This provides a consistent error surface for debugging in pipelines.
+
+See also
+- HDF5Reader class (core reader that holds _transforms and _attribute_transforms)
+- The decorator hdf5_transformation for registering new transforms
+
+Implementation reference
+- The transforms are defined in this module and registered at import time via the hdf5_transformation decorator. Each transform can be invoked through HDF5Reader._transforms by name, and those marked with attribute_needed are tracked in HDF5Reader._attribute_transforms.

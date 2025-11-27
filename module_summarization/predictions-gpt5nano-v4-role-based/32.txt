@@ -1,0 +1,125 @@
+w_run
+=====
+
+Overview
+--------
+
+w_run is the WestPA command used to start or continue a WEST simulation. It wires together the runtime configuration, drivers, and work manager, then executes the simulation either as a master process (orchestrating the run) or as a worker process (propagating segments under the master’s control).
+
+Key features
+- Starts a new run or continues an existing one.
+- Supports debugging by propagating a single segment via --oneseg.
+- Automatically loads the sim manager, system, data manager, propagator, and we_driver from the WestPA runtime configuration (westpa.rc).
+- Distinguishes master and worker roles via the work manager; master handles I/O and plugin loading, workers perform propagation work.
+- Graceful shutdown on KeyboardInterrupt or other exceptions, with status reporting.
+
+Invocation
+----------
+
+Typical usage when the script is installed as a command (w_run):
+
+- Start or continue a WEST simulation:
+  w_run [options]
+
+- The entry point wires together argument parsing, runtime configuration, and the simulation run.
+
+Arguments
+---------
+
+Common and WestPA runtime arguments are provided via the WestPA runtime configuration. Specifically:
+
+- --oneseg (alias: --only_one_segment)
+  - Destination: only_one_segment (bool)
+  - Help: propagate only one segment (useful for debugging propagators)
+
+- WM (work manager) arguments
+  - Added to the parser by: work_managers.environment.add_wm_args(parser)
+  - These arguments configure the work manager environment, allowing control over runtime behavior and parallel/work-distribution settings as implemented by the WestPA work managers subsystem.
+
+Notes
+- The command-line interface uses westpa.rc to manage runtime configuration and to obtain the core drivers and managers (sim_manager, system, data_manager, propagator, we_driver).
+
+Execution flow
+--------------
+
+1. Create the work manager:
+   - work_manager = westpa.rc.work_manager = make_work_manager()
+
+2. Load drivers and managers from the runtime configuration:
+   - sim_manager = westpa.rc.get_sim_manager()
+   - system = westpa.rc.get_system_driver()
+   - data_manager = westpa.rc.get_data_manager()
+   - we_driver = westpa.rc.get_we_driver()
+   - propagator = westpa.rc.get_propagator()
+
+3. Wire components together:
+   - propagator.system = system
+   - data_manager.system = system
+   - we_driver.system = system
+   - sim_manager.data_manager = data_manager
+   - sim_manager.system = system
+   - sim_manager.propagator = propagator
+   - sim_manager.we_driver = we_driver
+
+4. Run under the work manager context:
+   - with work_manager:
+     - If work_manager.is_master:
+       - Install a SIGINT handler via install_sigint_handler()
+       - sim_manager.load_plugins()
+       - sim_manager.prepare_run()
+       - Try:
+         - sim_manager.run()
+         - sim_manager.finalize_run()
+       - Except KeyboardInterrupt:
+         - westpa.rc.pstatus('interrupted; shutting down')
+       - Except Exception as e:
+         - westpa.rc.pstatus('exception caught; shutting down')
+         - Log the error message (if any)
+         - Log the full traceback
+     - Else (worker process):
+       - work_manager.run()
+
+5. Entry point:
+   - If the script is executed as the main module, entry_point() is invoked, which performs argument parsing, applies runtime configuration, and calls run_simulation().
+
+Master vs Worker behavior
+-------------------------
+
+- Master:
+  - Responsible for orchestrating the run.
+  - Loads plugins, prepares the run, starts propagation, and finalizes the run.
+  - Handles SIGINT and overall error reporting.
+
+- Worker:
+  - Performs propagation duties delegated by the master.
+  - Relies on the work manager to coordinate work distribution.
+
+Plugins and drivers
+--------------------
+
+- Plugins are loaded by sim_manager.load_plugins() on the master.
+- All required drivers (system, data_manager, propagator, we_driver) are retrieved via westpa.rc and wired together before the run begins.
+
+Environment integration
+-----------------------
+
+- The command accepts WM-related arguments provided by work_managers.environment.add_wm_args(parser).
+- This design centralizes runtime configuration for the work manager and its environment, allowing flexible setup for distributed or parallel execution scenarios.
+
+Examples
+--------
+
+- Start a new run with default configuration:
+  w_run
+
+- Continue a previous run with standard configuration and enable single-segment debugging:
+  w_run --oneseg
+
+- Use additional work manager options (provided by the environment module):
+  w_run [other-wm-args] --oneseg
+
+Notes
+-----
+
+- The command is resilient to interrupts and exceptions, reporting status via westpa.rc.pstatus and logging detailed tracebacks for debugging.
+- The exact set of WM arguments depends on the WestPA version and the configured work managers; consult your environment’s work manager documentation for available options.

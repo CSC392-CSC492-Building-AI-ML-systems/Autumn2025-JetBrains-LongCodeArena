@@ -1,0 +1,220 @@
+# Working with Large Data Sets
+
+This document describes how to work with large data sets using the distributed estimation routines provided in the large_data module. The framework supports sequential and parallel execution, with several backends via Joblib. It enables both naive coefficient averaging and debiased regularized estimation, making it suitable for large-scale linear-model problems where computing a single global fit is impractical.
+
+---
+
+## Overview
+
+- Partition the data into P partitions and fit models on each partition independently.
+- Combine local results to form a global estimator.
+- Supported modes:
+  - Sequential (no extra dependencies)
+  - Parallel via Joblib
+    - Backends through Joblib (e.g., dask.distributed, yarn, ipyparallel)
+
+- Estimation approaches:
+  - Naive coefficient averaging (regularized or unregularized)
+  - Regularized debiased estimation (default with debiasing)
+
+- The debiasing approach follows the methodology described in:
+  Jason D. Lee, Qiang Liu, Yuekai Sun and Jonathan E. Taylor.  
+  "Communication-Efficient Sparse Regression: A One-Shot Approach." arXiv:1503.04337 (2015).
+
+- Key constructs used in the debiasing procedure:
+  - wexog: Weighted design matrix used for node-wise regression.
+  - nodewise_row: Result of node-wise regression for each predictor.
+  - nodewise_weight: Weights derived from gamma_hat for forming the approximate inverse covariance.
+  - approx_inv_cov: Approximate inverse covariance matrix used to debias the averaged coefficients together with the average gradient.
+
+---
+
+## Data Model and Partitions
+
+- Partitioning concept:
+  - The dataset is split into P partitions.
+  - Each partition p has its own design matrix X_p and response y_p, with a local model mod (e.g., OLS with endog y_p and exog X_p).
+
+- Local models:
+  - For a partition p, construct a model instance (e.g., Statsmodels OLS) using the partition’s data.
+  - Local estimation is then performed via one of the helper functions described below.
+
+- Global aggregation:
+  - After computing local estimates, results are joined (averaged) or used to form a debiased global estimate via the provided debiasing routines.
+
+---
+
+## Core Functions (Developer Reference)
+
+The following functions are intended to be used when implementing distributed estimation workflows. They operate on per-partition models (mod) and return parameter vectors or intermediate objects that are combined across partitions.
+
+- _est_regularized_naive(mod, pnum, partitions, fit_kwds=None)
+  - Purpose: Estimate regularized coefficients on a single partition.
+  - Arguments:
+    - mod: A Statsmodels model instance for the current partition.
+    - pnum: Partition index (0-based).
+    - partitions: Total number of partitions.
+    - fit_kwds: Keyword arguments forwarded to fit_regularized.
+  - Returns: 1D array of coefficients for the local fit.
+
+- _est_unregularized_naive(mod, pnum, partitions, fit_kwds=None)
+  - Purpose: Estimate unregularized coefficients on a single partition.
+  - Arguments: same as above, but uses mod.fit.
+  - Returns: 1D array of coefficients for the local fit.
+
+- _join_naive(params_l, threshold=0)
+  - Purpose: Join results from multiple partitions by computing the mean.
+  - Arguments:
+    - params_l: List of coefficient arrays (one per partition).
+    - threshold: Coefficient threshold; values with abs(coeff) < threshold are set to zero.
+  - Returns: 1D array of the (thresholded) averaged coefficients.
+
+- _calc_grad(mod, params, alpha, L1_wt, score_kwds)
+  - Purpose: Compute the gradient of the log-likelihood for debiasing.
+  - Arguments:
+    - mod: Model for the current partition.
+    - params: Estimated coefficients for the current partition.
+    - alpha, L1_wt: Regularization parameters.
+    - score_kwds: Extra keyword arguments for the score function.
+  - Returns: Gradient vector (same length as params).
+
+- _calc_wdesign_mat(mod, params, hess_kwds)
+  - Purpose: Compute a weighted design matrix used in forming the approximate inverse covariance.
+  - Arguments:
+    - mod: Model for the current partition.
+    - params: Estimated coefficients for the current partition.
+    - hess_kwds: Extra keyword arguments for the Hessian.
+  - Returns: Updated design matrix (same shape as mod.exog).
+
+- _est_regularized_debiased(mod, mnum, partitions, fit_kwds=None,
+                              score_kwds=None, hess_kwds=None)
+  - Purpose: Debiased regularized estimation for a single partition.
+  - Arguments:
+    - mod: Model for the current partition.
+    - mnum: Partition index.
+    - partitions: Total number of partitions.
+    - fit_kwds, score_kwds, hess_kwds: Keyword arguments passed to fit_regularized, score, and Hessian routines respectively.
+  - Returns: A tuple related to the regularized fit appropriate for the debiasing workflow (e.g., coefficient vector and intermediate debiasing diagnostics).
+
+Notes:
+- The debiasing workflow relies on forming an approximate inverse covariance (via node-wise regression, gamma_hat weights, and the wexog construct) and combining it with averaged gradients to correct the naive averaged estimate.
+
+---
+
+## Example Workflows
+
+Below are representative workflows for common scenarios. Replace placeholders with your actual data and desired hyperparameters.
+
+1) Minimal sequential naive regularized fit (single partition)
+
+- Prepare a partition:
+  - mod = OLS(y_p, X_p)  # per-partition data
+- Fit locally:
+  - fit_kwds = {'alpha': 0.01, 'L1_wt': 0.5}  # example keys; pass what fit_regularized expects
+  - local_params = _est_regularized_naive(mod, pnum=0, partitions=1, fit_kwds=fit_kwds)
+- Join (only one partition, but kept for API consistency):
+  - params = _join_naive([local_params], threshold=0.0)
+
+2) Parallel naive regularized fit with Joblib
+
+- Define per-partition work:
+  - Each partition p has mod_p = OLS(y_p, X_p)
+  - Each worker returns local_params_p = _est_regularized_naive(mod_p, p, P, fit_kwds=fit_kwds)
+- Run in parallel:
+  - from joblib import Parallel, delayed
+  - results = Parallel(n_jobs=4)(delayed(lambda p: _est_regularized_naive(mod_p_list[p], p, P, fit_kwds))(p) for p in range(P))
+  - params = _join_naive(results, threshold=0.0)
+
+Notes:
+- Ensure mod_p_list contains the per-partition model instances (or construct them inside the delayed function).
+- After gathering local_params, average them with _join_naive.
+
+3) Parallel debiased regularized estimation (advanced)
+
+- For each partition p:
+  - mod_p = OLS(y_p, X_p)
+  - local_debiased = _est_regularized_debiased(mod_p, mnum=p, partitions=P,
+                                              fit_kwds=fit_kwds,
+                                              score_kwds=score_kwds,
+                                              hess_kwds=hess_kwds)
+- Aggregate across partitions using the appropriate debiasing aggregation rule (the specifics depend on your implementation; typically involves combining the locally debiased estimates with the averaged gradient and the approximate inverse covariance).
+- Optional: compute the per-partition wdesign_mat via _calc_wdesign_mat and assemble the global approx_inv_cov.
+
+Code sketch (illustrative):
+
+- Naive parallel:
+  - fit_kwds = {'alpha': 0.01, 'L1_wt': 0.5}
+  - def fit_partition(p):
+      mod_p = OLS(y_p_list[p], X_p_list[p])
+      return _est_regularized_naive(mod_p, p, P, fit_kwds)
+  - local_params = joblib.Parallel(n_jobs=4)(joblib.delayed(fit_partition)(p) for p in range(P))
+  - params = _join_naive(local_params, threshold=0.0)
+
+- Debiased parallel (high level):
+  - score_kwds = {}
+  - hess_kwds = {}
+  - def debias_partition(p):
+      mod_p = OLS(y_p_list[p], X_p_list[p])
+      return _est_regularized_debiased(mod_p, mnum=p, partitions=P,
+                                       fit_kwds=fit_kwds,
+                                       score_kwds=score_kwds,
+                                       hess_kwds=hess_kwds)
+  - local_debiased = joblib.Parallel(n_jobs=4)(joblib.delayed(debias_partition)(p) for p in range(P))
+  - Combine local_debiased into a global estimator according to the debiasing protocol (requires implementation-specific logic).
+
+References:
+- For the debiasing method and estimator form, refer to the paper:
+  Jason D. Lee, Qiang Liu, Yuekai Sun and Jonathan E. Taylor. "Communication-Efficient Sparse Regression: A One-Shot Approach." arXiv:1503.04337 (2015).
+
+---
+
+## Practical Considerations
+
+- Memory usage:
+  - Partitioning reduces per-worker memory requirements but increases the number of communications steps.
+  - Debiasing involves additional storage for node-wise regressions and the approximate inverse covariance; manage memory accordingly.
+
+- Communication cost:
+  - Naive averaging is minimal (one vector per partition).
+  - Debiasing requires sharing gradients, inverse-covariance components, and possibly wexog-based matrices. Plan network bandwidth and serialization accordingly.
+
+- Backend selection:
+  - Sequential: no extra dependencies; simple for small-to-medium data.
+  - Joblib parallel:
+    - Local clusters: 'loky' backend by default.
+    - Dask, Yarn, ipyparallel backends are supported via Joblib’s interface; consult your environment to configure the appropriate backend.
+
+- Thresholding:
+  - _join_naive supports a threshold to prune small coefficients after averaging. Choose a threshold based on the scale of your problem and desired sparsity.
+
+- Validation:
+  - Compare the distributed results against a single-machine full-data fit (when feasible) to validate correctness.
+  - Use cross-validation or held-out data to monitor predictive performance.
+
+---
+
+## References and Further Reading
+
+- Regularized and debiased estimation approach
+  - Lee, Liu, Sun, Taylor (2015): “Communication-Efficient Sparse Regression: A One-Shot Approach.” arXiv:1503.04337
+- Statsmodels API
+  - OLS, fit_regularized, score, and Hessian-related utilities
+- Distributed computing with Joblib
+  - Joblib backend options (loky, threading, multiprocessing) and integration with external cluster managers (dask.distributed, yarn, ipyparallel)
+
+---
+
+## Appendix: Mapping to Code
+
+- _est_regularized_naive and _est_unregularized_naive
+  - Purpose: Local estimation on a partition.
+- _join_naive
+  - Purpose: Global aggregation by averaging local estimates; applies thresholding.
+- _calc_grad
+  - Purpose: Compute gradient for the debiasing step; combines model score with L1/L2 penalty terms.
+- _calc_wdesign_mat
+  - Purpose: Build the weighted design matrix used in forming approx_inv_cov.
+- _est_regularized_debiased
+  - Purpose: Local debiased regularized estimation suitable for the debiasing workflow.
+
+This documentation provides a developer-oriented guide to working with large data sets using the distributed estimation routines. Use the examples as templates to adapt to your data layout and computational environment.

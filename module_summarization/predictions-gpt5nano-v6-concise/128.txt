@@ -1,0 +1,184 @@
+# Miscellaneous features of astropy.io.fits (misc.rst)
+
+This section documents the miscellaneous, but commonly used, features implemented in the fits subpackage that are not specific to I/O operations themselves. It focuses on the verification framework, error-list formatting, and the notifier mechanism that is used internally to propagate changes and events.
+
+---
+
+## Overview
+
+The `astropy.io.fits` package provides small but useful utilities that developers may leverage when building higher-level functionality or diagnostics:
+
+- A verification framework that can check internal consistency and report/fix problems.
+- A structured error-list container that supports nested groups and readable formatting.
+- A lightweight notifier mixin that allows objects to publish events to registered listeners.
+
+These features are implemented in a generic way and can be adapted or subclassed for custom FITS-related validation tasks.
+
+---
+
+## Verification framework
+
+The verification framework is designed to report, warn, or fix problems discovered during validation. It is implemented by a small set of classes and utilities:
+
+Key components
+- `VerifyError` and `VerifyWarning`: exception and warning types used by the verification system.
+- `VERIFY_OPTIONS`: a list of supported options for verification.
+- `_Verify`: a mixin-like class that provides the core verification logic:
+  - `run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)`: executes a single verification step according to the selected option. Returns a tuple `(fixable, text)` where:
+    - `fixable` indicates whether the issue can be fixed.
+    - `text` is the message to report (including any fixactions if applicable).
+  - `verify(option="warn")`: runs the verification for all values produced by `_verify`, and reports or raises as dictated by the option.
+
+How the verification options work
+- The option can be a simple string such as:
+  - `"ignore"`, `"warn"`, `"exception"`, `"fix"`, or `"silentfix"`.
+- It can also be a combination of fixing and reporting via a `+`:
+  - Examples: `"fix+warn"`, `"silentfix+ignore"`, `"fix+exception"`, etc.
+- When the option includes `"ignore"`, verification is skipped.
+- If the option is a combination with fixing (e.g., `"fix+warn"`), the system will attempt to fix fixable errors and report results according to the reporting portion of the option.
+
+Usage pattern (example)
+- Subclass `_Verify` and implement `_verify(self, option)` to return an `_ErrList` describing any found issues.
+- Call `verify(option)` on an instance to apply the chosen reporting/fixing behavior.
+
+Example skeleton
+```python
+from astropy.io.fits.misc import _Verify, _ErrList  # internal API
+
+class FITSHeaderVerifier(_Verify):
+    def __init__(self, header):
+        self.header = header
+
+    def _verify(self, option):
+        errs = _ErrList(unit="Header")
+        # Example checks
+        if "SIMPLE" not in self.header.cards:
+            errs.append((True, "Missing required 'SIMPLE' card."))
+        if "BITPIX" not in self.header.cards:
+            errs.append((True, "Missing required 'BITPIX' card."))
+
+        # Nested group example
+        sub = _ErrList(unit="Card group")
+        if self.header.get("NAXIS", None) != 2:
+            sub.append((False, f"NAXIS is {self.header.get('NAXIS')}, expected 2."))
+        if len(sub) > 0:
+            errs.append(sub)
+
+        return errs
+```
+
+Usage
+```python
+verifier = FITSHeaderVerifier(header)
+verifier.verify(option="warn")            # prints warnings for fixable items
+verifier.verify(option="fix")             # attempts to fix and report
+verifier.verify(option="silentfix+ignore")  # fixes are performed but nothing is reported
+```
+
+Notes
+- The actual implementation of `_verify` is up to you; the framework handles formatting and reporting.
+- The framework uses zero-based indexing; this is noted in the verification report.
+
+---
+
+## Error list structure: `_ErrList`
+
+`_ErrList` is a nested list structure designed to represent verification errors in a hierarchical, readable way.
+
+- Initialization: `_ErrList(val=(), unit="Element")`
+  - `val`: initial contents (default empty).
+  - `unit`: a label used to header the nested sections (e.g., "Header", "Card group").
+
+- Core methods:
+  - `__str__(self)`: returns a human-readable string of the error messages, with appropriate indentation.
+  - `iter_lines(self, filter=None, shift=0)`: iterates over the nested structure and yields pairs `(fixable, message)` or header lines for nested content. It supports:
+    - `filter`: a callable to filter which items to yield (applied to the top-level items).
+    - `shift`: indentation level (used internally to generate readable output).
+
+Usage patterns
+- Top-level items are typically tuples of `(fixable, message)`, where:
+  - `fixable` is a boolean indicating whether the item can be fixed (or `None` if not applicable).
+  - `message` is the human-readable description.
+- Nested `_ErrList` items create grouped sections with headers like "`Header 0:`" and nested lines beneath.
+
+Example structure
+- A top-level error list might contain:
+  - `(True, "Missing required 'SIMPLE' card.")`
+  - A nested `_ErrList` containing:
+    - `(False, "NAXIS is not 2.")`
+  - The string conversion yields:
+    - A readable, indented report of issues with a header for each nested group.
+
+Tips
+- Use the `unit` parameter to provide meaningful headers for nested sections (e.g., `unit="Header"` or `unit="Card group"`).
+- The nested structure is especially helpful when reporting multiple categories of issues in a single verification run.
+
+---
+
+## Notifier mixin: `NotifierMixin`
+
+The `NotifierMixin` provides a lightweight, internal mechanism for objects to publish events to registered listeners. It is intended for internal communication between components within the FITS-related code.
+
+Key concepts
+- Listener registration:
+  - Use the internal method (described in the docstring) to register a listener on an instance.
+  - Listeners are held with weak references, so they do not prevent garbage collection.
+- Notification:
+  - Call `._notify(change_type, *args, **kwargs)` on the notifier to notify all listeners.
+  - Each listener that implements a corresponding update method (e.g., `_update_change_type`) will have that method invoked with the provided arguments.
+- Robustness:
+  - If a listener does not implement the expected update method, it is ignored gracefully.
+
+Example usage
+```python
+from astropy.io.fits.misc import NotifierMixin
+
+class Source(NotifierMixin):
+    def __init__(self, value):
+        self._value = value
+
+    def set_value(self, value):
+        self._value = value
+        self._notify("value", value)
+
+class Listener:
+    def _update_value(self, value):
+        print("Source value updated to:", value)
+
+src = Source(1)
+lst = Listener()
+src._add_listener(lst)  # register listener (internal API)
+src.set_value(42)         # emits event -> Listener prints
+```
+
+Notes
+- The exact registration method is intentionally underscored, as this mixin is designed for internal usage and to avoid exposing internal plumbing to end users.
+- This mechanism helps decouple components (e.g., cache managers, header trackers) by allowing them to react to changes without tight coupling.
+
+---
+
+## Practical guidance for developers
+
+- When implementing new verification logic for FITS-related objects, prefer subclassing `_Verify` and implementing `_verify(self, option)` to return an `_ErrList`. Then invoke `.verify(option)` as appropriate to respect user preferences (warnings, exceptions, fixes).
+- Use `_ErrList`’s nested structure to present complex validation results in a readable, hierarchical form. Provide meaningful `unit` headers for nested groups to aid interpretation.
+- If your object participates in a larger system where components need to react to changes, consider mixing in `NotifierMixin` and publishing events via `_notify`. Provide corresponding `_update_<change_type>` methods on listeners to handle updates.
+
+---
+
+## Additional notes
+
+- The verification system is designed to be flexible and non-destructive by default; options like `"ignore"`, `"warn"`, and `"exception"` allow developers to choose the desired modality.
+- The nested error reporting helps present multi-level diagnostics in a compact, readable way, which is especially useful when validating FITS headers or card groups.
+- The notifier infrastructure is intentionally lightweight and internal; it is best used when building internal collaborators for FITS-related objects rather than for user-facing APIs.
+
+---
+
+## References
+
+- Implementation details and examples are drawn from the internal API of `astropy.io.fits.misc`, including:
+  - `VerifyError`, `VerifyWarning`, and `VERIFY_OPTIONS`
+  - `_Verify` with `run_option` and `verify`
+  - `_ErrList` for nested error reporting
+  - `NotifierMixin` for internal event notification
+
+For more practical usage, consult the broader `astropy.io.fits` documentation and examples where these utilities are employed to validate FITS structures and propagate changes between components.

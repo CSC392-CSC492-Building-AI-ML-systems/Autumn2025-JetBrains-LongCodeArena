@@ -1,0 +1,196 @@
+# geometry.subpix.rst — Geometric Image Transformations
+
+Geometric image transformations enable mapping points between different coordinate spaces (world, camera, image) and warping images with subpixel accuracy. This documentation focuses on the concepts, data conventions, and the PinholeCamera utilities used in subpixel geometric operations.
+
+## Overview
+
+- Represent and manipulate how 3D scenes project onto 2D images using a pinhole camera model.
+- Apply rigid-body (SE(3)) transforms to 3D points and then project them to image coordinates.
+- Work with homogeneous coordinates and batch-friendly tensors to leverage PyTorch parallelism.
+- Access and modify intrinsic/extrinsic camera parameters through a convenient API.
+
+Key utilities referenced from kornia:
+- `transform_points`: apply a 4x4 transformation to a set of 3D points.
+- `inverse_transformation`: compute the inverse of a 4x4 transformation matrix.
+- The Pinhole camera class encapsulates intrinsics, extrinsics, and image dimensions to support common camera-space operations.
+
+---
+
+## Coordinate systems and conventions
+
+- World coordinates: 3D points in the world frame.
+- Camera coordinates: points expressed in the camera frame (obtained via extrinsics).
+- Image coordinates: pixel coordinates on the image plane, often with a principal point offset.
+- Homogeneous representation: 3D points are augmented to 4D as (X, Y, Z, 1) for matrix multiplication with 4x4 matrices.
+- Intrinsics matrix K (3x3 inside a 4x4 container in this API) maps camera coordinates to pixel coordinates:
+  - u = f_x * X_c / Z_c + c_x
+  - v = f_y * Y_c / Z_c + c_y
+- For this implementation, intrinsics is stored as a 4x4 matrix (with the 3x3 camera matrix in the top-left corner). The 3x3 submatrix is exposed via `camera_matrix`.
+
+---
+
+## Data shapes and conventions
+
+- Batch size: B
+- Intrinsics: shape (B, 4, 4) or (B, N, 4, 4) for per-image per-point intrinsics
+- Extrinsics: shape (B, 4, 4)
+- Image height/width: shape (B)
+- 3D points and other per-point data: can be batched as needed for transformation
+
+Public API (PinholeCamera) works with these conventions:
+- `intrinsics`: (B, 4, 4) or (B, N, 4, 4)
+- `extrinsics`: (B, 4, 4)
+- `height`, `width`: (B)
+- Accessors provide convenient projections of camera parameters:
+  - `fx`, `fy` : focal lengths
+  - `cx`, `cy` : principal point
+  - `tx`, `ty`, `tz` : translation components from the extrinsics
+  - `rt_matrix` : (B, 3, 4) rotation-translation portion of the extrinsics
+  - `camera_matrix` : (B, 3, 3) intrinsic submatrix
+  - `rotation_matrix` : (B, 3, 3) extrinsics rotation
+  - `translation_vector` : (B, 3, 1) extrinsics translation
+
+---
+
+## The PinholeCamera class
+
+Purpose: a lightweight container for camera intrinsics, extrinsics, and image size, with convenient properties and validation.
+
+Constructor
+- `PinholeCamera(intrinsics: torch.Tensor, extrinsics: torch.Tensor, height: torch.Tensor, width: torch.Tensor) -> None`
+- Validates batch sizes and shapes
+- Stores:
+  - `_intrinsics`, `_extrinsics`, `height`, `width`
+
+Key validation helpers
+- `_check_valid(data_iter: Iterable[torch.Tensor]) -> bool`
+  - Ensures all tensors share compatible batch dimensions
+- `_check_valid_params(data: torch.Tensor, data_name: str) -> bool`
+  - Ensures intrinsics/extrinsics have expected shapes (3D or 4D with 4x4 in the last two dims)
+- `_check_valid_shape(data: torch.Tensor, data_name: str) -> bool`
+  - Ensures `height`/`width` shapes are 1D (batch-wise scalar per sample)
+
+Public attributes and properties
+- `intrinsics`: (B, 4, 4)
+- `extrinsics`: (B, 4, 4)
+- `batch_size`: int, equals intrinsics.shape[0]
+- `fx`, `fy`: focal lengths (B)
+- `cx`, `cy`: principal point coordinates (B)
+- `tx`, `ty`, `tz`: translation components (B)
+  - Setters for `tx`, `ty`, `tz` mutate the corresponding extrinsics
+- `rt_matrix`: (B, 3, 4)
+- `camera_matrix`: (B, 3, 3)
+- `rotation_matrix`: (B, 3, 3)
+- `translation_vector`: (B, 3, 1)
+
+Notes
+- The class assumes batched inputs for performance.
+- Intrinsics are stored as a 4x4 matrix, with the 3x3 intrinsics in the top-left block. Use `camera_matrix` to access the 3x3 intrinsics.
+
+Example usage
+- Constructing a camera:
+  - intrinsics: Bx4x4
+  - extrinsics: Bx4x4
+  - height/width: B
+- Accessing focal lengths and principal point:
+  - camera.fx, camera.cy, etc.
+- Modifying translation:
+  - camera.tx = new_x
+
+---
+
+## Geometric transformations: concepts and workflow
+
+1. Transform 3D points from world to camera space
+   - X_cam = R X_world + t
+   - Represented as a 4x4 matrix multiplication with homogeneous coordinates.
+
+2. Project to image plane
+   - x_norm = X_cam / Z_cam
+   - u = f_x x_norm_x + c_x
+   - v = f_y x_norm_y + c_y
+   - Use the intrinsics to map normalized camera coordinates to pixel coordinates.
+
+3. Inverse transformations
+   - Inverse the extrinsics to retrieve world coordinates from camera coordinates.
+   - Useful for tasks like back-projection of 2D points into 3D rays.
+
+4. Subpixel accuracy
+   - Subpixel warping and sampling rely on continuous coordinate mappings, often using bilinear/bicubic interpolation.
+   - The subpixel namespace emphasizes operations that maintain precision when sampling or warping images.
+
+---
+
+## Typical workflows and examples
+
+Note: These examples illustrate concepts and common usage with the PinholeCamera and related utilities. Adapt shapes to your batch sizes and data.
+
+Example 1: Project a 3D point into the image
+- Given: a single 3D point in world coordinates and a camera
+- Steps:
+  - Build or provide `intrinsics` and `extrinsics` (B=1)
+  - Create `PinholeCamera(intrinsics, extrinsics, height, width)`
+  - Transform the point to camera coordinates and project using the intrinsics
+- Code sketch:
+  - Assuming you have a 4x4 projection-ready intrinsics and extrinsics, and a single point P_world (1x3)
+  - Use transform to get X_cam, then apply K to obtain pixel coordinates
+
+Example 2: Transform and re-project a batched set of points
+- Given: points (B, N, 3), extrinsics (B, 4, 4), intrinsics (B, 4, 4)
+- Steps:
+  - Use `transform_points(extrinsics, points)` to get (B, N, 3) in camera space
+  - Convert to homogeneous (B, N, 4) and apply intrinsics to project to pixel coordinates
+  - Use `camera_matrix` to extract 3x3 intrinsics for projection
+- Code sketch:
+  - X_cam = transform_points(extrinsics, points)
+  - Normalize by Z to obtain pixel coordinates: u = (f_x * X_cam[:, :, 0] / X_cam[:, :, 2]) + c_x, etc.
+
+Example 3: Inverse transform
+- Given: 2D pixel coordinates with depth, reconstruct camera/world coordinates by inverting the transform
+- Steps:
+  - Back-project pixel coordinates to camera space using depth
+  - Apply `inverse_transformation` or the inverse of the extrinsics to map to world coordinates
+
+Example 4: Access and modify camera parameters
+- Retrieve `fx`, `fy`, `cx`, `cy`
+- Update translation components: `camera.tx = new_tx`, etc.
+- Inspect `rt_matrix`, `camera_matrix`, `rotation_matrix`, and `translation_vector`
+
+Code blocks (illustrative)
+- Creating a camera:
+  - import torch
+  - intrinsics = torch.eye(4).repeat(B, 1, 1)  # Bx4x4; replace with real intrinsics
+  - extrinsics = torch.eye(4).repeat(B, 1, 1)  # Bx4x4
+  - height = torch.tensor([H] * B)
+  - width = torch.tensor([W] * B)
+  - cam = PinholeCamera(intrinsics, extrinsics, height, width)
+- Accessing a property:
+  - f_x = cam.fx
+  - c_x = cam.cx
+- Transforming points:
+  - X_world = torch.tensor([[[X1, Y1, Z1], ...]])  # shape (B, N, 3)
+  - X_cam = transform_points(cam.extrinsics, X_world)
+  - Project to image using cam.camera_matrix and depth normalization
+
+---
+
+## Best practices and gotchas
+
+- Batch alignment: ensure all inputs share a compatible batch dimension B. When using per-image intrinsics, ensure shapes align as (B, 4, 4) or (B, N, 4, 4) per your use case.
+- Intrinsics storage: the 3x3 intrinsics occupy the top-left 3x3 block of the 4x4 intrinsics tensor. Access via `camera_matrix` for 3x3 operations.
+- Translation setters modify the corresponding entry in `extrinsics`. Be mindful of in-place mutations when using shared references.
+- Depth handling: projection requires Z (depth). Ensure depth is positive and consistent with camera conventions.
+- Subpixel accuracy: for warping or sampling with subpixel precision, rely on appropriate sampling kernels or APIs in the surrounding library.
+
+---
+
+## References
+
+- KORNIA geometry utilities:
+  - transform_points: apply 4x4 transforms to 3D points
+  - inverse_transformation: compute inverses of 4x4 transforms
+- PinholeCamera API in geometry.subpix
+  - intrinsics/extrinsics handling
+  - batch-friendly design and parameter accessors
+
+If you need extended examples (e.g., end-to-end 3D reconstruction, multiple camera rigs, or integration with subpixel image warping), let me know and I can add targeted tutorials.

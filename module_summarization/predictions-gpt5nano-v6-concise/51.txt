@@ -1,0 +1,192 @@
+gee.rst: Generate example for the one-parameter exponential family module
+
+Overview
+- This module defines the one-parameter exponential family distributions used by GLM/GEE-style modeling.
+- The central abstraction is the Family base class, which combines a link function with a variance function and exposes utility methods used by IRLS-like fitting routines.
+- This documentation focuses on generating reproducible, minimal examples that demonstrate how to exercise the core API (starting_mu, weights, resid_dev, deviance, fitted) and to validate basic properties when developing or testing new families or links.
+
+Design goals for Generate Example
+- Provide a compact, reproducible workflow to create synthetic data that exercises:
+  - creation of a Family instance from a Link and a Variance function
+  - computation of mean-structure mu from linear predictors
+  - usage of core Family methods (starting_mu, weights, resid_dev, deviance, fitted)
+- Show canonical examples for common one-parameter exponential families (e.g., Poisson with log link, Binomial with logit link).
+- Include guidance on expected shapes and sanity checks to validate implementations.
+- Document edge cases and extension points (e.g., quasi families, and adding new links/variance functions).
+
+Prerequisites
+- The following components are used by the examples. Replace with your actual package paths if different:
+  - Family base class (gee.family)
+  - Link implementations (gee.links)
+  - Variance function implementations (gee.varfuncs)
+- Typical function interfaces (as observed in the base class):
+  - link.deriv(mu) -> derivative of the inverse link g'(mu)
+  - link.inverse(eta) or equivalent to obtain mu from the linear predictor (eta)
+  - variance(mu) -> Var(Y) as a function of mu
+  - Family.weights(mu)
+  - Family.deviance(endog, mu, var_weights=1.0, freq_weights=1.0, scale=1.0)
+  - Family.resid_dev(endog, mu, var_weights=1.0, scale=1.0)
+  - Family.starting_mu(y)
+  - Family.fitted(lin_pred)
+
+Generating reproducible examples
+- Goal: produce a small synthetic dataset that demonstrates the end-to-end usage of a specific Family instance with a chosen Link and Variance function.
+- Steps:
+  1. Set a fixed random seed for reproducibility.
+  2. Generate a design matrix X and a true coefficient vector beta.
+  3. Compute the linear predictor eta = X @ beta.
+  4. Obtain mu via the link’s inverse: mu = link.inverse(eta) (where applicable).
+  5. Draw the response endog from the appropriate distribution with mean mu (e.g., Poisson(mu) for Poisson, Bernoulli(mu) for Binomial with N=1, etc.).
+  6. Instantiate the family: family = PoissonFamily(link, variance) or BinomialFamily(link, variance) depending on the chosen distribution.
+  7. Compute mu_hat via the family’s fitted method given the lin_pred (eta or similar).
+  8. Compute and inspect:
+     - weights: w = family.weights(mu)
+     - starting mu: mu_0 = family.starting_mu(endog)
+     - deviance: D = family.deviance(endog, mu)
+     - deviance residuals: resid_dev = family.resid_dev(endog, mu)
+- Expected shapes:
+  - X: (n_samples, n_features)
+  - beta: (n_features,)
+  - eta, mu, mu_hat: (n_samples,)
+  - endog: (n_samples,)
+  - w, resid_dev: (n_samples,)
+  - D: scalar or (n_samples,) depending on implementation
+
+Example 1: Poisson family with log link
+- Intent: demonstrate a canonical Poisson GLM setup with a log link.
+- Assumptions: Poisson variance function, log link; methods as defined in the module.
+- Code (adjust to your actual class names and imports):
+  - Note: replace PoissonFamily, PoissonVariance, and link class names with those available in your package.
+
+from gee import family as F
+from gee import links as L
+from gee import varfuncs as V
+import numpy as np
+
+def generate_poisson_example(n=200, seed=123):
+    rng = np.random.default_rng(seed)
+    # Design matrix with intercept and one feature
+    X = rng.normal(size=(n, 2))
+    beta = np.array([0.5, -0.25])
+    eta = X @ beta
+
+    # Link: log (inverse is exp)
+    link = L.Log()  # or the appropriate LogLink in your package
+    variance = V.poisson()  # adjust to your API (e.g., V.Poisson())
+
+    # Family instantiation
+    PoissonFamily = F.Poisson  # adjust to your actual class path
+    family = PoissonFamily(link, variance)
+
+    # Mean parameter on the original scale
+    mu = link.inverse(eta)  # mu = exp(eta)
+
+    # Generate response
+    y = rng.poisson(mu)
+
+    # Fitted values from the model (inverse link of lin_pred)
+    mu_hat = family.fitted(eta)
+
+    # Diagnostics
+    w = family.weights(mu)
+    D = family.deviance(y, mu)
+
+    return {
+        "X": X, "beta": beta, "eta": eta, "mu": mu, "y": y,
+        "mu_hat": mu_hat, "weights": w, "deviance": D, "family": family
+    }
+
+# Usage
+example = generate_poisson_example()
+print("Deviance (Poisson):", example["deviance"])
+print("Weights (first 5):", example["weights"][:5])
+print("Mu hat (first 5):", example["mu_hat"][:5])
+
+- Notes:
+  - If your link class uses a different method name (e.g., inverse or mu), adapt the code accordingly.
+  - If your variance function class uses a different constructor (e.g., V.poisson vs V.Poisson), adjust accordingly.
+  - Ensure mu > 0 for Poisson.
+
+Example 2: Binomial family with logit link
+- Intent: demonstrate a binary outcome GLM with a logistic link.
+- Assumptions: Binomial variance function, logit link.
+- Code (adjust to your actual class names and imports):
+
+from gee import family as F
+from gee import links as L
+from gee import varfuncs as V
+import numpy as np
+
+def generate_binomial_example(n=300, seed=456):
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(n, 2))
+    beta = np.array([1.0, -0.5])
+    eta = X @ beta
+
+    # Link: logit (inverse is sigmoid)
+    link = L.Logit()  # or the appropriate LogitLink in your package
+    variance = V.binomial()  # adjust to your API (e.g., V.Binomial())
+
+    BinomialFamily = F.Binomial  # adjust to your actual class path
+    family = BinomialFamily(link, variance)
+
+    mu = link.inverse(eta)  # mu in (0, 1)
+
+    # Generate binary outcomes
+    y = rng.binomial(1, mu)
+
+    mu_hat = family.fitted(eta)
+    w = family.weights(mu)
+    D = family.deviance(y, mu)
+
+    return {
+        "X": X, "beta": beta, "eta": eta, "mu": mu, "y": y,
+        "mu_hat": mu_hat, "weights": w, "deviance": D, "family": family
+    }
+
+# Usage
+example_binom = generate_binomial_example()
+print("Binomial Deviance:", example_binom["deviance"])
+print("First 5 outcomes:", example_binom["y"][:5])
+print("First 5 mu:", example_binom["mu"][:5])
+
+- Notes:
+  - If the Binomial class expects endog in {0, 1} and uses N>1, adapt the sampling accordingly (e.g., y ~ Binomial(n_i, mu_i)).
+  - Adapt the link class and variance function to match your package's API naming.
+
+General validation checks to include in Generate Example
+- Sanity checks:
+  - weights(mu) returns non-negative values with the same shape as mu.
+  - resid_dev(endog, mu) has the same length as endog and is finite.
+  - deviance(endog, mu) is non-negative and finite.
+  - fitted(lin_pred) returns mu in the valid range for the distribution (e.g., (0,∞) for Poisson, (0,1) for Binomial).
+- Basic IRLS sanity:
+  - Starting mu (mu_0) should be a reasonable first guess; for most distributions, (endog + mean(endog))/2 is a safe default for binary-like data.
+
+Extending the Generate Example
+- Add quasi, quasibinomial, and quasipoisson families once their implementations are available.
+- If adding a new link or a new variance function:
+  - Provide a small, self-contained example showing mu calculation, endog generation, and basic diagnostic calculations with the new family.
+  - Update the example to demonstrate edge cases (e.g., mu near 0 or 1 for Binomial; mu near 0 for Poisson).
+
+API reference mapping (for developers)
+- Family.starting_mu(y): initial transformed mean for IRLS.
+- Family.weights(mu): IRLS weights derived from g'(mu) and Var(mu).
+- Family.deviance(endog, mu, var_weights=1., freq_weights=1., scale=1.): distribution-specific deviance.
+- Family.resid_dev(endog, mu, var_weights=1., scale=1.): per-observation deviance residuals.
+- Family.fitted(lin_pred): mu from lin_pred via the inverse link function.
+
+References
+- R comparison: http://www.biostat.jhsph.edu/~qli/biostatistics_r_doc/library/stats/html/family.html
+- Notes for future work and test coverage are in the codebase TODO sections.
+
+Maintenance and contribution notes
+- This Generate Example section should evolve with the codebase:
+  - When new families or links are added, append dedicated example blocks.
+  - Keep examples lightweight and deterministic to ease regression testing.
+  - Add small unit tests that reproduce the example outcomes (deviance, weights, resid_dev, etc.).
+- Keep examples self-contained and free of external dependencies beyond numpy and the package itself.
+
+See Also
+- The GLM/GEe concepts in the codebase, including the relation of the base Family class to specific distributions (Poisson, Binomial, etc.) and their canonical links.
+- References to standard GLM literature and the R family documentation cited in the module header.

@@ -1,0 +1,96 @@
+Stochastic Gradient Descent (SGD)
+=================================
+
+Overview
+--------
+Stochastic Gradient Descent (SGD) is an iterative optimization algorithm used to minimize differentiable objective functions. Instead of computing the gradient on the full dataset, SGD estimates the gradient from a single sample (or a small mini-batch) and updates the model parameters accordingly. This makes SGD well-suited for large-scale learning and online training.
+
+In this project, SGD is implemented with fused-type, performance-oriented components for multinomial logistic loss. The implementation specializes to two data types (float32 and float64) to balance speed and precision.
+
+Key concepts
+------------
+- Gradient estimate: For each training example, compute the gradient of the loss with respect to the model parameters and apply an update step.
+- Loss per sample: The loss used for multinomial (softmax) classification is computed per sample and can be weighted.
+- Learning rate: The step size used to scale the gradient during updates.
+- Numerical stability: Log-sum-exp is used to compute log probabilities in a stable way, preventing overflow/underflow.
+- Type specialization: Two implementations exist for 32-bit and 64-bit floating point types (float and double) to optimize performance.
+
+Multinomial logistic loss for SGD
+--------------------------------
+The core loss implemented for SGD is the multinomial logistic (softmax) loss for a single sample. For a given sample with prediction vector p (length n_classes), true class y, and sample weight sw:
+
+- logsumexp_prediction = log(sum_c exp(p[c])) (computed stably)
+- loss = (logsumexp_prediction - p[y]) * sw
+
+This yields the per-sample loss used to update model parameters.
+
+Gradient computation
+--------------------
+The per-class gradient for a single sample is:
+
+- grad[c] = sw * exp(p[c] - logsumexp_prediction)
+- If c == y (the correct class), subtract sw from grad[c]
+- The resulting gradient is scaled by the sample weight sw
+
+This gradient is intended to be combined with the input features to form the actual parameter update in your SGD optimizer.
+
+Numerically stable log-sum-exp
+------------------------------
+A helper routine computes log(sum(exp(arr))) in a numerically stable manner by:
+- Finding the maximum value vmax in the input
+- Accumulating exp(arr[i] - vmax) to avoid overflow/underflow
+- Returning log(sum) + vmax
+
+This is used internally to compute logsumexp(p) for the loss and the gradient.
+
+Data type specialization
+------------------------
+Two specialized classes are generated to handle common floating point precisions:
+
+- MultinomialLogLoss64: for 64-bit double precision (np.float64)
+- MultinomialLogLoss32: for 32-bit single precision (np.float32)
+
+Each class provides:
+- loss(prediction, y, n_classes, sample_weight) -> loss value
+- dloss(prediction, y, n_classes, sample_weight, gradient_ptr) -> fills gradient_ptr with per-class gradients
+- __reduce__ for pickling support
+
+Note: These are implemented as Cython cdef classes; the methods are designed for use within the optimized SGD workflow and may be invoked by the surrounding optimization code rather than directly from Python in typical usage.
+
+Usage examples
+--------------
+The following illustrates the conceptual usage within the SGD pipeline. The exact Python-facing interface may differ due to Cython compilation and fused-type generation, but the intent is shown here.
+
+- Example 1: Compute loss and gradient for a single sample (64-bit)
+
+  - prediction: numpy array of length n_classes with dtype=np.float64
+  - y: correct class index (int)
+  - n_classes: int
+  - sw: sample weight (float)
+
+  loss = MultinomialLogLoss64().loss(prediction, y, n_classes, sw)
+
+  gradient = np.empty(n_classes, dtype=np.float64)
+  MultinomialLogLoss64().dloss(prediction, y, n_classes, sw, gradient)
+
+- Example 2: Compute with 32-bit precision
+
+  loss = MultinomialLogLoss32().loss(prediction32, y, n_classes, sw32)
+
+  gradient32 = np.empty(n_classes, dtype=np.float32)
+  MultinomialLogLoss32().dloss(prediction32, y, n_classes, sw32, gradient32)
+
+Notes
+-----
+- The loss and gradient computations are designed to be called repeatedly during SGD iterations.
+- Internal utilities (e.g., _logsumexp) are optimized for performance and are not part of the public Python API.
+- The implementation uses nogil and inlined helpers to maximize throughput in CPU-bound training.
+
+See also
+--------
+- _logsumexp: Numerically stable log-sum-exp helper used by the loss computation.
+- _soft_thresholding: Helper for proximal updates (where applicable in related components).
+
+References
+----------
+- Bishop, C. M. (2006). Pattern Recognition and Machine Learning. Springer. (Chapter 4.3.4) – theoretical background for multinomial logistic loss and gradient.

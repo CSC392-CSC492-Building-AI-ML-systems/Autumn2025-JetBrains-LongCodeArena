@@ -1,0 +1,142 @@
+# operations.rst
+
+Generate documentation for this module
+
+This section documents the migration operation framework provided by this module. It describes the base operation type, how constraint-related operations are modeled, how to extend the system with new constraint types, and how to generate the corresponding migration diffs.
+
+Overview
+- The module defines a small extensible framework for representing migration operations.
+- The base class is `MigrateOperation`, which provides a common API and a hook for storing auxiliary information.
+- Constraint-related operations are modeled by:
+  - `AddConstraintOp`: an abstract representation of adding a constraint.
+  - `DropConstraintOp`: a concrete representation of dropping a constraint.
+- The system supports reverse operations and conversion to diff tuples that describe the migration step.
+
+API Overview
+
+- MigrateOperation
+  - Base class for all migration operation objects.
+  - Attributes:
+    - `info`: a memoized dictionary for arbitrary per-operation information.
+  - Methods:
+    - `reverse(self) -> MigrateOperation`: return the operation that undoes this one (to be implemented by subclasses).
+    - `to_diff_tuple(self) -> Tuple[Any, ...]`: convert the operation to a serializable diff tuple (to be implemented by subclasses).
+
+- AddConstraintOp
+  - Abstract base class representing an operation that adds a constraint.
+  - Class attributes:
+    - `add_constraint_ops`: a dispatcher used to select a concrete AddConstraintOp subclass based on constraint type.
+  - Properties/Methods:
+    - `constraint_type` (abstract): the string key identifying the constraint type (e.g., `"foreignkey"`, `"primary"`, `"unique"`, `"check"`).
+    - `register_add_constraint(type_: str) -> Callable`: decorator to register a concrete subclass for a given constraint type.
+    - `from_constraint(cls, constraint: Constraint) -> AddConstraintOp`: factory that creates a concrete AddConstraintOp for a given constraint.
+    - `to_constraint(self, migration_context: Optional[MigrationContext] = None) -> Constraint` (abstract): convert the operation back into a SQLAlchemy `Constraint` object.
+    - `reverse(self) -> DropConstraintOp`: return the corresponding drop operation for this constraint.
+    - `to_diff_tuple(self) -> Tuple[str, Constraint]`: emit a diff of the form `("add_constraint", constraint)`.
+  - Notes:
+    - Subclasses implement `to_constraint` and provide the concrete constraint instance in the diff.
+
+- DropConstraintOp
+  - Concrete operation representing dropping a constraint.
+  - Initialization signature:
+    - `__init__(constraint_name: Optional[sqla_compat._ConstraintNameDefined], table_name: str, type_: Optional[str] = None, *, schema: Optional[str] = None, _reverse: Optional[AddConstraintOp] = None)`
+  - Attributes:
+    - `constraint_name`: name of the constraint (may be `None` for unnamed constraints in some backends).
+    - `table_name`: the table containing the constraint.
+    - `constraint_type`: derived from `type_` (e.g., `"foreignkey"`, `"primary"`, `"unique"`, `"check"`).
+    - `schema`: optional schema name.
+    - `_reverse`: an optional `AddConstraintOp` representing the reverse operation if the original constraint is known.
+  - Methods:
+    - `reverse(self) -> AddConstraintOp`: return the reverse add-constraint operation, if available.
+    - `to_diff_tuple(self) -> Tuple[str, SchemaItem]`: produce the diff tuple:
+      - `("remove_fk", constraint)` if the type is `"foreignkey"`.
+      - `("remove_constraint", constraint)` otherwise.
+    - `from_constraint(cls, constraint: Constraint) -> DropConstraintOp`: construct a `DropConstraintOp` from an existing `Constraint` and populate `_reverse` with the corresponding add-constraint operation.
+    - `to_constraint(self) -> Constraint`: reconstruct the original `Constraint` from the stored state (requires `_reverse` to be present or to be able to recreate the constraint).
+  - Class methods:
+    - `drop_constraint(operations: Operations, constraint_name: str, table_name: str, type_: Optional[str] = None, *, schema: Optional[str] = None) -> None`: helper to drop a constraint using the provided `Operations` interface.
+    - `batch_drop_constraint(operations: BatchOperations, constraint_name: str, type_: Optional[str] = None) -> None`: batch form for dropping a constraint; omits `table_name` and `schema` in the batch context.
+  - Notes:
+    - The `drop_constraint` and `batch_drop_constraint` helpers create an instance and delegate to `Operations`/`BatchOperations` for execution.
+    - The `to_constraint` path uses the `_reverse` operation to rebuild the actual `Constraint` instance when possible.
+
+Key Design Concepts
+
+- Extensibility
+  - New constraint types can be supported by registering a concrete subclass of `AddConstraintOp` for a given constraint type string via `AddConstraintOp.register_add_constraint(...)`.
+  - The system uses a dispatcher (`add_constraint_ops`) to map constraint visit names to concrete Python classes.
+
+- Reversibility
+  - Each operation can provide its reverse operation via `reverse()`. When the reverse is known, `to_constraint()` can reconstruct the original `Constraint` with updated names and schema via the `_reverse` link.
+  - This enables bidirectional migration representations: from a constraint add to a constraint drop and back.
+
+- Diff representation
+  - The `to_diff_tuple()` method standardizes how operations are serialized into diffs for migration scripts.
+  - For foreign-key drops, a special tag `"remove_fk"` is used; for others, `"remove_constraint"` or `"add_constraint"` is used, depending on the operation type.
+
+Examples
+
+1) Dropping a named constraint (foreign key or other)
+
+- Basic drop (foreign key):
+  - Using the classmethod:
+    - from the caller perspective, you typically have an `Operations` instance representing the migration context.
+    - Example:
+      - op = DropConstraintOp.drop_constraint(ops, constraint_name="fk_order_customer", table_name="order", type_="foreignkey")
+      - This issues the drop via the migration system.
+
+- Basic drop (non-foreign-key constraint):
+  - Example:
+    - op_name = DropConstraintOp.drop_constraint(ops, constraint_name="chk_order_status", table_name="order", type_="check")
+
+2) Batch drop in batch migration context
+
+- Example:
+  - DropConstraintOp.batch_drop_constraint(batch_ops, "fk_order_customer", type_="foreignkey")
+  - This uses the current batch migration context and omits table/schema if applicable.
+
+3) Reconstructing a constraint from a drop (and reversing)
+
+- Suppose you have a constraint object from SQLAlchemy (e.g., `Constraint`).
+- Create a drop op from that constraint:
+  - drop = DropConstraintOp.from_constraint(constraint)
+- The resulting `DropConstraintOp` has `_reverse` set to the corresponding `AddConstraintOp` for that constraint.
+- You can obtain the reverse add-constraint operation:
+  - add = drop.reverse()
+- If you call `drop.to_constraint()`, you may obtain the original constraint (after the appropriate names and schema are applied), provided `_reverse` is available.
+
+4) Extending with a new constraint type
+
+- Register a new constraint type by implementing a subclass of `AddConstraintOp` and registering it:
+
+  - Example (pseudocode):
+    - @AddConstraintOp.register_add_constraint("myconstraint")
+      class AddMyConstraintOp(AddConstraintOp):
+          @property
+          def constraint_type(self) -> str:
+              return "myconstraint"
+
+          def to_constraint(self, migration_context: Optional[MigrationContext] = None) -> Constraint:
+              # build and return a SQLAlchemy Constraint instance
+              ...
+
+  - After registration, constraints of type `"myconstraint"` will be dispatched to `AddMyConstraintOp.from_constraint` and handled by the system.
+
+Implementation notes
+
+- The module relies on typing-based TYPE_CHECKING imports for type hints that are only needed at type-check time (e.g., SQLAlchemy types, Rewriter, MigrationContext, _RevIdType).
+- The `info` property is memoized via `util.memoized_property` to avoid recomputation and to allow per-operation metadata.
+- The `to_diff_tuple` protocol establishes a narrow, stable representation for diffs used by the migration engine.
+
+Caveats and considerations
+
+- The exact shape of the diff tuples can vary depending on backend behavior (e.g., the special case for foreign keys emits `"remove_fk"`).
+- `to_constraint()` relies on the presence of a `_reverse` operation to reconstruct the original constraint. If no reverse is available, attempting to call `to_constraint()` will raise a `ValueError`.
+- The code paths for actual constraint object creation depend on the broader SQLAlchemy/Alembic-like integration (not fully shown in this module). Implementations should be aware of backend-specific constraint construction nuances (e.g., naming, schema qualifiers).
+
+See Also
+
+- `util` and `sqla_compat` modules for utilities and compatibility helpers used by constraint handling.
+- Rewriter, MigrationContext, and other runtime components referenced in type hints for integration with the autogenerate/migration framework.
+
+This documentation provides a compact reference for developers implementing or extending the operations framework, with emphasis on how constraints are modeled, how diffs are produced, and how to extend the system with new constraint types.

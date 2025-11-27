@@ -1,0 +1,174 @@
+Developing scikit-learn estimators
+===================================
+
+This document explains how to design and implement meta-estimators for scikit-learn, with a focus on multioutput estimators as exemplified in the code for this module. It covers core patterns, common APIs, and practical guidance to build robust, testable estimators that integrate cleanly with scikit-learn’s parameter management, parallelism, and validation tooling.
+
+Overview: what is a meta-estimator?
+-----------------------------------
+- A meta-estimator wraps a base estimator provided at construction time. It extends the base estimator’s capabilities (e.g., enabling multioutput support) without requiring changes to the underlying estimator.
+- In this module, meta-estimators enable handling multiple outputs by fitting several copies of a base estimator (one per output) or by chaining/aggregating estimators across outputs.
+
+Key building blocks (as seen in the code)
+-----------------------------------------
+- Base class
+  - _MultiOutputEstimator inherits from MetaEstimatorMixin and BaseEstimator (with ABCMeta). It defines the contract for multioutput wrappers and enforces parameter constraints.
+  - Core parameter: estimator (the base estimator to wrap) and n_jobs (optional parallelism control).
+- Initialization and parameter management
+  - __init__(self, estimator, *, n_jobs=None): stores the base estimator and optional parallelism setting.
+  - _parameter_constraints: declarative constraints used by scikit-learn’s validation tooling.
+- Helpers for fitting and partial fitting
+  - _fit_estimator(estimator, X, y, sample_weight=None, **fit_params): clones the base estimator and fits it to (X, y), optionally with sample weights and additional fit_params.
+  - _partial_fit_estimator(estimator, X, y, classes=None, partial_fit_params=None, first_time=True): supports online fitting via partial_fit, cloning on the first call if needed.
+  - These helpers enable a clean, consistent implementation pattern across multiple multioutput estimators.
+- Availability checks
+  - _available_if_estimator_has(attr): returns a decorator that gates parameter/method exposure based on whether the sub-estimator(s) expose a given attribute. Useful for conditional API exposure in chain-style estimators.
+- Public API expectations
+  - Multi-output estimators typically expose:
+    - estimators_ or a list of fitted sub-estimators (one per output or per chain step)
+    - fit/predict methods aligned with scikit-learn’s estimator interface
+    - optional partial_fit support for online/streaming scenarios
+  - The code path uses clone to ensure the base estimator is not mutated by the wrapper, enabling safe reuse and parallelization.
+
+Common patterns used by multioutput estimators
+----------------------------------------------
+- Parallel fitting
+  - Under the hood, fitting multiple sub-estimators often uses Parallel and delayed to exploit n_jobs. This is visible via the _fit_estimator helper, which can be employed in a parallel map over outputs.
+- Per-output modeling
+  - A typical approach is to train one copy of the base estimator per output dimension (or per chain step) and store the fitted estimators in estimators_.
+- Validation and safety
+  - Before fitting, validate that the base estimator provides the required interface (fit, predict). The _parameter_constraints can be used to formalize these requirements for the estimator’s parameters.
+- Routing and composition
+  - Metadata routing utilities (MetadataRouter, MethodMapping, process_routing, etc.) help pass relevant parameters to the wrapped estimators. This keeps the wrapper’s parameter space ergonomic while maintaining control over the inner estimators.
+- Conditional API exposure
+  - available_if (via _available_if_estimator_has) allows exposing certain methods or parameters only if the wrapped estimator provides them, leading to cleaner, safer user-facing APIs.
+
+Implementation guidance: how to build a new multioutput/meta-estimator
+-------------------------------------------------------------------
+1) Decide the wrapper type
+   - If you are wrapping a single estimator to support multiple outputs, derive from _MultiOutputEstimator.
+   - For more specialized behavior (e.g., classifier chains), follow the same patterns and provide specialized logic in fit/predict/partial_fit.
+
+2) Define the constructor
+   - __init__(self, estimator, *, n_jobs=None)
+   - Validate that estimator exposes at least fit and predict (via HasMethods in _parameter_constraints or a runtime check).
+   - Accept n_jobs to enable parallelization; store it for use in fitting.
+
+3) Parameter constraints
+   - Use _parameter_constraints to declare requirements, e.g.:
+     - "estimator": [HasMethods(["fit", "predict"])]
+     - "n_jobs": [Integral, None]
+   - This helps SciPy-compatible validation and consistent behavior across estimators.
+
+4) Core fitting logic
+   - Implement fit(X, y, ...):
+     - Determine the number of outputs (e.g., y.shape[1] if y is 2D).
+     - For each output, clone the base estimator and fit it to (X, y[:, i], ...), optionally passing along sample_weight and fit_params.
+     - Use Parallel(delayed(...)) to parallelize across outputs when n_jobs > 1.
+     - Store fitted sub-estimators in an attribute (often estimators_ or a similarly named list).
+     - Return self.
+   - Example skeleton (conceptual, not meant to be copy-paste exact code):
+     - n_outputs = y.shape[1]
+     - self.estimators_ = Parallel(n_jobs=self.n_jobs)(delayed(_fit_estimator)(self.estimator, X, y[:, i], **fit_params) for i in range(n_outputs))
+     - Return self
+
+5) Partial fitting (optional)
+   - If your estimator supports online learning, implement partial_fit using _partial_fit_estimator, handling the first_time flag and optional classes parameter as shown.
+   - This enables incremental learning across batches.
+
+6) Prediction
+   - Implement predict(X) to aggregate predictions from all sub-estimators:
+     - preds = [est.predict(X) for est in self.estimators_]
+     - return np.column_stack(preds)
+   - Ensure output has shape (n_samples, n_outputs).
+
+7) Conditional API exposure
+   - Use _available_if_estimator_has to expose methods/attributes only when the wrapped estimator provides them.
+   - This avoids confusing errors when a user calls a method that a particular base estimator does not implement.
+
+8) Validation utilities
+   - For classifiers, consider check_classification_targets(y) to ensure appropriate targets.
+   - Use clone to avoid side effects on the original base estimator.
+
+9) Documentation and examples
+   - Document the behavior for multioutput (shape of y, shape of predictions).
+   - Provide example usage showing how to instantiate with a concrete base estimator and how many outputs are inferred from y.
+   - If appropriate, document parallelism behavior and how to pass fit_params.
+
+10) Testing considerations
+   - Verify that:
+     - The base estimator is cloned and not mutated by the wrapper.
+     - The wrapper handles both 1D and 2D y appropriately (multioutput shapes).
+     - n_jobs affects parallelism only as intended.
+     - Predictions are of the correct shape and type.
+     - Optional features (partial_fit, conditional attributes) expose correctly depending on the base estimator.
+
+Practical example: minimal skeleton of a new multioutput meta-estimator
+---------------------------------------------------------------------
+The following is a conceptual skeleton illustrating how a new multioutput meta-estimator could be implemented by following the patterns in this module. Adapt it to your needs and follow the exact interface conventions of scikit-learn.
+
+.. code-block:: python
+
+    from sklearn.base import BaseEstimator, MetaEstimatorMixin, clone
+    from sklearn.utils.validation import check_array
+    from sklearn.utils import parallel_backend, parallel
+
+    class MyMultiOutputEstimator(_MultiOutputEstimator):
+        def __init__(self, estimator, *, n_jobs=None):
+            super().__init__(estimator=estimator, n_jobs=n_jobs)
+
+        def fit(self, X, y, **fit_params):
+            X = check_array(X)
+            y = check_array(y)
+            if y.ndim == 1:
+                y = y.reshape(-1, 1)
+            n_outputs = y.shape[1]
+
+            self.estimators_ = Parallel(n_jobs=self.n_jobs)(
+                delayed(_fit_estimator)(estimator=self.estimator, X=X, y=y[:, i], **fit_params)
+                for i in range(n_outputs)
+            )
+            return self
+
+        def predict(self, X):
+            X = check_array(X)
+            preds = [est.predict(X) for est in self.estimators_]
+            return np.column_stack(preds)
+
+        # Optional: implement partial_fit if base estimator supports it
+        # Optional: provide available_if gating for advanced features
+
+Notes:
+- This skeleton mirrors the approach suggested by _fit_estimator, _partial_fit_estimator, and _MultiOutputEstimator in the code excerpt.
+- Real implementations (MultiOutputRegressor, MultiOutputClassifier, ClassifierChain, RegressorChain) follow this or more specialized variants, leveraging available_if, routing, and per-output fitting.
+
+Testing and quality practices
+------------------------------
+- Unit tests should:
+  - Confirm that each sub-estimator is a separate clone (no shared state leakage).
+  - Validate shapes of outputs for various (n_samples, n_outputs) configurations.
+  - Exercise both single-output and multioutput targets.
+  - Check that n_jobs influences execution as intended (with and without parallelism).
+  - Validate edge cases (empty inputs, 1D y, 2D y, non-numeric targets if applicable).
+- Documentation should clearly describe:
+  - Expected input shapes and target formats.
+  - The role of the base estimator and any restrictions.
+  - The behavior of parallel execution and potential considerations for reproducibility.
+
+References in this module
+-------------------------
+- Base patterns and helpers:
+  - _fit_estimator, _partial_fit_estimator
+  - _available_if_estimator_has
+  - _MultiOutputEstimator (base class)
+- Public meta-estimators intended for end users:
+  - MultiOutputRegressor
+  - MultiOutputClassifier
+  - ClassifierChain
+  - RegressorChain
+- Validation and utilities:
+  - check_classification_targets
+  - clone, Parallell, delayed
+  - HasMethods, StrOptions for parameter validation
+  - Metadata routing utilities for advanced parameter management
+
+By following these guidelines and patterns, you can implement robust, well-tested, and user-friendly meta-estimators that extend scikit-learn estimators to multioutput scenarios, while maintaining consistency with the overall estimator API, testing philosophy, and performance characteristics of the project.

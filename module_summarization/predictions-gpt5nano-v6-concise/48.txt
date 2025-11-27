@@ -1,0 +1,138 @@
+# discretemod.rst – Generate documentation for zero-inflated discrete models
+
+This module provides a generic framework for zero-inflated count models and exposes concrete implementations such as ZeroInflatedPoisson, ZeroInflatedGeneralizedPoisson, and ZeroInflatedNegativeBinomialP. It builds on top of Statsmodels’ discrete models and blends a binary inflation model with a count model to capture excess zeros in count data.
+
+## Overview
+
+Zero-inflated models mix two processes:
+- A binary inflation process that governs whether an observation is a structural zero (inflation event) or not.
+- A count process (e.g., Poisson, Generalized Poisson, Negative Binomial) for the non-inflated observations.
+
+The module defines a generic class, `GenericZeroInflated`, which orchestrates these two components. The concrete classes (e.g., `ZeroInflatedPoisson`) specialize the main count model while reusing the inflation mechanism.
+
+Key ideas:
+- Inflation model: chooses between Logit or Probit link for the probability of inflation.
+- Main model: a standard count model providing the conditional distribution for non-inflated observations.
+- Likelihood: the per-observation log-likelihood combines the inflation probability with the main model’s likelihood.
+
+## API Summary
+
+- Public classes (exported via `__all__`):
+  - `ZeroInflatedPoisson`
+  - `ZeroInflatedGeneralizedPoisson`
+  - `ZeroInflatedNegativeBinomialP`
+- Core implementation:
+  - `GenericZeroInflated`: a generic base class for zero-inflated count models.
+
+- Important attributes (as implemented in `GenericZeroInflated` and shared by subclasses):
+  - `endog`: endogenous response variable.
+  - `exog`: design matrix for the main count model.
+  - `exog_infl`: design matrix for the zero-inflation model (can be None).
+  - `inflation`: string indicating inflation type (`'logit'` or `'probit'`).
+  - `model_infl`: the inflation model (a fitted GLM like `Logit` or `Probit`).
+  - `k_inflate`: number of inflation parameters.
+  - `k_exog`/`k_extra`: dimensionalities for main and inflation components.
+  - `exog_names`: names for main-exog variables (augmented with inflation parameter names when inflation is included).
+  - `offset`, `exposure`: optional regression offsets/exposures affecting the linear predictor.
+  - `_init_keys`, `_null_drop_keys`: internal bookkeeping for parameter initialization and missing data handling.
+  - `model_main`: the underlying main count model (e.g., Poisson, Negative Binomial, etc.).
+
+- Key methods:
+  - `loglike(params)`: overall log-likelihood for the zero-inflated model.
+  - `loglikeobs(params)`: per-observation log-likelihoods.
+  - `fit(...)`: fit the model to data using a chosen optimizer; parameters are partitioned into inflation and main-model components.
+
+## How it works
+
+- Inflation model
+  - If `exog_infl` is provided, it uniquely specifies the predictors for the inflation probability.
+  - If `exog_infl` is `None`, a single inflation parameter is estimated with a constant predictor (i.e., the inflation probability is the same across observations).
+  - The inflation model is instantiated as either `Logit` or `Probit` with the corresponding design matrix.
+  - The method stores a function to compute the inflation probability `w` per observation: `w = model_infl.predict(params_infl)`, clipped to `(eps, 1-eps)` for numerical stability.
+
+- Main count model
+  - The primary count model (Poisson, Negative Binomial, etc.) is handled by Statsmodels’ discrete models framework.
+  - The log-likelihood of the non-inflated observations is given by the main model’s `loglikeobs(params_main)`.
+
+- Combined likelihood
+  - For zero observations: `log(w_i + (1 - w_i) * exp(llf_main_i))`
+  - For positive observations: `log(1 - w_i) + llf_main_i`
+  - The total log-likelihood is the sum over observations.
+
+- Parameter organization
+  - Parameters are split into inflation parameters (`params_infl`, length `k_inflate`) and main-model parameters (`params_main`, length determined by the main model).
+  - The class exposes sufficient interfaces to integrate with Statsmodels’ fitting and results APIs.
+
+## Parameters
+
+- endog: array-like
+  - The dependent variable (counts). Zeros may be inflated depending on the model.
+- exog: array-like
+  - Design matrix for the main count model.
+- exog_infl: array-like or None
+  - Design matrix for the inflation model. If None, a single constant inflation parameter is used.
+- offset: array-like or None
+  - Offset for the linear predictor in the main model.
+- exposure: array-like or None
+  - Exposure (log-transformed) added to the linear predictor with coefficient 1.
+- inflation: str, 'logit' or 'probit'
+  - Type of link for the inflation model.
+- Additional kwargs passed to the underlying base model (e.g., `missing`, `hasconst`, etc.)
+
+## Examples
+
+- Basic usage with Zero-Inflated Poisson (logit inflation)
+
+  - Assumes you have count data in `endog`, main design `exog`, and inflation predictors `exog_infl`.
+
+  - Example code:
+    - from statsmodels.discrete.discrete_model import ZeroInflatedPoisson
+    - model = ZeroInflatedPoisson(endog, exog, exog_infl=exog_infl, inflation='logit')
+    - results = model.fit(method='bfgs')
+    - print(results.summary())
+
+- Inflation with Probit link
+
+  - Same as above but with `inflation='probit'`:
+    - model = ZeroInflatedPoisson(endog, exog, exog_infl=exog_infl, inflation='probit')
+
+- Zero-inflated with a different main model
+
+  - Replace Poisson with a different main model, e.g. `ZeroInflatedNegativeBinomialP`, to accommodate overdispersion.
+
+- Without explicit inflation predictors
+
+  - If `exog_infl` is None, the model estimates a single inflation parameter with a constant inflation probability.
+
+## Practical guidance
+
+- When to use:
+  - Data with excess zeros not well-explained by a standard count model.
+  - You want to explicitly model the mechanism generating extra zeros via a separate inflation process.
+
+- Diagnostics:
+  - Compare AIC/BIC and log-likelihood with and without inflation to justify the extra complexity.
+  - Inspect the inflation component: are the inflation predictors meaningful? Is the inflation probability close to 0 or near 1?
+
+- Numerical considerations:
+  - The inflation probability is clipped for numerical stability.
+  - The fit process can leverage different optimizers via the `fit` method (e.g., BFGS).
+
+## Implementation notes
+
+- The module defines `_doc_zi_params` to document zero-inflation related parameters shared across models.
+- The `GenericZeroInflated` class provides the core intersection of the inflation mechanism and a main count model.
+- Concrete classes (e.g., `ZeroInflatedPoisson`) derive from `GenericZeroInflated` and bind the main model to a specific distribution (Poisson, Generalized Poisson, Negative BinomialP).
+- The main model integration relies on Statsmodels’ standard `CountModel`/`DiscreteModel` interfaces, ensuring consistency with the broader modeling framework.
+- Parameter naming: inflation parameters are prefixed (e.g., `inflate_0`, `inflate_1`, ...), and their names are prepended to `exog_names` for interpretability.
+
+## See Also
+
+- statsmodels.discrete.discrete_model
+  - Provides base classes like `DiscreteModel`, `CountModel`, and concrete Poisson/Probit/Logit implementations.
+- Zero-inflated models in Statsmodels:
+  - `ZeroInflatedPoisson`
+  - `ZeroInflatedGeneralizedPoisson`
+  - `ZeroInflatedNegativeBinomialP`
+
+If you need, I can tailor this documentation to align more precisely with your internal API conventions or include a full reStructuredText (.rst) version suitable for your repository.

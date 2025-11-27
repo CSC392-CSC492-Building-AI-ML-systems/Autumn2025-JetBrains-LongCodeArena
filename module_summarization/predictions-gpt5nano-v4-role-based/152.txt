@@ -1,0 +1,109 @@
+Executing notebooks
+===================
+
+Overview
+--------
+This module provides preprocessor utilities to execute code cells in a Jupyter notebook and to annotate cells that use non-Python languages through magic extensions for proper highlighting. It is designed to be used within nbconvert pipelines and relies on nbclient to manage kernels and cell execution.
+
+API Reference
+-------------
+
+executenb
+---------
+DEPRECATED: This function is a compatibility shim around nbclient.execute.
+- Signature: executenb(*args, **kwargs)
+- Behavior: Emits a FutureWarning and delegates to nbclient.execute.
+- Note: Prefer importing and using nbclient.execute directly.
+
+ExecutePreprocessor
+-------------------
+Executes all code cells in a notebook and updates their outputs.
+
+- Inheritance
+  - Subclasses Preprocessor (nbconvert) and NotebookClient (nbclient) to preserve traitlets behavior and execution state management.
+
+- Initialization
+  - __init__(self, **kw)
+    - Accepts nb (NotebookNode) or creates a new one.
+    - Calls Preprocessor.__init__(nb=nb, **kw) and NotebookClient.__init__(self, nb, **kw).
+
+- Internal helpers
+  - _check_assign_resources(self, resources)
+    - Ensures self.resources is assigned and mirrors the provided resources if needed.
+
+- Main method
+  - preprocess(self, nb, resources=None, km=None) -> (NotebookNode, dict)
+    - Executes the notebook in-place.
+    - Steps:
+      - Reinitialize NotebookClient with nb and an optional KernelManager (km).
+      - Reset execution trackers.
+      - Assign resources via _check_assign_resources.
+      - Open a kernel with setup_kernel and obtain kernel information.
+      - Update nb.metadata["language_info"] with the kernel’s language info.
+      - Iterate over nb.cells and execute each cell via preprocess_cell(cell, resources, index).
+      - Apply widgets metadata via set_widgets_metadata.
+    - Returns:
+      - (nb, resources)
+
+- Per-cell processing
+  - preprocess_cell(self, cell, resources, index) -> (NotebookNode, dict)
+    - Default behavior: execute the cell using execute_cell(cell, index, store_history=True).
+    - Returns the possibly updated cell and the current resources.
+
+- Behavior notes
+  - The preprocess method deliberately re-initializes parts of the NotebookClient to reset execution state, because traitlet-based assignments are not passed through in this path. This approach minimizes side effects and preserves compatibility with nbclient’s execution flow.
+  - If a cell raises an error during execution, a CellExecutionError (imported for compatibility) will be raised.
+
+HighlightMagicsPreprocessor
+--------------------------
+Detects cells that use magic language extensions (e.g., %%R, %%bash) and tags them for appropriate syntax highlighting.
+
+- Purpose
+  - To mark code cells using non-Python languages for proper highlighting by downstream tooling.
+
+- Configuration
+  - default_languages: Dict mapping magic prefixes (e.g., "%%R") to pygments lexers (e.g., "r").
+  - languages: user-configurable override for default_languages (traitlets.config). This is merged into default_languages in __init__.
+  - A regular expression (self.re_magic_language) is built to detect language magics at the start of a cell.
+
+- API
+  - which_magic_language(source) -> str | None
+    - Returns the associated language if a magic language is detected; otherwise None.
+
+- Main method
+  - preprocess_cell(self, cell, resources, cell_index) -> (NotebookNode, dict)
+    - If the cell is code and a magic language is detected, sets cell.metadata["magics_language"] to that language.
+    - Returns (cell, resources)
+
+Usage examples
+--------------
+
+Execute a notebook and capture outputs
+
+.. code-block:: python
+
+   from nbformat import read
+   import nbformat
+   from nbconvert.preprocessors.execute import ExecutePreprocessor
+
+   nb = nbformat.read(open("path/to/notebook.ipynb"), as_version=4)
+
+   ep = ExecutePreprocessor(timeout=600, kernel_name="python3")
+   resources = {"metadata": {"path": "path/to/notebook"}}
+
+   nb, resources = ep.preprocess(nb, resources)
+
+Highlight magics for syntax highlighting
+
+.. code-block:: python
+
+   from nbconvert.preprocessors.execute import HighlightMagicsPreprocessor
+
+   hl = HighlightMagicsPreprocessor()
+   nb, resources = hl.preprocess(nb, resources)
+
+Notes
+-----
+- ExecutePreprocessor relies on nbclient's NotebookClient to manage kernel lifecycle, kernel_info retrieval, and per-cell execution state.
+- CellExecutionError may be raised during execution if a code cell fails.
+- The combination of ExecutePreprocessor and HighlightMagicsPreprocessor enables both execution of notebooks and correct highlighting for cells using language magics.

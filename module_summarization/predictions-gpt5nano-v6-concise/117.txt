@@ -1,0 +1,172 @@
+# resources.rst
+
+Generate documentation for the resources module implemented in the provided code.
+
+Overview
+- This module provides a small but flexible system for accessing resources (such as schemas) from plugins or external packages.
+- It defines:
+  - DirectoryResourceMapping: a resource mapping that reads content from a directory tree.
+  - ResourceMappingProxy: a wrapper that attaches optional package metadata to a mapping.
+  - ResourceManager: a light-weight combiner that merges multiple mappings with a defined precedence.
+  - JsonschemaResourceMapping: a mapping that fetches JSON Schema metaschemas from the jsonschema package.
+  - get_json_schema_resource_mappings: a helper to obtain the default JSON Schema mappings.
+
+API Reference
+- DirectoryResourceMapping
+  - Inherits from asdf_standard.DirectoryResourceMapping.
+  - Purpose: read resource content from a directory or directory tree.
+  - Usage:
+    - directory_mapping = DirectoryResourceMapping("/path/to/resources")
+  - Notes: See the base class documentation for details on how URIs are resolved from the directory structure.
+
+- ResourceMappingProxy
+  - Purpose: wrap an underlying Mapping and carry optional packaging metadata (package name and version).
+  - Important members:
+    - maybe_wrap(delegate): classmethod that returns a ResourceMappingProxy wrapping the delegate, unless the delegate is already a ResourceMappingProxy.
+      - Usage: proxy = ResourceMappingProxy.maybe_wrap(mapping)
+    - delegate: the wrapped Mapping instance.
+    - package_name: optional package name that provided the mapping.
+    - package_version: optional package version.
+    - class_name: fully-qualified class name of the underlying mapping.
+    - __getitem__, __len__, __iter__: delegate to the wrapped mapping.
+    - __eq__/__hash__: equality is based on the identity of the wrapped delegate; hash uses id(delegate).
+    - __repr__: includes the mapping class, package information if provided, and size.
+  - Example:
+    - base = DirectoryResourceMapping("/path/to/resources")
+    - proxy = ResourceMappingProxy.maybe_wrap(base)
+  - Notes:
+    - If the underlying delegate is not a Mapping, construction raises TypeError.
+
+- ResourceManager
+  - Purpose: combine multiple resource mappings into a single interface with friendly error handling.
+  - Initialization:
+    - ResourceManager(resource_mappings)
+    - The manager builds an index that maps each URI to the first mapping that provides it.
+    - Precedence: the first mapping encountered for a given URI takes precedence.
+  - API:
+    - __getitem__(uri): returns the content for the given URI as bytes.
+      - If the content retrieved from the chosen mapping is a str, it is encoded as UTF-8.
+      - If the URI is not present, raises KeyError with a helpful message.
+    - __len__(): number of unique URIs available across mappings.
+    - __iter__(): iterate over the URIs.
+    - __contains__(uri): efficient containment test for a URI.
+    - __repr__(): a concise representation showing the number of available URIs.
+  - Example:
+    - m1 = ResourceMappingProxy.maybe_wrap(DirectoryResourceMapping("/path/a"))
+    - m2 = ResourceMappingProxy.maybe_wrap(DirectoryResourceMapping("/path/b"))
+    - manager = ResourceManager([m1, m2])
+    - data = manager["example/resource.json"]
+
+- JsonschemaResourceMapping
+  - Purpose: a resource mapping that fetches JSON Schema metaschemas from the jsonschema package.
+  - Behavior:
+    - __getitem__(uri): maps known URIs to corresponding files inside jsonschema/schemas/ and returns bytes via pkgutil.get_data.
+  - Internal mapping:
+    - _JSONSCHEMA_URI_TO_FILENAME = {"http://json-schema.org/draft-04/schema": "draft4.json"}
+  - API:
+    - __len__(): 1 (the single available URI)
+    - __iter__(): iterates over the available URIs
+    - __getitem__(uri): returns the schema data as bytes
+    - __repr__(): "JsonschemaResourceMapping()"
+  - Example:
+    - json_mapping = JsonschemaResourceMapping()
+    - schema_bytes = json_mapping["http://json-schema.org/draft-04/schema"]
+
+- get_json_schema_resource_mappings
+  - Purpose: convenience function to get a list of resource mappings for JSON Schema metaschemas.
+  - Returns: [JsonschemaResourceMapping()]
+
+Usage Examples
+- Example 1: Accessing resources from a directory
+  - Code:
+    - from resources import DirectoryResourceMapping, ResourceManager, ResourceMappingProxy
+    - dir_map = DirectoryResourceMapping("/path/to/resource_dir")
+    - proxy = ResourceMappingProxy.maybe_wrap(dir_map)
+    - manager = ResourceManager([proxy])
+    - resource_uri = "schemas/my_schema.json"
+    - content = manager[resource_uri]  # bytes
+  - Notes:
+    - If the underling mapping returns a string, it will be UTF-8 encoded to bytes by the manager.
+
+- Example 2: Wrapping a mapping with package metadata
+  - Code:
+    - from resources import DirectoryResourceMapping, ResourceMappingProxy
+    - base_map = DirectoryResourceMapping("/path/to/resources")
+    - proxy = ResourceMappingProxy(base_map, package_name="my.plugin", package_version="0.1.0")
+    - print(proxy.package_name)  # "my.plugin"
+    - print(proxy.package_version)  # "0.1.0"
+  - Notes:
+    - Useful for diagnostics and for consumers to know which package provided a mapping.
+
+- Example 3: Merging multiple mappings with precedence
+  - Code:
+    - from resources import DirectoryResourceMapping, ResourceMappingProxy, ResourceManager
+    - a = ResourceMappingProxy.maybe_wrap(DirectoryResourceMapping("/path/a"))
+    - b = ResourceMappingProxy.maybe_wrap(DirectoryResourceMapping("/path/b"))
+    - manager = ResourceManager([a, b])
+    - print(len(manager))
+  - Behavior:
+    - If both mappings provide the same URI, the one from the first mapping (a) is used.
+
+- Example 4: Accessing JSON Schema metaschemas
+  - Code:
+    - from resources import get_json_schema_resource_mappings
+    - mappings = get_json_schema_resource_mappings()
+    - json_mapping = mappings[0]
+    - schema = json_mapping["http://json-schema.org/draft-04/schema"]
+    - print(len(schema))  # length of the bytes payload
+  - Notes:
+    - The content is returned as bytes.
+
+- Example 5: Error handling
+  - Code:
+    - from resources import ResourceManager, ResourceMappingProxy
+    - m = ResourceManager([])
+    - try:
+        content = m["nonexistent/uri.json"]
+      except KeyError as exc:
+        print(f"Resource missing: {exc}")
+  - Notes:
+    - A KeyError is raised if a URI is not available in any of the provided mappings.
+
+Design and Behavioral Notes
+- Precedence and Duplication
+  - ResourceManager assigns URIs to the first mapping that provides them.
+  - Later mappings do not override earlier ones for the same URI.
+- Data Encoding
+  - ResourceManager ensures that string content is encoded to UTF-8 bytes before returning.
+- Metadata Enrichment
+  - ResourceMappingProxy can carry package_name and package_version, accessible via properties.
+  - Useful for debugging and for users to identify the source of mappings.
+- Equality and Hashing
+  - ResourceMappingProxy equality is based on the identity of the wrapped delegate; proxies wrapping the same delegate compare equal by identity.
+  - Hashing uses the id(delegate), making each proxy unique with respect to its delegate.
+- JSON Schema Resources
+  - JsonschemaResourceMapping is a tiny adapter over the jsonschema package that exposes the draft-04 metaschema via a stable URI.
+
+Implementation Details (Key Points)
+- DirectoryResourceMapping
+  - Delegates to asdf_standard.DirectoryResourceMapping for actual filesystem-backed resource loading.
+- ResourceMappingProxy
+  - Validates that the delegate implements Mapping.
+  - Exposes a fully-qualified class name via class_name, derived from the delegate.
+- ResourceManager
+  - Builds a fast lookup map _mappings_by_uri of URI -> mapping supplying that URI.
+  - __contains__ is implemented for efficient membership tests; __getitem__ performs error handling for missing URIs.
+- JsonschemaResourceMapping
+  - Uses pkgutil.get_data to fetch embedded resources from the jsonschema package.
+  - Only the draft-04 schema is currently mapped; extendable by modifying _JSONSCHEMA_URI_TO_FILENAME and the mapping logic.
+
+Compatibility and Dependencies
+- Requires the asdf_standard package for DirectoryResourceMapping.
+- Uses Python’s standard library: pkgutil, collections.abc.Mapping.
+- Depends on the jsonschema package for JsonschemaResourceMapping.
+
+See Also
+- asdf_standard.DirectoryResourceMapping (base behavior)
+- jsonschema package and its schemas directory
+- get_class_name (from the local .util module) to derive class names for proxies
+
+Notes
+- The maybe_wrap helper in ResourceMappingProxy is a classmethod intended for convenient wrapping of any Mapping into a ResourceMappingProxy. If the input is already a ResourceMappingProxy, it is returned unchanged.
+- The code is designed to be plugin-friendly: a resource provider can supply its own Mapping, and the rest of the system (ResourceManager, proxies) can work with it without requiring the provider to implement additional interfaces beyond Mapping.

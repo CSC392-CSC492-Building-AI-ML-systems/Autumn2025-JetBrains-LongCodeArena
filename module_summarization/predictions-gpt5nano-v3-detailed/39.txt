@@ -1,0 +1,135 @@
+# Model usage
+
+This module provides the core building blocks for defining and working with ORM models. It includes helpers for meta configuration, internal attribute accessors for relations, and the structural container that holds per-model metadata.
+
+## Overview
+
+- Models are defined by subclassing a base Model (not shown here) and declaring fields (e.g., integers, strings) along with relational fields (foreign keys, one-to-one, and many-to-many).
+- Meta options control how a model maps to the database, including table naming, app labeling, indexing, uniqueness constraints, and default ordering.
+- The module includes internal utilities to support relation handling and to extract helpful documentation comments from the model source.
+
+## Key components
+
+### Meta configuration helpers
+
+- `get_together(meta: "Model.Meta", together: str) -> Tuple[Tuple[str,...], ...]`
+  - Retrieves and normalizes a meta option that represents a collection of field tuples (e.g., `unique_together`, `indexes`).
+  - Behavior:
+    - If the value is a list/tuple of strings, it is wrapped into a single tuple: `((...),)` for uniform processing.
+    - Validation is deferred to later stages; this function returns the raw shape for further handling.
+
+- `prepare_default_ordering(meta: "Model.Meta") -> Tuple[Tuple[str, Order], ...]`
+  - Computes the default ordering for a model from its `ordering` meta option.
+  - Each ordering item is resolved into a tuple of `(field_name, Order)` via `QuerySet._resolve_ordering_string`.
+
+### Internal relation accessors
+
+These helpers implement lazy or on-demand access to related objects and relations. They are intended for internal use by the model machinery.
+
+- `_fk_setter(self: "Model", value: "Optional[Model]", _key: str, relation_field: str, to_field: str) -> None`
+  - Sets both the foreign key field and the related object on the model instance.
+
+- `_fk_getter(self: "Model", _key: str, ftype: "Type[Model]", relation_field: str, to_field: str) -> Awaitable`
+  - Getter for a foreign key relation; returns the related object or an asynchronous lookup result, or `NoneAwaitable` if not yet loaded.
+
+- `_rfk_getter(self: "Model", _key: str, ftype: "Type[Model]", frelfield: str, from_field: str) -> ReverseRelation`
+  - Accessor for reverse (backward) foreign key relations; returns a `ReverseRelation` wrapper.
+
+- `_ro2o_getter(self: "Model", _key: str, ftype: "Type[Model]", frelfield: str, from_field: str) -> "QuerySetSingle[Optional[Model]]"`
+  - Getter for reverse one-to-one relations; returns a single object or an awaited lookup result.
+
+- `_m2m_getter(self: "Model", _key: str, field_object: ManyToManyFieldInstance) -> ManyToManyRelation`
+  - Getter for many-to-many relations; returns a `ManyToManyRelation` wrapper.
+
+### Documentation extraction helper
+
+- `_get_comments(cls: "Type[Model]") -> Dict[str, str]`
+  - Extracts inline field comments from the model source to provide human-friendly field documentation.
+  - Comments must be in a line-comment style preceding the field definition and can be multiline.
+  - Replaces the placeholder `{model}` with the actual class name.
+
+### Metadata container: `MetaInfo`
+
+- Purpose:
+  - Centralizes per-model metadata computed from the model class and its `Meta` inner class.
+- Core attributes (selected):
+  - `abstract`: whether the model is abstract (no table creation).
+  - `db_table`: explicit database table name; defaults to model-based naming if not provided.
+  - `app`: application label the model belongs to.
+  - `fields`, `db_fields`: sets of field names defined on the model and their corresponding DB fields.
+  - `m2m_fields`, `fk_fields`, `o2o_fields`: sets of field names for many-to-many, foreign key, and one-to-one relations.
+  - `backward_fk_fields`, `backward_o2o_fields`: reverse relation field names present on related models.
+  - `fetch_fields`: fields scheduled for lazy loading or prefetching.
+  - `fields_db_projection`, `fields_db_projection_reverse`: structures describing which fields are projected to or from the DB.
+  - `_inited`: internal flag indicating whether the meta info has been initialized.
+  - `filters`: field-based filters for queries.
+  - `fields_map`: mapping from model field names to their metadata or DB representations.
+  - `default_connection`: default database connection for the model.
+  - `basequery`, `basequery_all_fields`: base query builders used when constructing queries.
+  - `basetable`: the table alias or base table name used in queries.
+  - `_filters`: internal caching of filter configurations.
+  - `unique_together`, `indexes`: constraints defined on the model.
+  - `pk_attr`, `pk`: primary key attribute name and descriptor.
+  - `db_pk_column`: the database primary key column name.
+  - `db_native_fields`, `db_default_fields`, `db_complex_fields`: groups of fields categorized by how they map to the DB.
+  - `_default_ordering`, `_ordering_validated`: default ordering configuration and its validation state.
+
+> Note: The class primarily serves as a structural holder for all model-related configuration and runtime state, enabling consistent behavior across the ORM.
+
+## Model usage patterns
+
+- Declaring a model with fields and relations:
+  - Define fields using field classes (e.g., `IntField`, `CharField`, etc.).
+  - Define relations using `ForeignKeyFieldInstance`, `OneToOneFieldInstance`, `ManyToManyFieldInstance`, along with corresponding reverse relations.
+
+- Meta options:
+  - Use a nested `Meta` class to set:
+    - `abstract` (bool): define an abstract base model.
+    - `table` (str): explicit table name.
+    - `app` (str): application label for organization and migrations.
+    - `unique_together` (Tuple[Tuple[str, ...], ...]): composite uniqueness constraints.
+    - `indexes` (Tuple[Tuple[str, ...], ...]): database indexes.
+    - `ordering` (Tuple[str, ...]): default ordering specification; supports strings that are resolved via `QuerySet._resolve_ordering_string`.
+
+- Comment-driven docs:
+  - Field documentation can be automatically derived from code comments preceding field definitions via `_get_comments`.
+
+## Important considerations and edge cases
+
+- Validation of meta options (e.g., `unique_together`, `indexes`) happens beyond the initial retrieval in `get_together`; the helper returns a normalized shape and leaves deeper validation to subsequent stages.
+- Default ordering is resolved from the model’s `ordering` meta option; if not provided, there is no global default ordering.
+- Internal accessors (__e.g.,__) `_fk_getter`, `_ro2o_getter`, `_m2m_getter` are intended for internal use by the ORM and may be subject to change.
+- Abstract models do not create database tables; they serve as base classes for shared fields or behaviors.
+
+## Usage example
+
+```python
+from tortoise import Model
+from tortoise.fields import IntField, CharField, ForeignKeyFieldInstance
+from tortoise.backends.base.client import BaseDBAsyncClient
+from tortoise.fields.relational import ForeignKeyFieldInstance
+
+class User(Model):
+    id = IntField(pk=True)
+    username = CharField(max_length=50, unique=True)
+    email = CharField(max_length=100, null=True)
+
+    class Meta:
+        table = "users"
+        app = "myapp"
+        unique_together = (("username", "email"),)
+        indexes = (("email",),)
+        ordering = ("-id",)
+
+# Usage
+# Creating and querying would use the standard ORM APIs (not shown here).
+```
+
+## See also
+
+- Query construction: `Query`, `QuerySet`, `Q`
+- Field and relation types: `IntField`, `ForeignKeyFieldInstance`, `OneToOneFieldInstance`, `ManyToManyFieldInstance`
+- Related relation helpers: `BackwardFKRelation`, `BackwardOneToOneRelation`, `ReverseRelation`, `ManyToManyRelation`
+- Transaction and error handling: `current_transaction_map`, `in_transaction`, `ConfigurationError`, `IntegrityError`, `OperationalError`, `TransactionManagementError`
+
+This concludes the overview of model usage and the core components involved in defining and configuring ORM models.

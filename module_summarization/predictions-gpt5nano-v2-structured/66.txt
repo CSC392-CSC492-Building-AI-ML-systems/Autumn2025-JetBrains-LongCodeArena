@@ -1,0 +1,196 @@
+# compose.rst — Tutorial: Pipelines
+
+The pipeline utilities in this module provide a simple way to chain multiple transforms with a final estimator into a single composite estimator. Pipelines enable clean workflows, easy cross-validation, and convenient parameter management through hierarchical parameter naming using the ``__`` separator.
+
+## Why use pipelines
+
+- Chain preprocessing steps and a final estimator into one object.
+- Tune parameters across steps with a single grid search.
+- Cache intermediate transformers to speed up repeated fits (memory option).
+- Ensure consistent data processing between training and evaluation.
+
+## Core concepts
+
+- A pipeline is created from a list of (name, transform) tuples in the order they should be applied.
+- All steps except the last must implement ``fit`` and ``transform`` (they are transformers).
+- The last step must implement ``fit`` (an estimator). It can be a classifier, regressor, or any estimator.
+- Parameters of steps can be set using the ``step_name__parameter`` syntax (e.g., ``scaler__with_mean`` or ``svc__C``).
+- Steps can be replaced or removed by using a new estimator or by using ``'passthrough'`` or ``None``.
+
+## Basic usage
+
+Create a simple pipeline with a standard scaler and a support vector classifier.
+
+```python
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+
+# Generate a toy dataset
+X, y = make_classification(n_samples=1000, random_state=0)
+
+# Split into train/test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+# Build the pipeline
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('svc', SVC())
+])
+
+# Fit and evaluate
+pipe.fit(X_train, y_train)
+score = pipe.score(X_test, y_test)
+print("Test score:", score)
+```
+
+## Parameter setting and grid search
+
+One of the main benefits of pipelines is the ability to set parameters for any step using the double-underscore syntax, which is essential for grid search and hyperparameter tuning.
+
+```python
+# Change a parameter in a specific step
+pipe.set_params(svc__C=10.0, scaler__with_mean=False)
+
+# Example grid search over parameters across steps
+from sklearn.model_selection import GridSearchCV
+
+param_grid = {
+    'svc__C': [0.1, 1, 10],
+    'scaler__with_mean': [True, False],
+}
+
+grid = GridSearchCV(pipe, param_grid, cv=5)
+grid.fit(X_train, y_train)
+print("Best score:", grid.best_score_)
+print("Best params:", grid.best_params_)
+```
+
+## Memory and caching
+
+To speed up repeated fits, pipelines can cache fitted transformers via the ``memory`` argument. The final estimator is not cached.
+
+```python
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from joblib import Memory
+import numpy as np
+import os
+
+# Simple example using a local cache directory
+cache_dir = os.path.join(os.getcwd(), 'pipeline_cache')
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', LogisticRegression())
+], memory=cache_dir)
+
+# or with the convenience constructor
+pipe2 = make_pipeline(StandardScaler(), LogisticRegression(), memory=cache_dir)
+
+pipe.fit(X_train, y_train)
+```
+
+Note: When memory is set, each transformer is cloned and cached during fitting.
+
+## Convenience: make_pipeline
+
+For common cases, you can use ``make_pipeline`` to construct a pipeline without naming each step explicitly.
+
+```python
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+
+pipe = make_pipeline(StandardScaler(), LogisticRegression())
+
+# The steps are named automatically (e.g., 'standardscaler', 'logisticregression')
+pipe.fit(X_train, y_train)
+print(pipe.score(X_test, y_test))
+```
+
+## Feature unions: combining features from multiple transformers
+
+FeatureUnion allows parallel transformation of features, combining their outputs as a single feature space, which can then be passed to a final estimator inside a Pipeline or used standalone.
+
+```python
+from sklearn.pipeline import FeatureUnion
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+
+# Combine PCA-reduced features with scaled original features
+union = FeatureUnion([
+    ('pca', PCA(n_components=2)),
+    ('scaler', Pipeline([('scaler', StandardScaler())]))
+])
+
+# Use within a pipeline
+pipe = Pipeline([
+    ('features', union),
+    ('clf', LogisticRegression())
+])
+
+pipe.fit(X_train, y_train)
+print("Pipeline with FeatureUnion score:", pipe.score(X_test, y_test))
+```
+
+## Transform-only vs. final estimator
+
+- All steps except the last must be transformers (implement ``fit`` and ``transform``).
+- The final step is an estimator (implements ``fit``) and is used to generate predictions.
+
+## Inspecting pipelines
+
+- Access steps via ``pipeline.named_steps`` (a dict-like object).
+- Access individual step parameters via the same ``step_name__parameter`` syntax used in ``set_params``.
+
+```python
+print(pipe.named_steps['scaler'])
+print(pipe.named_steps['svc'].classes_ if hasattr(pipe.named_steps['svc'], 'classes_') else None)
+```
+
+## Practical example: handwritten digits with cross-validation
+
+```python
+from sklearn.datasets import load_digits
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.svm import SVC
+
+digits = load_digits()
+X, y = digits.data, digits.target
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('pca', PCA(n_components=0.95, random_state=42)),
+    ('svc', SVC())
+])
+
+param_grid = {
+    'pca__n_components': [0.95, 0.99],
+    'svc__C': [1, 10],
+    'svc__gamma': ['scale', 'auto'],
+}
+
+grid = GridSearchCV(pipe, param_grid, cv=5)
+grid.fit(X_train, y_train)
+
+print("Best test score:", grid.score(X_test, y_test))
+print("Best params:", grid.best_params_)
+```
+
+## See Also
+
+- make_pipeline: Convenience function to create a Pipeline with automatic step naming.
+- make_union: Convenience function for FeatureUnion-like composition.
+
+## Summary
+
+Pipelines provide a cohesive, testable, and scalable way to manage complex data processing and modeling workflows. By chaining transforms with estimators, you ensure consistent data handling, simplify hyperparameter search, and optimize performance through optional caching. Use make_pipeline for quick setups, and FeatureUnion when you need parallel feature processing.

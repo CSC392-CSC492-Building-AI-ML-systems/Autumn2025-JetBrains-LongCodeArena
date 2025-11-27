@@ -1,0 +1,133 @@
+FITS Headers
+============
+
+Overview
+--------
+
+This module provides utilities for validating and reporting issues found in FITS headers. It defines a lightweight verification framework that can be mixed into header-related classes to check for correctness, report problems, and optionally fix fixable issues.
+
+Key concepts
+------------
+
+- VerifyOption: A string that controls how header verification reports problems and whether fixable issues should be corrected automatically.
+- _Verify: Internal helper that drives the verification logic. It provides:
+  - run_option: Execute a single verification result, optionally applying a fix and returning a tuple indicating fixability and a status message.
+  - verify: Run the full verification across all header values, produce human-readable messages, and either warn or raise errors depending on the option.
+- _ErrList: A specialized list structure that represents nested verification messages. It supports:
+  - Nested message hierarchies for complex header structures.
+  - Iteration that yields (fixable, message) pairs suitable for reporting.
+  - Pretty string formatting of the error messages.
+- VerifyError / VerifyWarning: Exception and warning classes used to surface verification failures or warnings to users.
+- VERIFY_OPTIONS: The set of permitted verification options, including combinations like "fix+warn", "silentfix+ignore", etc.
+
+API reference
+-------------
+
+Constants
+- VERIFY_OPTIONS
+  - A list of supported verification options, e.g. "ignore", "warn", "exception", "fix", "silentfix", and combinations such as "fix+warn", "silentfix+exception", etc.
+
+Exceptions
+- VerifyError(Exception)
+  - Raised when verification fails under the configured reporting mode (e.g., when option leads to an exception).
+- VerifyWarning(AstropyUserWarning)
+  - Warning raised to report verification issues when the mode uses warnings.
+
+Core classes
+- _Verify
+  - Purpose: Provide shared verification helpers for header-like objects.
+  - Methods:
+    - run_option(self, option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+      - Description: Execute a single verification outcome based on the given option.
+      - Parameters:
+        - option (str): Verification option. Typical values include "warn", "ignore", "exception", "fix", "silentfix", and combinations with "+ignore"/"+warn"/"+exception".
+        - err_text (str): Base error message describing the problem.
+        - fix_text (str): Text to append if a fix is applied.
+        - fix (callable): Optional function to apply a fix.
+        - fixable (bool): Whether the issue is fixable.
+      - Return: A tuple (fixable, text) where fixable indicates if the issue can be fixed and text is a status message.
+    - verify(self, option="warn")
+      - Description: Validate all values in the instance using the verification logic implemented by the class.
+      - Parameters:
+        - option (str): Verification reporting and fixing option. See VERIFY_OPTIONS and the module doc for details.
+      - Behavior:
+        - Validates the option, runs the internal _verify method, and processes the results to produce messages.
+        - Supports splitting the option into fix and report components when "+" is present.
+        - Handles silent fixes, warnings, and raising VerifyError as appropriate.
+      - Note: The class implementing _Verify must provide a _verify(self, opt) method that returns an _ErrList describing any issues found.
+
+- _ErrList(list)
+  - Purpose: Encapsulate verification errors in a nested structure and provide helpful formatting.
+  - Attributes:
+    - unit (str): Optional unit label for a level in the error hierarchy (defaults to "Element").
+  - Methods:
+    - __init__(self, val=(), unit="Element")
+      - Initialize the error list with an optional initial value and a unit label.
+    - __str__(self)
+      - Return a human-readable representation of the error messages.
+    - iter_lines(self, filter=None, shift=0)
+      - Iterate through the nested structure, yielding (fixable, message) pairs with proper indentation.
+      - filter: Optional callable to filter messages; if provided, only items for which filter(item) is True are yielded.
+      - shift: Indentation level for nested messages.
+
+Usage notes
+-----------
+
+- The verification framework is designed to be mixed into header-like classes that implement a _verify(self, option) method. This method should perform the actual checks and return an _ErrList describing any issues.
+- The verify() method orchestrates reporting and/or fixing according to the chosen option. It supports complex options like "fix+warn" to both fix issues and report them as warnings.
+- When option is "ignore", verification is skipped entirely.
+- The system reports messages with a header indicating "Verification reported errors:" and notes about zero-based indexing where relevant (as used by FITS in some contexts).
+- If a fixable error is encountered and a fix function is provided, run_option will execute the fix and append a confirmation message to the report.
+- If an issue is unfixable under the chosen option, verification may raise VerifyError unless the option suppresses errors (e.g., "ignore").
+
+Usage examples
+--------------
+
+Basic usage pattern (illustrative):
+
+.. code-block:: python
+
+    from astropy.io.fits.headers import _Verify, _ErrList, VerifyWarning, VERIFY_OPTIONS
+
+    class MyHeader(_Verify):
+        def __init__(self):
+            self.name = ""
+            self.value = 0
+
+        def _verify(self, opt):
+            errs = _ErrList(unit="Header")
+            # Example check: require non-empty name
+            if not self.name:
+                # (fixable, message)
+                errs.append((False, "Header 'name' must be non-empty"))
+            # Example check: value must be positive
+            if self.value <= 0:
+                errs.append((True, "Header 'value' must be positive"))
+            return errs
+
+    hdr = MyHeader()
+    # Try verifying with warnings
+    hdr.verify(option="warn")
+
+    # Fix attempt example (assuming a fix function is provided)
+    def fix_name():
+        hdr.name = "default"
+
+    # Using the low-level run_option to apply a fix and get a status
+    _, text = hdr.run_option(option="fix", err_text="Name missing", fix=fix_name, fixable=True)
+
+Edge cases
+----------
+
+- Invalid option strings cause a ValueError: "Option '...' not recognized."
+- option="ignore" yields no output and no side effects.
+- "silentfix" suppresses reported messages for fixable issues; only unfixable issues may still raise errors.
+- Mixing fix and report behavior via "fix+warn", "fix+exception", etc., influences whether issues are reported, raised, or suppressed.
+
+Notes
+-----
+
+- The verification framework is designed to be extendable for various header validation tasks. Implementers should define _verify to enumerate issues as _ErrList entries where each non-list item is a tuple (fixable, message).
+- For more information on how verification interacts with the rest of the FITS handling and verification conventions, refer to the project’s verification policy and the central :ref:`astropy:verify` documentation.
+
+End of documentation.

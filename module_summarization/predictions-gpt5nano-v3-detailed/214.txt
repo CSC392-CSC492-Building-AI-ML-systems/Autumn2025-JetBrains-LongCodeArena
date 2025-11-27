@@ -1,0 +1,247 @@
+Introduction
+------------
+This module provides a general optimization interface for estimating model parameters using various solver algorithms exposed by SciPy. The goal is to decouple the fitting routines from a specific model implementation so the same machinery can be reused across models.
+
+Overview of algorithm families
+------------------------------
+The optimizer supports three broad families of algorithms for estimating parameters of a model:
+
+- Gradient-based local optimization (derivatives available)
+  - Examples: Newton-Raphson (newton), Newton-CG (ncg), Conjugate Gradient (cg), BFGS (bfgs)
+  - Characteristics: fast convergence near a good solution when objective and derivatives are well-behaved
+
+- Derivative-free local optimization
+  - Examples: Nelder-Mead (nm), Powell’s method (powell)
+  - Characteristics: useful when derivatives are unavailable or unreliable; may require more function evaluations
+
+- Global/metaheuristic optimization
+  - Examples: Basin-hopping (basinhopping)
+  - Characteristics: attempts to escape local minima to find a better global solution; often combined with a local minimizer via a nested call
+
+- Generic wrapper
+  - minimize (scipy.optimize.minimize) can be used as a wrapper to access a wide range of methods
+  - Characteristics: provides a common entry point to many algorithms with customizable options
+
+The Optimizer interface
+-----------------------
+Key class and method:
+
+- Optimizer
+  - Purpose: provide a generic fit interface that can call into SciPy’s optimization routines using an objective function (and optional gradient/hessian).
+
+- _fit(...)
+  - Purpose: fit an objective function with optional gradient and Hessian using the specified method.
+  - Parameters
+    - objective: callable
+      The scalar objective function to minimize (e.g., negative log-likelihood). Signature should be objective(x, *args, **kwargs).
+    - gradient: callable or None
+      The gradient (score) function. If None, derivative-free methods may be used.
+    - start_params: array_like
+      Initial guess for the parameters.
+    - fargs: tuple
+      Extra arguments passed to the objective function (i.e., objective(x, *fargs)).
+    - kwargs: dict
+      Keyword arguments passed to the objective function, not to the solver.
+      Can be used to supply additional configuration such as a nested minimizer for basinhopping (e.g., minimizer settings).
+    - hessian: callable or None
+      Hessian or Hessian-times-vector function. Used by some methods (e.g., Newton-based).
+    - method: str
+      Solver method to use. Options include:
+        - 'newton', 'nm', 'bfgs', 'powell', 'cg', 'ncg', 'basinhopping', 'minimize'
+      The explicit solver arguments are passed to the chosen SciPy solver. The 'basinhopping' solver ignores maxiter, retall, and full_output.
+    - maxiter: int
+      Maximum number of iterations for the solver (where applicable).
+    - full_output: bool
+      If True, return additional solver information in the result.
+    - disp: bool
+      If True, print convergence messages.
+    - callback: callable
+      Called after each iteration with the current parameter vector.
+    - retall: bool
+      If True, return a list of solutions at each iteration (where supported).
+
+  - Returns
+    - xopt: array
+      The optimized parameter vector.
+    - retvals: dict or None
+      Solver-specific output when full_output is True; otherwise None.
+    - optim_settings: dict
+      The dictionary of the solver parameters actually used (e.g., method-specific options).
+
+Notes and important considerations
+----------------------------------
+- Basinhopping behavior
+  - The basinhopping solver ignores maxiter, retall, and full_output. To configure it, supply a nested minimizer through kwargs (e.g., minimizer settings used by the inner scipy.optimize.minimize).
+
+- Derivative availability
+  - If you intend to use gradient-based methods, supply a valid gradient function. If gradient is not available, consider derivative-free methods (nm, powell) or a generic minimize wrapper with an appropriate method.
+
+- Hessian and second-order techniques
+  - Newton-based methods (newton, ncg) may leverage the Hessian or Hessian-times-vector products. If your model does not provide a Hessian, these methods may be inapplicable or require numerical approximation.
+
+- Wrapper method
+  - The 'minimize' method acts as a wrapper around scipy.optimize.minimize, enabling a wide range of solver options. When using minimize, you can select the inner method (e.g., 'L-BFGS-B') via the kwargs/minimizer configuration.
+
+Usage examples
+--------------
+Below are representative usage patterns. Each example demonstrates a different algorithm family.
+
+Example 1: Gradient-based local optimization (Newton-Raphson)
+-------------------------------------------------------------
+- Objective: simple quadratic function with analytic gradient
+- Expectation: fast convergence near the optimum
+
+.. code-block:: python
+
+    import numpy as np
+    from optimization_module import Optimizer  # replace with actual import path
+
+    def objective(x, a=0.0):
+        # Simple convex quadratic: min at x = a
+        return np.sum((x - a) ** 2)
+
+    def gradient(x, a=0.0):
+        return 2 * (x - a)
+
+    start_params = np.array([0.0, 0.0])
+    opt = Optimizer()
+    xopt, retvals, optim_settings = opt._fit(
+        objective=objective,
+        gradient=gradient,
+        start_params=start_params,
+        fargs=(0.0,),           # objective extras
+        kwargs={},                # additional objective kwargs
+        hessian=None,
+        method='newton',
+        maxiter=100,
+        full_output=True,
+        disp=True,
+        callback=None,
+        retall=False
+    )
+    print("Optimal x:", xopt)
+
+Example 2: Derivative-free local optimization (Nelder-Mead)
+------------------------------------------------------------
+- Objective: same quadratic, but gradients not required
+- Useful when derivatives are unavailable
+
+.. code-block:: python
+
+    import numpy as np
+    from optimization_module import Optimizer
+
+    def objective(x, a=0.0):
+        return np.sum((x - a) ** 2)
+
+    start_params = np.array([0.0, 0.0])
+    opt = Optimizer()
+    xopt, retvals, optim_settings = opt._fit(
+        objective=objective,
+        gradient=None,
+        start_params=start_params,
+        fargs=(0.0,),
+        kwargs={},
+        hessian=None,
+        method='nm',
+        maxiter=200,
+        full_output=True,
+        disp=True,
+        callback=None,
+        retall=False
+    )
+    print("Optimal x (NM):", xopt)
+
+Example 3: Global optimization (basinhopping) with a local minimizer
+--------------------------------------------------------------------
+- Objective: non-convex landscape; basinhopping helps escape local minima
+- Provide a nested minimizer via kwargs (e.g., inner L-BFGS-B)
+
+.. code-block:: python
+
+    import numpy as np
+    from optimization_module import Optimizer
+
+    def objective(x, noise=0.0):
+        # Example non-convex objective
+        val = (x[0] - 1.0) ** 2 + (x[1] + 2.0) ** 2
+        val += 0.1 * np.sin(x[0] * x[1])
+        return val
+
+    def gradient(x, noise=0.0):
+        # Optional: provide gradient if available
+        g0 = 2*(x[0] - 1.0) + 0.1*np.cos(x[0]*x[1])*x[1]
+        g1 = 2*(x[1] + 2.0) + 0.1*np.cos(x[0]*x[1])*x[0]
+        return np.array([g0, g1])
+
+    start_params = np.array([0.0, 0.0])
+    minimizer_settings = {'method': 'L-BFGS-B', 'tol': 1e-6}
+
+    opt = Optimizer()
+    xopt, retvals, optim_settings = opt._fit(
+        objective=objective,
+        gradient=gradient,
+        start_params=start_params,
+        fargs=(),
+        kwargs={'minimizer': minimizer_settings},
+        hessian=None,
+        method='basinhopping',
+        maxiter=1000,
+        full_output=True,
+        disp=True,
+        callback=None,
+        retall=False
+    )
+    print("Optimal x (basinhopping):", xopt)
+
+Example 4: Generic wrapper using scipy.optimize.minimize
+-------------------------------------------------------
+- Leverages the full flexibility of SciPy optimizers via the minimize interface
+
+.. code-block:: python
+
+    import numpy as np
+    from optimization_module import Optimizer
+
+    def objective(x, a=0.0):
+        return np.sum((x - a) ** 2)
+
+    def gradient(x, a=0.0):
+        return 2 * (x - a)
+
+    start_params = np.array([2.0, -1.0])
+    opt = Optimizer()
+    xopt, retvals, optim_settings = opt._fit(
+        objective=objective,
+        gradient=gradient,
+        start_params=start_params,
+        fargs=(0.0,),
+        kwargs={},
+        hessian=None,
+        method='minimize',
+        maxiter=500,
+        full_output=True,
+        disp=True,
+        callback=None,
+        retall=False
+    )
+    print("Optimal x (minimize):", xopt)
+
+Return values and interpretation
+-------------------------------
+- xopt: The estimated parameter vector that minimizes (or maximizes, depending on sign) the objective.
+- retvals: Solver-specific output; contains information such as convergence status, function values, gradient norms, etc.
+- optim_settings: The actual solver configuration used (method-specific options echoed back).
+
+Edge cases and troubleshooting
+------------------------------
+- If the chosen method requires gradients but none are provided, consider switching to a derivative-free method or supply a gradient.
+- For basinhopping, ensure you provide a suitable inner minimizer configuration; otherwise, the global search may not perform as intended.
+- If Hessians are unavailable, Newton-based methods may fail; use gradient-free methods or rely on the generic minimize interface with an appropriate method.
+- Ensure objective and gradient (if provided) have compatible shapes and return scalar value (objective) and matching vector (gradient) shapes.
+
+References
+----------
+- SciPy optimize documentation: https://docs.scipy.org/doc/scipy/reference/optimize.html
+
+This file documents the three algorithm families available for parameter estimation and how to invoke them via the Optimizer._fit interface, including practical usage patterns and key considerations.

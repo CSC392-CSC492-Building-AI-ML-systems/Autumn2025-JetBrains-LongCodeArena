@@ -1,0 +1,152 @@
+QuerySet API: How to Build Queries
+===================================
+
+Overview
+--------
+
+The QuerySet system in this codebase is built to compose asynchronous database queries by chaining high-level operations. It translates Python expressions (filters, joins, annotations, ordering, etc.) into an SQL query via a PyPika-based QueryBuilder, handling related models, prefetching, and aggregation.
+
+Key concepts:
+- Filters are expressed with Q objects and field lookups, and can be combined with logical operators.
+- Relationships are joined automatically when filtering or ordering by related fields.
+- Annotations enable computed values (e.g., counts) that can also be used for ordering.
+- Prefetching avoids the N+1 query problem by loading related data in advance.
+- Values and values_list return non-model data structures (tuples or dicts) instead of model instances.
+
+What you can do with QuerySet
+-----------------------------
+
+- Build simple and complex filters
+- Join to related models and filter/order by related fields
+- Annotate results with computed values and order by them
+- Prefetch related objects to optimize performance
+- Retrieve raw values or lists of values instead of full model instances
+
+Core workflow
+-------------
+
+- Start from a model’s QuerySet (e.g., Model.filter(...), Model.all(), or similar entry point in your setup).
+- Apply filters using Q objects or direct field lookups.
+- Optionally join to related fields for filtering or ordering.
+- Apply ordering, including descending order with a leading dash.
+- Add annotations for computed fields and use them in selects or ordering.
+- Prefetch related data if you need nested objects.
+- Execute the query asynchronously by awaiting the QuerySet (or obtaining a single object).
+
+API surface (high level)
+------------------------
+
+- Filtering
+  - Use Q objects to compose complex predicates.
+  - Apply filters on scalar fields, or via related lookups (dot-notation or double-underscore in names depending on your model setup).
+  - Example concepts:
+    - Simple filter: filter(field=value)
+    - Complex: filter(Q(field1=value1) & (Q(field2=value2) | Q(field3__in=[...])))
+
+- Prefetching
+  - prefetch_related(...) to load related objects in advance and avoid extra queries.
+
+- Joining and related lookups
+  - When you filter or order by a field on a related model, the QuerySet can join the appropriate table(s) automatically and reuse those joins for subsequent operations.
+
+- Ordering
+  - order_by(field_name) or order_by("-field_name") for descending order.
+  - Supports ordering by annotated fields as well as related fields.
+
+- Annotations and aggregates
+  - annotate(total=Count("id")) or other Function-based annotations.
+  - You can order by an annotation, and use the annotation in selections.
+
+- Selecting results
+  - values("field1", "field2", ...) returns dictionaries with the specified fields.
+  - values_list("field1", "field2", ..., flat=False/True) returns tuples or single values (if flat is True).
+
+- Execution
+  - The QuerySet is asynchronous. Results are obtained by awaiting the QuerySet or awaiting the appropriate result method on the QuerySet (single object or list of values).
+  - Exceptions to be aware of:
+    - DoesNotExist when no object is found for a single-object query
+    - MultipleObjectsReturned when more than one object is returned for a single-object expectation
+    - FieldError for invalid field or relation lookups
+    - ParamsError for incorrect parameters
+    - IntegrityError for DB constraint violations
+
+Usage examples
+--------------
+
+Note: The exact entry points (e.g., Model.all(), Model.filter()) depend on your project’s public API. The examples below reflect typical QuerySet usage patterns implied by the underlying implementation.
+
+- Simple filter and ordering
+  - qs = User.filter(is_active=True).order_by("last_name")
+
+- Complex filters with Q objects
+  - qs = User.filter(
+        Q(is_active=True) & (Q(last_name__startswith="A") | Q(age__gte=18))
+    )
+
+- Filtering by a related field and ordering by a related field
+  - qs = Order.filter(customer__country="US").order_by("customer__name")
+
+- Prefetching related data
+  - qs = BlogPost.prefetch_related("comments", "author")
+
+- Annotating and ordering by an aggregate
+  - qs = BlogPost.annotate(comment_count=Count("comments")).order_by("-comment_count")
+
+- Retrieving specific fields
+  - dicts = await User.values("id", "username", "email")
+  - ids_and_names = await User.values_list("id", "username")
+
+- Handling single-object expectations
+  - obj = await User.filter(username="jdoe").first()  # or await User.get(username="jdoe") depending on API
+
+Notes on internals (how QuerySet builds queries)
+-----------------------------------------------
+
+- The core is a QueryBuilder (from PyPika) exposed as QUERY and extended per query.
+- Filters are composed via a QueryModifier, driven by Q objects and model metadata.
+- Joins are tracked in self._joined_tables to avoid duplicate joins.
+- When aggregates (annotations) are present, and the query involves joins or having clauses, a groupby is automatically applied on the model’s primary table.
+- Ordering supports:
+  - Direct fields on the base model
+  - Fields on related models (via joins)
+  - Annotated fields
+- Prefetch handling is integrated to reduce round-trips for related data.
+
+Error handling
+--------------
+
+- DoesNotExist: no result found for a single-object expectation
+- MultipleObjectsReturned: more than one object found when a single result is required
+- FieldError: invalid field or relation lookup
+- ParamsError: incorrect parameters supplied to a query
+- IntegrityError: database constraint violations (e.g., unique constraints)
+
+Performance tips
+----------------
+
+- Use prefetch_related to minimize the number of queries when accessing related data.
+- Prefer filtering and ordering on indexed fields when possible.
+- Use annotations for expensive computations only when needed for filtering or ordering.
+
+Reference API highlights (names to look for in code)
+---------------------------------------------------
+
+- AwaitableQuery
+  - resolve_filters(model, q_objects, annotations, custom_filters): construct where clauses and joins from Q objects.
+  - resolve_ordering(model, table, orderings, annotations): apply standard and annotated orderings.
+  - _join_table_by_field(table, related_field_name, related_field): ensure proper joins for related lookups.
+- QuerySetSingle (protocol)
+  - __await__(): awaiting yields a single model instance.
+  - prefetch_related, annotate, only: helpers for subsequent query shaping when fetching a single object.
+- Values retrieval
+  - values_list(..., flat=...) and values(...): return non-model structures for efficiency.
+
+Getting started
+---------------
+
+- Create a QuerySet for your model, apply filters and related lookups as needed.
+- Add annotations for computed values if you need to sort or select by them.
+- Use prefetch_related to optimize data loading for related models.
+- Execute asynchronously by awaiting the QuerySet to obtain results.
+
+If you need concrete, project-specific examples, share your model schemas and the public API entry points (e.g., how to obtain a QuerySet from a model in your codebase), and I can tailor the examples to match.

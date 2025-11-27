@@ -1,0 +1,123 @@
+Connecting Steps Together
+==========================
+
+Overview
+--------
+This module provides the primitives to connect computational steps into a workflow. It introduces:
+- Edge: a simple directed connection between a source and a destination handle.
+- Step: a representation of a single configurable step, loaded from a YAML-based configure.yml, along with utilities to query, extend, and compose inputs, outputs, and commands.
+
+Edge
+----
+Purpose
+- Represent a directed connection from a source handle to a destination handle.
+
+API
+- Edge(src, dst)
+  - src: the source handle (typically produced by a Step's output)
+  - dst: the destination handle (typically a Step's input)
+- Edge.get_src() -> returns the source handle
+- Edge.get_dst() -> returns the destination handle
+
+Usage example
+```python
+from ug_connect.edge import Edge
+
+edge = Edge(src_handle, dst_handle)
+print(edge.get_src())  # e.g., ('StepA', 'outputs', 'out')
+print(edge.get_dst())  # e.g., ('StepB', 'inputs', 'in')
+```
+
+Step
+----
+Purpose
+- Model a single step configured via a YAML file (configure.yml) and provide utilities to connect it with other steps.
+
+Initialization
+- Step(step_path, default=False)
+  - step_path: path to the step or a logical identifier used to locate configure.yml
+  - default: if True, locate the YAML under the top-level steps directory; otherwise, use the given path directly
+- Behavior:
+  - Reads the YAML data from configure.yml
+  - Validates that a name field exists
+  - Normalizes data by removing empty inputs/outputs
+  - Ensures outputs that are dict-shorthand have exactly one key/value
+  - Replaces empty or missing commands with ['true']
+  - Ensures commands is a list of strings; booleans are converted to lowercase strings
+  - Converts output tag shorthand {None: path} to a canonical {basename: path}
+  - Stores metadata:
+    - step_dir: relative path to the step directory
+    - source: absolute path to the YAML file
+  - Exposes the YAML data merged into s._config
+
+Key Data and API
+- s._config: dictionary containing the loaded step data plus generated metadata
+- s.step_dir: relative step directory path
+- s.i(name) / s.o(name): syntactic sugar for input/output handles
+- s.get_input_handle(f) -> (step_name, 'inputs', f)
+  - Validates the step has inputs and that f exists in inputs
+- s.get_output_handle(f) -> (step_name, 'outputs', f)
+  - Validates the step has outputs and that f exists in outputs
+- s.all_input_handles() -> list of all input handles
+  - Returns [] if no inputs
+- s.all_output_handles() -> list of all output handles
+  - Returns [] if no outputs
+- s.clone() -> Step
+  - Returns a deep copy of the step, preserving configuration and step_dir
+
+Extending Inputs/Outputs
+- s.extend_inputs(new_list)
+  - Appends new_list to the inputs (creates inputs if missing)
+- s.extend_outputs(new_list)
+  - Appends new_list to the outputs (creates outputs if missing)
+
+Commands extension
+- s.pre_extend_commands(new_list)
+  - Prepends new_list to the commands
+- s.extend_commands(new_list)
+  - Appends new_list to the commands
+
+Notes and edge cases
+- If a step has no inputs or no outputs, the respective all_input_handles/all_output_handles return empty lists.
+- Accessing a non-existent input/output via get_input_handle/get_output_handle will raise an assertion error.
+- YAML validation is strict; missing required fields (e.g., name) will trigger assertions.
+- When using default steps (default=True), the YAML path is constructed from the top-level steps directory, which is project-specific.
+
+Usage patterns
+- Connecting two steps:
+  - Create handles for an existing output and an input, then connect via Edge.
+- Extending a step's interface:
+  - Add additional inputs or outputs as needed using extend_inputs/extend_outputs.
+- Cloning a configured step:
+  - Use clone() to obtain an independent copy of a step’s configuration for reuse or modification.
+
+Usage examples
+```python
+from ug_connect.step import Step
+from ug_connect.edge import Edge
+
+# Load two steps (adjust paths to your project structure)
+step_a = Step('myproject/steps/stepA', default=True)
+step_b = Step('myproject/steps/stepB', default=True)
+
+# Create handles for a connection
+out_handle = step_a.o('out')
+in_handle  = step_b.i('in')
+
+# Connect the two steps
+conn = Edge(out_handle, in_handle)
+
+print(conn.get_src())  # e.g., ('stepA', 'outputs', 'out')
+print(conn.get_dst())  # e.g., ('stepB', 'inputs', 'in')
+
+# Extend a step with a new input and a new command
+step_b.extend_inputs(['extra_in'])
+step_b.pre_extend_commands(['echo "pre"'])
+
+# Clone a step for independent modification
+step_a_clone = step_a.clone()
+```
+
+Notes
+- The connection model assumes a Graph-like workflow where Edge objects represent the wiring between steps. The actual graph assembly mechanism (e.g., a Graph class) would consume these handles to build execution order and data flow.
+- Path semantics depend on your project layout and how Step is initialized (default vs explicit paths). Refer to your build system’s conventions for determining the top directory and step locations.

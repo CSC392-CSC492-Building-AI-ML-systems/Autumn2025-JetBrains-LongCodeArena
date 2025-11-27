@@ -1,0 +1,196 @@
+W_BINs
+=======
+
+Overview
+--------
+
+The w_bins command provides information about the binning used in a WESTPA
+simulation and allows rebuilding (rebining) the current iteration with a new
+binning scheme. It leverages WESTPA’s data reader, bin mapping component, and
+driver to inspect and modify how walkers are binned into states during a run.
+
+Key concepts:
+- Bin mapping: A BinMappingComponent that encapsulates how pcoords are assigned to bins, along with target bin counts and related configuration.
+- Data access: WESTDataReader is used to access per-iteration data (target states, pcoords, segment weights, etc.).
+- Rebin workflow: When rebinning, the tool uses the WEST driver to initialize a new iteration with a given bin mapper and then optionally commits the new binning to the HDF5 backing store.
+
+What this module does
+- Provide an info subcommand to display binning information for a given iteration, with an optional detail view.
+- Provide a rebin subcommand to rebuild the current iteration using a new binning configuration, and optionally commit the changes.
+
+Classes and relationships
+-------------------------
+
+- WBinTool (subclass of WESTTool)
+  - Responsibilities:
+    - Configure and parse CLI arguments (info and rebin commands).
+    - Manage a WESTDataReader and a BinMappingComponent.
+    - Dispatch to subcommands cmd_info and cmd_rebin.
+  - Key attributes:
+    - data_reader: WESTDataReader for accessing HDF5 data.
+    - binning: BinMappingComponent for bin mapper and binning configuration.
+    - n_iter: targeted iteration number (default: current iteration from data reader).
+    - args: parsed argument namespace.
+  - Key methods:
+    - add_args(parser): registers CLI arguments and subcommands.
+    - process_args(args): resolves iteration, configures binning for the run, and stores args.
+    - go(): invokes the selected subcommand.
+    - cmd_info(): display binning information for the selected iteration.
+    - cmd_rebin(): perform rebining for the selected iteration and optionally commit.
+  - entry_point(): function intended as the CLI entry point (invokes WBinTool().main).
+
+- WESTDataReader
+  - Used to read data from the WEST HDF5 data store for a given iteration.
+  - Methods used:
+    - get_target_states(n_iter): returns list of target states for iteration.
+    - get_iter_group(n_iter): returns per-iteration data group, including pcoords and weights.
+    - current_iteration: provided as a default when no explicit n_iter is given.
+
+- BinMappingComponent
+  - Encapsulates binning mapper and binning-related configuration.
+  - Methods used:
+    - add_args(parser, suppress=None): add CLI options for binning configuration.
+    - set_we_h5file_info(n_iter, data_reader): prepare mapping with information from the HDF5 file.
+    - process_args(args): finalize binning configuration from CLI arguments.
+    - add_target_count_args(parser): helper to add arguments for target counts.
+    - add_args(..., suppress=[...]): ability to suppress certain options when needed.
+  - Attributes used:
+    - mapper: the bin mapper object used to assign pcoords to bins.
+    - mapper_hash, mapper_pickle: used for storing the bin mapping state when committing.
+
+- write_bin_info (from westpa.tools.binning)
+  - Helper function to print binning information.
+  - Signature (in usage within this module):
+    write_bin_info(mapper, assignments, weights, n_target_states, detailed=False)
+
+- WE Driver and Data Manager (westpa.rc.get_we_driver, data_manager)
+  - Used during rebining to create a new iteration, perform rebinning on initial points,
+    and (optionally) commit the changes to the HDF5 store.
+
+Important parameters and return values
+-------------------------------------
+
+- w_bins info subcommand
+  - -n, --n-iter: int
+    Consider initial points of segment N_ITER (default: current iteration).
+  - --detail: flag
+    Display detailed per-bin information in addition to summary information.
+  - Bin mapping related arguments
+    Configured via BinMappingComponent.add_args. These control the binning mapper
+    and binning configuration used for the iteration.
+
+  - Returns: prints a binning summary (and detailed information when --detail is set).
+
+- w_bins rebin subcommand
+  - --confirm: flag
+    Commit the revised iteration to the HDF5 store; without this, changes are computed and printed only.
+  - --detail: flag
+    Display detailed per-bin information in addition to summary information.
+  - -n, --n-iter: int
+    Consider initial points of segment N_ITER (default: current iteration).
+  - Bin mapping related arguments
+    Provided via BinMappingComponent, with --bins-from-file suppressed for rebins.
+  - Target counts: arguments to specify desired bin target counts (via BinMappingComponent).
+  - Returns:
+    - If successful (and --confirm is given): commits new binning and updates state in HDF5.
+    - Otherwise: prints the computed binning changes.
+
+- entry_point
+  - The function intended as the CLI entry point; as implemented, it constructs a WBinTool
+    instance and accesses its main callable (note: the code as provided does not call
+    main, which appears to be a bug). Documentation here reflects the intended design:
+    the entry point should return or invoke the tool’s main/runner.
+
+Usage patterns and examples
+---------------------------
+
+Basic information display
+- Show binning information for the current iteration (default) with summary only:
+  w_bins info
+
+- Show binning information for a specific iteration (e.g., 123) with detailed per-bin data:
+  w_bins info -n 123 --detail
+
+Rebinning and optionally committing
+- Rebuild the current iteration using a new binning configuration, but do not commit:
+  w_bins rebin -n 120
+
+- Rebuild the current iteration and commit the changes to the HDF5 store:
+  w_bins rebin --confirm -n 120
+
+Notes and edge cases
+- Rebining only applies to initial points of segments. It operates on the current iteration's initial pcoords and is not equivalent to rebalancing final points.
+- Rebining is not supported for the first iteration (n_iter == 1); attempting to rebin will print an error and exit with code 1.
+- When rebinning, the tool gathers unused initial states and current segment information to construct the new iteration and perform the rebining. If --confirm is not provided, the operation is simulated and the results are displayed without persisting changes to disk.
+- The --bins-from-file option is suppressed for rebins, since rebining is performed using the in-memory initial segment data and the new bin mapper configuration supplied via CLI.
+- The tool relies on WESTPA data readers and back-end HDF5 structures; ensure you have a valid WESTPA environment and the appropriate data file access permissions.
+
+Implementation notes
+--------------------
+
+- The WBinTool orchestrates the workflow by:
+  - Initializing data access and binning components.
+  - Loading iteration data to compute initial pcoords and weights.
+  - Delegating to the BinMappingComponent to assemble the mapper and target counts.
+  - For info: printing binning information via write_bin_info.
+  - For rebin: using WESTPA’s WE driver to create a new iteration, rebin on initial points, and optionally commit changes.
+
+- The code path for committing changes in cmd_rebin:
+  - data_manager.prepare_iteration
+  - Update endpoint statuses for the last iteration
+  - data_manager.save_iter_binning(...)
+  - data_manager.update_initial_states(...)
+  - data_manager.flush_backing()
+
+Code references (for quick lookup)
+----------------------------------
+
+- WBinTool: main CLI tool class
+- WESTDataReader: data interface for iteration and target-state data
+- BinMappingComponent: bin mapper and related CLI integration
+- write_bin_info: print helper for binning results
+- westpa.rc.get_we_driver: WEST driver for running rebinning logic
+
+Code excerpts (illustrative)
+----------------------------
+
+- CLI command setup (conceptual)
+    .. code-block:: python
+
+       tool = WBinTool()
+       # w_bins info
+       tool.subcommand = tool.cmd_info
+       # w_bins rebin
+       tool.subcommand = tool.cmd_rebin
+
+- Info path (conceptual)
+    .. code-block:: python
+
+       mapper = tool.binning.mapper
+       initial_pcoords = iter_group['pcoord'][:, 0, :]
+       assignments = mapper.assign(initial_pcoords)
+       weights = iter_group['seg_index']['weight']
+       write_bin_info(mapper, assignments, weights, n_target_states, detailed=tool.args.detail)
+
+- Rebin path (conceptual)
+    .. code-block:: python
+
+       we_driver = westpa.rc.get_we_driver()
+       data_manager = tool.data_reader.data_manager
+       segments = data_manager.get_segments(tool.n_iter, load_pcoords=True)
+       last_iter_segments = data_manager.get_segments(tool.n_iter - 1, load_pcoords=False)
+       we_driver.new_iteration(initial_states=avail_initial_states, bin_mapper=mapper, bin_target_counts=tool.binning.bin_target_counts)
+       we_driver.assign(segments, initializing=True)
+       we_driver.rebin_current(parent_segments=last_iter_segments)
+       weights = np.array([segment.weight for segment in we_driver.next_iter_segments])
+       assignments = np.fromiter(we_driver.next_iter_assignments, dtype=int, count=len(weights))
+       write_bin_info(mapper, assignments, weights, n_target_states, detailed=tool.args.detail)
+
+See also
+--------
+
+- westpa.tools.binning.write_bin_info
+- WESTTool, WESTDataReader
+- BinMappingComponent
+
+End of w_bins.rst

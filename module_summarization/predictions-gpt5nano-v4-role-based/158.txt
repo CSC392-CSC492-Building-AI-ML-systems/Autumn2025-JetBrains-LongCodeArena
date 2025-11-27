@@ -1,0 +1,180 @@
+Migrating to Nextcord
+===================== 
+
+This guide documents the widget-related API introduced in Nextcord and how to migrate existing code to use these structures. It covers WidgetChannel, WidgetMember, and Widget, including their purpose, key attributes, and practical usage.
+
+Overview
+--------
+
+Nextcord provides a Widget API that represents a Guild Widget with two primary partial data structures and one aggregate:
+
+- WidgetChannel
+  - A lightweight representation of a widget-accessible voice channel.
+  - Core fields: id, name, position.
+  - Useful for listing channels available in the widget and for basic display/mention.
+
+- WidgetMember
+  - A partial representation of a guild member as seen in a widget.
+  - Inherits from BaseUser, so it shares common user attributes (id, name, discriminator, avatar, etc.).
+  - Includes widget-specific state such as nick, status, activity, deafened, muted, suppress, and the connected channel.
+
+- Widget
+  - Represents a guild widget as a whole.
+  - Contains the list of channels and online members that the widget exposes.
+
+Key design points
+- WidgetChannel and WidgetMember are lightweight, focusing on the subset of data relevant to a guild widget.
+- WidgetMember extends the common user model (BaseUser) to reuse existing user-related fields.
+- Activity handling is supported via create_activity, so a member’s current activity can be interpreted from the widget payload.
+- Timestamps can be derived from IDs using snowflake_time (e.g., created_at on a WidgetChannel).
+
+API reference (summary)
+-----------------------
+
+WidgetChannel
+- __slots__: ('id', 'name', 'position')
+- id (int): Channel ID.
+- name (str): Channel name.
+- position (int): Channel position in the list.
+- __str__(): Returns the channel name.
+- __repr__(): Debug representation including id, name, and position.
+- mention (property, str): Mention string for the channel, e.g. "<#ID>".
+- created_at (property, datetime): Creation time derived from the channel's ID using snowflake_time.
+
+WidgetMember (inherits from BaseUser)
+- __slots__: ('name', 'status', 'nick', 'avatar', 'discriminator',
+             'id', 'bot', 'activity', 'deafened', 'suppress', 'muted',
+             'connected_channel')
+- state (ConnectionState): Internal gateway state reference (required for construction).
+- data (WidgetMemberPayload): Payload data from the widget.
+- connected_channel (Optional[WidgetChannel]): Channel the member is connected to (if any).
+- name (str): Username.
+- discriminator (str): Discriminator portion of the username.
+- bot (bool): Whether the member is a bot.
+- status (Status): Online/idle/dnd etc.
+- nick (Optional[str]): Nickname in the guild, if any.
+- avatar (Optional[str]): Avatar hash.
+- activity (Optional[Union[BaseActivity, Spotify]]): Active activity, if provided.
+- deafened (Optional[bool]): Whether the member is deafened.
+- muted (Optional[bool]): Whether the member is muted.
+- suppress (Optional[bool]): Whether the member is being suppressed.
+- display_name (property, str): Nickname if present, else username.
+
+Widget (guild widget)
+- id (int): Guild ID.
+- name (str): Guild name.
+- channels (List[WidgetChannel]): Accessible voice channels exposed by the widget.
+- members (List[WidgetMember]): Online members exposed by the widget.
+- The widget exposes a view of the guild suitable for public display or lightweight UIs.
+
+Migration notes
+--------------
+
+- Consistency with existing user objects:
+  - WidgetMember now behaves as a proper user-like object (inherits from BaseUser). Use member.id, member.name, member.discriminator, and member.avatar as you would with regular users.
+- Status and activity:
+  - Member status is mapped using the Status enum via try_enum. Activity data is created via create_activity when a widget payload includes a game/activity.
+- Partial data semantics:
+  - WidgetChannel and WidgetMember are designed to be lightweight representations (partials) suitable for widget UIs. They may not include the full user or channel capabilities available in the core gateway objects.
+- Creation helper properties:
+  - Use WidgetChannel.created_at to determine the channel creation time from its ID (using snowflake_time).
+- TYPE_CHECKING usage:
+  - TYPE_CHECKING guards are used for forward references (ConnectionState and Widget payload types). At runtime, these references are resolved via the actual state types and payloads provided by Nextcord’s internal widgets API.
+
+Practical migration guidance
+----------------------------
+
+1) Replace direct widget references with Nextcord equivalents
+   - If your code previously used a bespoke widget representation, switch to WidgetChannel, WidgetMember, and Widget as provided by Nextcord.
+
+2) Constructing objects from widget payloads
+   - WidgetChannel:
+     - You can create a lightweight channel directly from its basic fields:
+       WidgetChannel(id, name, position)
+   - WidgetMember:
+     - Construct from a payload and the current state:
+       WidgetMember(state=state, data=payload, connected_channel=channel)
+     - payload should include keys such as id, name, discriminator, nick, status, game, deaf, self_deaf, mute, self_mute, suppress, etc.
+     - The activity is derived from the 'game' field via create_activity.
+
+3) Accessing common attributes
+   - Use WidgetChannel.mention, WidgetChannel.created_at, and WidgetMember.display_name for UI-friendly outputs.
+   - For user-like data, use WidgetMember.id, WidgetMember.name, WidgetMember.discriminator, WidgetMember.avatar, etc.
+
+4) Working with a widget as a whole
+   - Widget objects contain lists of channels and members. Use widget.channels and widget.members to drive your widget-based UI.
+
+Examples
+--------
+
+- Creating a partial channel and using its convenience methods:
+
+.. code-block:: python
+
+    from nextcord import WidgetChannel
+
+    channel = WidgetChannel(id=1234567890, name="General", position=0)
+    print(channel)                 # General
+    print(channel.mention)         # <#1234567890>
+    print(channel.created_at)        # datetime in UTC
+
+- Building a widget member from a payload:
+
+.. code-block:: python
+
+    from nextcord import WidgetMember
+    from some_state_module import ConnectionState  # framework-provided type
+    from nextcord import Status
+
+    state = ConnectionState(...)  # obtain from your gateway/client
+
+    payload = {
+        'id': 987654321,
+        'name': 'Alice',
+        'discriminator': '1234',
+        'nick': 'Ali',
+        'status': 'online',
+        'deaf': False,
+        'self_deaf': False,
+        'mute': False,
+        'self_mute': False,
+        'suppress': False,
+        'avatar': None,
+        'game': {'name': 'Coding'},  # activity
+    }
+
+    channel = WidgetChannel(id=1234567890, name="General", position=0)
+    member = WidgetMember(state=state, data=payload, connected_channel=channel)
+
+    print(member.display_name)  # Ali
+    print(member.status == Status.online)  # True
+    print(member.activity)  # Activity object for "Coding"
+
+- Accessing widget data for UI rendering:
+
+.. code-block:: python
+
+    # widget is obtained from some widget API call
+    for ch in widget.channels:
+        print(f"Channel: {ch.name} (id={ch.id})")
+
+    for m in widget.members:
+        print(f"Online: {m.display_name} in {m.connected_channel.name if m.connected_channel else 'Unknown'}")
+
+Notes
+-----
+
+- These classes are designed to mirror Discord’s widget behavior while integrating with Nextcord’s type hints and internal state management.
+- If you rely on private or internal fields, consider migrating to the public interfaces exposed by WidgetChannel, WidgetMember, and Widget.
+
+See Also
+--------
+
+- nextcord.widget (module containing WidgetChannel, WidgetMember, Widget)
+- nextcord(BaseUser) for user-related fields used by WidgetMember
+- nextcord.activity for activity handling via create_activity
+
+Version added
+-------------
+
+- WidgetChannel, WidgetMember, and Widget were added to Nextcord to support Guild Widget structures and partial data representations.

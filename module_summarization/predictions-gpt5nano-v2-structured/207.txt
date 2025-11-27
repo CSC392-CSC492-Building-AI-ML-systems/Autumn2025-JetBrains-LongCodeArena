@@ -1,0 +1,159 @@
+Decision Trees
+================
+
+Overview
+--------
+
+Decision trees partition the feature space by axis-aligned splits, recursively dividing data to reduce impurity at each node. This implementation focuses on performance and flexibility by abstracting the impurity evaluation into a pluggable Criterion interface. Different impurity measures (e.g., classification Gini/entropy, regression variance) are implemented by providing concrete Criterion subclasses that compute node impurity, impurity changes from splits, and node values.
+
+Key concepts
+------------
+
+- Node: A subset of samples defined by a region of the feature space.
+- Split: A threshold on a feature that divides samples into left and right children.
+- Impurity: A scalar measure of how mixed the target values are within a node.
+- Weighted samples: Sample weights may influence impurity calculations.
+- sample_indices: A mask of indices indicating which samples are currently considered for a node.
+- Proxy impurity improvement: A fast, approximate score used to guide the best-split search before computing exact impurity improvements.
+- EPSILON and Poisson criterion: A small constant used in certain impurity calculations to stabilize numerical results.
+
+The Criterion interface
+------------------------
+
+The core of the impurity evaluation is the Criterion interface. A Criterion encapsulates:
+
+- Initialization
+  - init(y, sample_weight, weighted_n_samples, sample_indices, start, end)
+  - Prepares internal state for the node defined by sample_indices[start:end].
+  - Allocates memory for y/outputs as needed (returns -1 on failure, 0 on success).
+  - EPSILON is used by some criteria (e.g., Poisson-based measures) to stabilize calculations.
+- Missing values handling
+  - init_missing(n_missing)
+  - Initializes bookkeeping for missing values that may be present in a feature.
+- State management
+  - reset()
+  - reverse_reset()
+  - Reinitialize statistics when evaluating a potential split at a given position.
+- Updating statistics
+  - update(new_pos)
+  - Move samples from the right side to the left as the split position shifts.
+- Impurity calculations
+  - node_impurity()
+  - Compute impurity for the current node (start:end).
+  - children_impurity(impurity_left, impurity_right)
+  - Compute impurities for the left and right children given a split.
+  - node_value(dest)
+  - Compute the node’s representative value (e.g., class probability, mean).
+  - clip_node_value(dest, lower_bound, upper_bound)
+  - Optional clipping of the node value.
+- Split evaluation helpers
+  - middle_value() for monotonicity constraints (used by some search strategies).
+  - proxy_impurity_improvement() Quick proxy for impurity improvement used to speed up the best-split search.
+  - impurity_improvement(impurity_parent, impurity_left, impurity_right)
+  - Compute the actual impurity improvement given a parent impurity and the left/right impurities.
+- Memory management
+  - The interface uses Cython memoryviews and nogil blocks to enable fast, thread-safe code during tree construction.
+
+What this enables
+------------------
+
+- Flexibility: You can implement new impurity measures by subclassing and overriding the required methods.
+- Performance: The Cython-based implementation uses memoryviews and nogil blocks for speed, essential when searching over many potential splits.
+- Robustness: The design supports handling weighted samples and missing values within the same framework.
+
+Supported impurity measures (concept)
+------------------------------------
+
+- Classification: Gini impurity, Entropy, and related measures.
+- Regression: Variance-based impurity (mean squared error) or other regression criteria.
+- Specialized criteria: Poisson or other domain-specific impurity definitions (utilizing EPSILON as appropriate).
+
+Usage and extending
+-------------------
+
+To add a new impurity criterion, you implement a subclass of Criterion and provide concrete logic for the required methods. The tree-building algorithm will instantiate your criterion for each node, initialize it with the node’s data, and repeatedly modify the split position to evaluate potential splits using:
+
+- node_impurity for the current node
+- proxy_impurity_improvement during the search to focus on promising splits
+- impurity_improvement to score actual splits and select the best one
+- children_impurity to report the impurity of resulting child nodes
+- node_value to determine the node’s representative value after a split
+
+Example: conceptual Python outline (for illustration only)
+-----------------------------------------------------------
+
+Note: The actual Criterion class in the codebase is a Cython class with nogil methods. This Python example is indicative of how you would conceptually structure a new criterion.
+
+.. code-block:: python
+
+class MyCriterion(Criterion):
+    def init(self, y, sample_weight, weighted_n_samples,
+             sample_indices, start, end):
+        # allocate and initialize internal state for node [start, end)
+        # compute initial aggregates from y[sample_indices[start:end]]
+        return 0
+
+    def init_missing(self, n_missing):
+        # optional: allocate storage for missing-values handling
+        pass
+
+    def reset(self):
+        # reset statistics at the start of a potential split search
+        return 0
+
+    def reverse_reset(self):
+        # reset statistics at the end of a potential split search
+        return 0
+
+    def update(self, new_pos):
+        # move samples from the right to the left as the split shifts
+        return 0
+
+    def node_impurity(self):
+        # compute impurity of current node
+        return impurity_value
+
+    def children_impurity(self):
+        # compute impurity of left and right children for current split
+        return impurity_left, impurity_right
+
+    def node_value(self):
+        # compute the node value (e.g., class distribution, mean)
+        return value
+
+    def impurity_improvement(self, impurity_parent, impurity_left, impurity_right):
+        # compute the actual impurity improvement for a given split
+        return improvement
+
+Performance considerations
+--------------------------
+
+- Memory efficiency: The criterion operates on memoryviews and slices of data to minimize copying.
+- Vectorization: Wherever possible, computations are performed over arrays rather than Python loops.
+- Thread-safety: The nogil blocks allow safe parallel evaluation of splits in a multithreaded setting.
+
+Common impurity measures
+------------------------
+
+- Classification
+  - Gini impurity
+  - Entropy (information gain)
+- Regression
+  - Variance reduction (mean squared error)
+
+References
+----------
+
+- EPSILON: Stabilizes numerical calculations in certain impurity measures (e.g., Poisson-based criteria).
+- WeightedMedianCalculator: A utility used for weighted calculations in certain criteria.
+
+See also
+--------
+
+- _utils: Supporting utilities for log computations and weighted statistics.
+- The broader tree construction algorithm that consumes Criterion instances to perform splits and grow the tree.
+
+Code excerpts (for reference)
+------------------------------
+
+The core interface is defined as a Cython class with methods such as init, reset, update, node_impurity, and impurity_improvement. The implementation emphasizes performance through memoryviews and nogil blocks, enabling efficient exploration of split candidates across large datasets.

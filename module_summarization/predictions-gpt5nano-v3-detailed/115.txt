@@ -1,0 +1,231 @@
+Introduction
+------------
+This document covers the configuration subsystem exposed by the code in the config module. It defines the AsdfConfig class, which stores and manages global ASDF configuration options, including resource mappings, extensions, versioning, IO behavior, and related helpers. It also describes how configuration can be retrieved and updated, and how changes interact with the resource manager and extension system.
+
+Overview
+--------
+- Purpose: Centralized, thread-safe container for ASDF global configuration.
+- Core concepts:
+  - Resource mappings: mappings from resource URIs to their byte content, used to supply resources at runtime.
+  - Resource manager: aggregates resources from mappings and entry points.
+  - Extensions: registered ASDF extensions, with precedence rules.
+  - Default version and IO settings: default ASDF standard version, block size, and related options.
+- Concurrency: Uses a re-entrant lock to guard mutable state and ensure thread-safety.
+- Lazy loading: Resource mappings and extensions are loaded lazily from entry points and cached.
+
+Key Components
+--------------
+- DEFAULT_* constants: Default values used to initialize configuration options.
+- AsdfConfig: Core configuration container with properties and helpers.
+- get_config: Factory/accessor for the global AsdfConfig (not shown in snippet, but part of the public API).
+- config_context: Context manager for temporarily adjusting configuration (not shown in snippet, but part of the public API).
+
+Constants
+---------
+- DEFAULT_VALIDATE_ON_READ = True
+- DEFAULT_DEFAULT_VERSION = str(versioning.default_version)
+- DEFAULT_LEGACY_FILL_SCHEMA_DEFAULTS = True
+- DEFAULT_IO_BLOCK_SIZE = -1  # auto
+- DEFAULT_ARRAY_INLINE_THRESHOLD = None
+
+AsdfConfig
+----------
+The AsdfConfig class serves as a central repository for global ASDF configuration. It is intended to be accessed via helper functions (e.g., get_config) rather than constructed directly by users.
+
+Initialization
+--------------
+- Creates internal placeholders for:
+  - _resource_mappings
+  - _resource_manager
+  - _extensions
+  - _validate_on_read
+  - _default_version
+  - _legacy_fill_schema_defaults
+  - _io_block_size
+  - _array_inline_threshold
+- Initializes a re-entrant lock: _lock
+
+Resource Mappings
+-----------------
+Purpose: Manage mappings from resource URIs to their corresponding bytes content.
+
+- resource_mappings (property)
+  - Lazy-loaded from entry_points.get_resource_mappings() on first access.
+  - Returns a list of ResourceMappingProxy instances.
+  - Type: list[ResourceMappingProxy]
+
+- add_resource_mapping(mapping)
+  - Registers a new resource mapping.
+  - Precedence: New mapping takes precedence over existing mappings.
+  - Mapping is wrapped with ResourceMappingProxy.maybe_wrap(mapping).
+  - Updates internal list and invalidates the resource manager for recomputation.
+
+  Example:
+  - mapping = {"asdf://example/resource.yaml": b"...bytes content..."}
+  - cfg.add_resource_mapping(mapping)
+
+- remove_resource_mapping(mapping=None, *, package=None)
+  - Remove a registered mapping.
+  - Parameters:
+    - mapping: Optional mapping to remove (will be wrapped as needed).
+    - package: Optional package name; if provided, removes mappings from that package.
+  - Error handling: Must specify at least one of mapping or package; otherwise raises ValueError.
+  - If mapping is provided, only that mapping is removed. If package is provided, all mappings from that package are removed.
+  - After removal, the resource manager is reset.
+
+  Edge cases:
+  - If both mapping and package are provided, both conditions apply.
+
+- reset_resources()
+  - Reset resource mappings to the defaults provided by entry points.
+  - Clears both _resource_mappings and _resource_manager so they will be reloaded lazily.
+
+Resource Manager
+----------------
+- resource_manager (property)
+  - Returns a ResourceManager instance built from the current resource mappings.
+  - If None, initializes a ResourceManager(self.resource_mappings) under the lock.
+
+Extensions
+----------
+Purpose: Manage registered ASDF extensions with deterministic precedence.
+
+- extensions (property)
+  - Lazy-loaded from entry_points.get_extensions() on first access.
+  - Returns a list of ExtensionProxy instances.
+
+- add_extension(extension)
+  - Registers a new extension.
+  - Precedence: New extension takes precedence over existing ones.
+  - The extension is wrapped with ExtensionProxy.maybe_wrap(extension).
+  - The internal list is updated to place the new extension first.
+
+- remove_extension(extension=None, *, package=None)
+  - Remove a registered extension.
+  - Parameters:
+    - extension: Optional extension instance, ExtensionProxy, or URI pattern (string).
+    - package: Optional package name; if provided, removes extensions from that package.
+  - Behavior:
+    - If extension is a string, it is treated as a URI pattern; removal is based on uri_match against the extension_uri.
+    - If extension is an ExtensionProxy, it is removed by equality.
+  - Validation: Must specify at least one of extension or package; otherwise raises ValueError.
+  - If both are provided, both criteria apply.
+  - After removal, the internal list is updated accordingly.
+
+- reset_extensions()
+  - Reset to the default list registered via entry points (sets _extensions to None).
+
+Default Version
+---------------
+- default_version (property)
+  - Returns the default ASDF Standard version used for new files.
+- default_version.setter
+  - Accepts a string and validates it using validate_version(value) before assignment.
+
+IO Block Size
+-------------
+- io_block_size (property)
+  - Returns the block size used when reading and writing files.
+  - Typical values:
+    - Positive integer: explicit block size
+    - -1: use filesystem's preferred block size
+  - Setter stores the value directly.
+
+Array Inline Threshold
+----------------------
+- array_inline_threshold (not fully shown in the snippet)
+  - Configurable threshold related to inlining arrays.
+  - Default is DEFAULT_ARRAY_INLINE_THRESHOLD (None).
+  - Accessors are implemented in the class (not fully visible in the excerpt).
+
+Usage
+-----
+- Obtain and use the global configuration:
+  - from asdf import get_config
+  - cfg = get_config()
+  - cfg.default_version = "1.8.0"
+  - cfg.io_block_size = -1
+
+- Register a resource mapping at runtime:
+  - mapping = {"asdf://example/resource.yaml": b"..."}
+  - cfg.add_resource_mapping(mapping)
+
+- Remove a resource mapping:
+  - cfg.remove_resource_mapping(mapping)
+  - cfg.remove_resource_mapping(package="asdf.example_pkg")
+
+- Register an extension:
+  - cfg.add_extension(my_extension)
+
+- Remove an extension:
+  - cfg.remove_extension(extension="asdf.extension.pattern")
+  - cfg.remove_extension(package="asdf.extension_pkg")
+
+- Reset to defaults:
+  - cfg.reset_resources()
+  - cfg.reset_extensions()
+
+Notes and Considerations
+------------------------
+- Thread-safety: All mutating operations acquire the internal lock to ensure consistency across threads.
+- Lazy loading: Resource mappings and extensions are loaded on first access from entry points to avoid startup overhead.
+- Precedence: New resource mappings and extensions take precedence over existing ones, ensuring runtime customization can override defaults.
+- Validation: Setting default_version uses validate_version to ensure only valid versions are accepted.
+- Edge cases:
+  - Removing mappings/extensions requires at least one of mapping/extension or package; otherwise a ValueError is raised.
+  - When removing by package, all matching items are removed.
+
+Code References (illustrative)
+------------------------------
+- Access global config:
+  - from asdf import get_config
+  - cfg = get_config()
+
+- Example: add a resource mapping
+  - mapping = {"asdf://example/resource.yaml": b"content of resource"}
+  - cfg.add_resource_mapping(mapping)
+
+- Example: remove an extension by URI pattern
+  - cfg.remove_extension(extension="asdf.extension.pattern")
+
+Important Considerations
+------------------------
+- The actual behavior of get_config and config_context depends on their implementations in the broader codebase. The documentation focuses on AsdfConfig and its members as provided.
+- The default values are tied to other modules (versioning, entry_points, ResourceManager, etc.) and may change if those modules update.
+
+Usage Snippets
+--------------
+Code snippet: Access and modify default version
+```python
+from asdf import get_config
+
+config = get_config()
+config.default_version = "1.9.0"
+```
+
+Code snippet: Add a resource mapping
+```python
+config = get_config()
+mapping = {
+    "asdf://example/resource.yaml": b"binary content here"
+}
+config.add_resource_mapping(mapping)
+```
+
+Code snippet: Remove a resource mapping by package
+```python
+config = get_config()
+config.remove_resource_mapping(package="asdf.example_pkg")
+```
+
+Code snippet: Add and remove an extension
+```python
+config = get_config()
+# Assuming MyExtension is a valid extension object or proxy
+config.add_extension(my_extension)
+
+# Remove by URI pattern
+config.remove_extension(extension="asdf.extension.pattern")
+```
+
+End of documentation

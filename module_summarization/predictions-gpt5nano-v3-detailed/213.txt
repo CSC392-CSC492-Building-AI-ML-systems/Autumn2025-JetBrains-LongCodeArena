@@ -1,0 +1,198 @@
+Nonparametric Methods
+=====================
+
+
+Overview
+--------
+
+This module provides nonparametric density estimation functionality, with a primary focus on univariate kernel density estimation (KDE). It exposes a KDEUnivariate class that estimates the density of a one-dimensional dataset using kernel methods. Both FFT-based and non-FFT approaches are supported, with FFT-based estimation limited to the Gaussian kernel for performance.
+
+Key ideas:
+- Kernel density estimation using user-selected kernel shapes and bandwidths.
+- Flexible bandwidth selection via common rules (e.g., Scott, Silverman, normal-reference) or user-provided values/functions.
+- Optional FFT acceleration for Gaussian kernels; non-FFT path available for all kernels.
+- Access to the estimated density on a regular grid (support) and (optionally) the cumulative distribution function (CDF) for the estimate.
+
+API and Relationships
+---------------------
+
+- Kernel switch table
+  - A mapping from short string identifiers to kernel implementations.
+  - Examples: gau (Gaussian), epa (Epanechnikov), uni (Uniform), tri (Triangular), biw (Biweight), triw (Triweight), cos (Cosine), cos2 (Cosine2).
+
+- KDEUnivariate
+  - A class representing a univariate KDE estimator.
+  - Core methods:
+    - __init__(endog): Initialize with the data to be estimated.
+    - fit(kernel='gau', bw='normal_reference', fft=True, weights=None, gridsize=None, adjust=1, cut=3, clip=(-inf, inf)):
+      - Compute the density estimate on a grid (support) and attach the results to the instance.
+      - Returns the instance (for chaining).
+  - Core attributes after fit:
+    - density: Estimated density values on the support grid.
+    - support: The grid (x-values) where the density is evaluated.
+    - bw: The bandwidth used for the estimator.
+    - kernel: An instance of the kernel used (including its bandwidth).
+  - Optional attributes:
+    - cdf: Cached CDF values evaluated on the support (read-only property).
+  - Internal helper:
+    - _checkisfit(self): Ensures that the estimator has been fit before accessing results (used by properties like cdf).
+
+- kdensity and kdensityfft
+  - Internal functions used by KDEUnivariate.fit to compute the density estimates.
+  - kdensity: Non-FFT (direct) density estimation.
+  - kdensityfft: FFT-based density estimation (Gaussian kernel only).
+  - Both return density, grid, and the used bandwidth.
+
+- References and background
+  - Racine (2008), Silverman (1986), and kernel encyclopedia references provide theoretical foundations.
+  - Kernel definitions and properties are informed by standard kernel density estimation literature.
+
+Parameters and Return Values
+----------------------------
+
+KDEUnivariate.__init__(endog)
+- endog: array_like
+  - One-dimensional data for which the density is estimated.
+
+KDEUnivariate.fit(
+  kernel="gau",
+  bw="normal_reference",
+  fft=True,
+  weights=None,
+  gridsize=None,
+  adjust=1,
+  cut=3,
+  clip=(-np.inf, np.inf),
+)
+- kernel: str
+  - Kernel to use. Options include:
+    - "gau": Gaussian
+    - "epa": Epanechnikov
+    - "uni": Uniform
+    - "tri": Triangular
+    - "triw": Triweight
+    - "biw": Biweight
+    - "cos": Cosine
+    - "cos2": Cosine2
+- bw: str | float | callable
+  - Bandwidth specification:
+    - "scott": 1.059 * A * nobs^(-1/5)
+    - "silverman": 0.9 * A * nobs^(-1/5)
+    - "normal_reference": C * A * nobs^(-1/5) (kernel-dependent)
+    - float: exact bandwidth value
+    - callable: function taking (x, kern) and returning a float
+- fft: bool
+  - If True, use FFT-based density estimation (Gaussian kernel only). If False, use the direct method.
+- weights: array_like or None
+  - Observation weights. Not implemented for FFT mode.
+- gridsize: int | None
+  - Number of grid points for the evaluation grid. If None, defaults to max(len(endog), 50).
+- adjust: float
+  - Bandwidth adjustment factor. Effective bandwidth = bw * adjust.
+- cut: float
+  - Grid extends beyond the min/max of x by cut * bw on each side, and the kernel is truncated there.
+- clip: tuple (xmin, xmax)
+  - Clip the data to the specified range before estimation.
+
+Returns
+- KDEUnivariate
+  - The instance with density, support, bw, and kernel attached.
+
+Attributes after fit
+- density: ndarray
+  - The estimated density values on the support grid.
+- support: ndarray
+  - The grid of points where density is evaluated.
+- bw: float
+  - The actual bandwidth used.
+- kernel: object
+  - Kernel instance with bandwidth and evaluation logic.
+- density, support, bw, kernel are available on the instance for downstream usage.
+
+- cdf (cache_readonly property)
+  - Returns the cumulative distribution function evaluated on the support.
+  - Requires fit() to have been called.
+  - Implementation uses the kernel's density and cumulative behavior for evaluation.
+
+Edge Cases and Considerations
+- FFT-only Gaussian kernel
+  - When fft=True, only the Gaussian kernel is supported. Attempting to use other kernels raises an error.
+  - Weights are not supported with FFT mode.
+- Bandwidth selection
+  - If bw is a string, a predefined rule is used. If a float is provided, that value is used as the bandwidth.
+  - If a callable is provided, it must accept exactly two parameters (x, kern) and return a float.
+- Data shape
+  - endog must be a one-dimensional array. The implementation ensures contiguity for performance.
+- Grid and clipping
+  - The gridsize and cut parameters control the evaluation grid. The cut parameter influences how far the kernel tails are considered.
+- Dependencies
+  - Relies on SciPy for numerical integration and the internal Statsmodels kernel implementations.
+  - The density estimation paths refer to kdensity and kdensityfft for the core computations.
+
+Usage Examples
+--------------
+
+Basic usage (univariate KDE with Gaussian kernel and normal-reference bandwidth)
+```python
+import numpy as np
+import statsmodels.api as sm
+# Generate sample data
+np.random.seed(1234)
+x = np.random.normal(loc=0, scale=1, size=300)
+
+# Create KDE estimator
+dens = sm.nonparametric.KDEUnivariate(x)
+
+# Fit using default settings (Gaussian kernel, normal_reference bandwidth)
+dens.fit()
+
+# Access results
+print("Bandwidth:", dens.bw)
+print("Support length:", len(dens.support))
+print("Density at support[0]:", dens.density[0])
+
+# Optional: access the estimated CDF (requires fit)
+cdf_vals = dens.cdf
+```
+
+KDE with a different kernel and bandwidth specification
+```python
+# Epanechnikov kernel with Silverman bandwidth rule
+dens_epa = sm.nonparametric.KDEUnivariate(x)
+dens_epa.fit(kernel="epa", bw="silverman", fft=False)
+
+print("Kernel:", "Epanechnikov")
+print("Bandwidth:", dens_epa.bw)
+```
+
+Custom weights and non-FFT path
+```python
+weights = np.ones_like(x)
+weights[:50] = 2.0  # example: heavier weight for first 50 observations
+
+dens_w = sm.nonparametric.KDEUnivariate(x)
+dens_w.fit(weights=weights, fft=False, kernel="gau", bw="scott")
+```
+
+Notes
+- For performance-sensitive univariate KDE, prefer FFT-based estimation when Gaussian kernels are sufficient.
+- For multivariate density estimation or mixed data types, consider KDEMultivariate (not shown here) or other nonparametric methods in the surrounding module.
+
+See Also
+--------
+
+- kdensity: Internal non-FFT kernel density estimation routine.
+- kdensityfft: Internal FFT-based kernel density estimation routine (Gaussian kernel only).
+- KDEMultivariate: Multivariate nonparametric density estimator (not shown in this snippet).
+
+References
+----------
+
+- Racine, Jeff. (2008) "Nonparametric Econometrics: A Primer," Foundation and Trends in Econometrics: Vol 3: No 1, pp1-88. http://dx.doi.org/10.1561/0800000009
+- https://en.wikipedia.org/wiki/Kernel_%28statistics%29
+- Silverman, B.W. Density Estimation for Statistics and Data Analysis.
+
+Notes
+-----
+
+The documentation above reflects the core API and usage of the univariate KDE in this nonparametric module. For full implementation details, see the source file that defines KDEUnivariate, the kernel switch dictionary, and the underlying kdensity and kdensityfft routines.

@@ -1,0 +1,117 @@
+Annihilation
+============
+
+Alchemical transformations using a hybrid topology
+--------------------------------------------------
+
+This documentation describes the alchemical transformations implemented by the HybridTopologyFactory. The factory constructs a single hybrid system that smoothly morphs the old (reference) topology into the new topology along a lambda pathway. It classifies atoms into distinct groups and defines how their interactions are scaled during the transformation.
+
+Key concepts
+------------
+
+Atom classification
+- unique_old_atom: atoms present only in the old system. Their interactions are active at lambda = 0 and inactive at lambda = 1.
+- unique_new_atom: atoms present only in the new system. Their interactions are inactive at lambda = 0 and active at lambda = 1.
+- core_atom: atoms that are mapped and belong to a residue that changes during the transformation. Their interactions follow the old system at lambda = 0 and the new system at lambda = 1.
+- environment_atom: mapped atoms not part of the changing residue. Their interactions remain active and are not alchemically modified.
+
+Interaction groups
+- InteractionGroup = enum.Enum("InteractionGroup", ['unique_old', 'unique_new', 'core', 'environment'])
+
+Hybrid topology and mappings
+- hybrid_system: openmm.System representing the full hybrid system used for simulation.
+- new_to_hybrid_atom_map: dict[int, int] mapping new-system atoms to their corresponding hybrid atoms.
+- old_to_hybrid_atom_map: dict[int, int] mapping old-system atoms to their corresponding hybrid atoms.
+- hybrid_positions: numpy.ndarray with shape [n, 3], containing the positions for the hybrid system.
+- hybrid_topology: mdtraj.Topology describing the topology of the hybrid system.
+- omm_hybrid_topology: openmm.app.Topology corresponding to the hybrid system.
+
+Forces considered during transformation
+- _known_forces lists force types that participate in the alchemical treatment:
+  - HarmonicBondForce
+  - HarmonicAngleForce
+  - PeriodicTorsionForce
+  - NonbondedForce
+  - MonteCarloBarostat
+
+Initialization and API
+----------------------
+
+HybridTopologyFactory is constructed with a topology proposal and the coordinates of both the old and new systems. It exposes a set of parameters that control how alchemical scaling is applied, as well as optional softcore and restraint behavior.
+
+Initialization signature (highlights)
+- topology_proposal: a perses.rjmc.topology_proposal.TopologyProposal object describing the proposed change.
+- current_positions: [n, 3] array of floats representing the old system coordinates.
+- new_positions: [m, 3] array of floats representing the new system coordinates.
+- use_dispersion_correction: bool, default False. Enables the long-range dispersion correction in the custom sterics force (costly for large systems).
+- functions: dict, default None. Alchemical scaling functions for each force category. Keys must be strings of the form "lambda_<term>". If provided, all lambda terms must be specified.
+- softcore_alpha: float, default None. Sets the softcore alpha parameter. If None, a default of 0.5 is used.
+- bond_softening_constant: float, default 1.0. Softens the force constant for bonds between unique atoms and unique-core atoms at the dummy endpoint.
+- angle_softening_constant: float, default 1.0. Similar softening as bonds for angles.
+- soften_only_new: bool. If True, only new atoms use softcore treatment.
+- neglected_new_angle_terms: list. Indices of new-system HarmonicAngleForce terms neglected by the geometry engine; these must be annealed in for unique new atoms (forward lambda).
+- neglected_old_angle_terms: list. Indices of old-system HarmonicAngleForce terms neglected by the geometry engine; these must be removed for unique old atoms (reverse lambda).
+- softcore_LJ_v2: bool, default True. Enables softcore LJ v2.
+- softcore_electrostatics: bool, default True. Enables softcore electrostatics.
+- softcore_LJ_v2_alpha: float, default 0.85. Softcore LJ v2 alpha parameter.
+- softcore_electrostatics_alpha: float, default 0.3. Softcore electrostatics alpha parameter.
+- softcore_sigma_Q: float, default 1.0. Softcore sigma parameter for electrostatics.
+- interpolate_old_and_new_14s: bool, default False. Controls whether 1-4 terms are interpolated in a particular way during the lambda sweep.
+- omitted_terms: dict. Terms (by new topology index) that must be annealed over the lambda protocol.
+- flatten_torsions: bool, default False. If True, torsion terms involving unique_new_atoms are scaled so that at lambda=0 and lambda=1 they are turned off/on respectively; the opposite holds for unique_old_atoms.
+- rmsd_restraint: bool, default False. If True, imposes an RMSD restraint between core heavy atoms and protein Cα atoms.
+- endstate: int or None. Supposed to be None for HybridTopologyFactory. If set to 0 or 1, the constructor raises an exception to enforce the invariant.
+- kwargs: additional keyword arguments accepted by the implementation.
+
+Important behavioral note
+- The code raises an exception if endstate is 0 or 1, enforcing endstate to be None for the vanilla HybridTopologyFactory. If endstate is None, the factory logs that it is generating a vanilla HybridTopologyFactory.
+
+Example
+- Basic usage (illustrative; assumes a valid topology_proposal and coordinates are available):
+
+.. code-block:: python
+
+    from simtk.openmm import app
+    import numpy as np
+    import mdtraj as md
+    import perses
+
+    # topology_proposal = ...  # obtained from a topology proposal engine
+    # current_positions = np.zeros((N, 3))  # old system coordinates
+    # new_positions = np.zeros((M, 3))      # new system coordinates
+
+    hybrid_factory = HybridTopologyFactory(
+        topology_proposal=topology_proposal,
+        current_positions=current_positions,
+        new_positions=new_positions
+    )
+
+    # Access hybrid system and topology
+    hybrid_system = hybrid_factory.hybrid_system
+    new_to_hybrid = hybrid_factory.new_to_hybrid_atom_map
+    old_to_hybrid = hybrid_factory.old_to_hybrid_atom_map
+    positions = hybrid_factory.hybrid_positions
+    hybrid_top = hybrid_factory.hybrid_topology
+    omm_top = hybrid_factory.omm_hybrid_topology
+
+Notes on logging and diagnostics
+- The class uses a logger named "relative" and emits informational messages during initialization. The log level is set to INFO by default.
+
+Implementation details
+----------------------
+
+- Experimental API: The HybridTopologyFactory API is marked as experimental and subject to change.
+- Forces: Only a subset of OpenMM forces are considered for alchemical treatment (as listed in _known_forces).
+- Interaction groups govern how each atom’s interactions are treated across lambda states, enabling correct handling of atoms that are unique to either topology, are part of changing residues, or belong to the environment.
+
+Practical guidance
+- When constructing a hybrid topology, ensure that the topology_proposal accurately reflects the intended transformation and that current_positions and new_positions are consistent with their respective topologies.
+- If you need to customize alchemical behavior (softcore parameters, term flattening, RMSD restraints, etc.), supply the corresponding arguments via the constructor.
+- To enable comprehensive diagnostics, enable logging at INFO level to observe factory initialization messages and subsequent steps.
+
+Appendix: Relevant terms
+- lambda: the alchemical parameter ranging from 0 to 1 that controls the interpolation between old and new systems.
+- Core vs. environment: distinction used to determine when interactions are modified vs. always active.
+- Softcore: a technique to avoid singularities during alchemical transformations by softening attractive interactions as lambda approaches endpoints.
+
+This documentation reflects the API and behavior as implemented in the provided code excerpt for annihilation via the HybridTopologyFactory.

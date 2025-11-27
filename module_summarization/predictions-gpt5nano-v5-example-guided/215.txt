@@ -1,0 +1,137 @@
+# An asynchronous producer / consumer pattern for coroutines
+
+## Overview
+This module provides asynchronous queues for coroutines, similar in spirit to Python's asyncio.queues. Queues coordinate producers and consumers in an asynchronous environment, supporting optional maximum size, timeouts, and iteration with async for. The implementations are not thread-safe; to use them from other threads, transfer control to the IOLoop thread with IOLoop.add_callback before calling queue methods.
+
+Key concepts:
+- Put and get operations coordinate producers and consumers.
+- Timeouts can be applied to put operations.
+- Async iteration (async for) is supported on the queue.
+- Joinable queues: producers can signal completion via task_done and join.
+
+Note: The module includes multiple queue types (Queue, PriorityQueue, LifoQueue) and associated exceptions.
+
+## Key Components
+
+- Queue
+  - A generic asynchronous queue used to coordinate producers and consumers.
+  - Max size: maxsize = 0 means unbounded; otherwise, the queue blocks puts when full until a consumer gets an item.
+  - Core methods:
+    - put(item, timeout=None) -> Future[None]
+      - Put an item, waiting if necessary for a free slot. Returns a Future that may raise TimeoutError on timeout.
+    - put_nowait(item) -> None
+      - Put without blocking. Raises QueueFull if no free slot is immediately available.
+    - get(timeout=None) -> Awaitable[_T]
+      - Remove and return an item, waiting if necessary for an item to become available.
+    - qsize(), empty(), full() -> descriptive helpers about queue state.
+  - Iteration:
+    - The queue supports async iteration via an internal _QueueIterator, enabling async for item in q: usage.
+  - Join/Task tracking (implicit in examples):
+    - The queue tracks unfinished tasks, with methods like task_done() and join() to wait for all items to be processed. (See usage example for pattern.)
+  - Timeout handling:
+    - Internal helper _set_timeout schedules a TimeoutError on waiters after a given timeout.
+
+- _QueueIterator
+  - Internal helper to support async iteration over the queue.
+
+- Exceptions
+  - QueueEmpty: Raised by get_nowait when the queue has no items.
+  - QueueFull: Raised by put_nowait when the queue is at its maximum size.
+
+- Timeouts
+  - _set_timeout(future, timeout) wires a timeout onto a Future using the current IOLoop, producing a gen.TimeoutError if the timeout elapses.
+
+- Thread-safety warning
+  - The classes are not thread-safe. To use from another thread, transfer control to the IOLoop thread before calling queue methods.
+
+- Type hints and generics
+  - The Queue is generic, with _T as the item type. Subclasses like PriorityQueue and LifoQueue are provided in this module (as indicated by __all__).
+
+## Usage
+
+Typical producer/consumer pattern:
+
+```python
+import asyncio
+from tornado.ioloop import IOLoop
+from tornado.queues import Queue
+
+q = Queue(maxsize=2)
+
+async def consumer():
+    async for item in q:
+        try:
+            print('Doing work on %s' % item)
+            await asyncio.sleep(0.01)
+        finally:
+            q.task_done()
+
+async def producer():
+    for item in range(5):
+        await q.put(item)
+        print('Put %s' % item)
+
+async def main():
+    # Start consumer without waiting (since it never finishes).
+    IOLoop.current().spawn_callback(consumer)
+    await producer()     # Wait for producer to put all tasks.
+    await q.join()       # Wait for consumer to finish all tasks.
+    print('Done')
+
+asyncio.run(main())
+```
+
+Output (example):
+Put 0
+Put 1
+Doing work on 0
+Put 2
+Doing work on 1
+Put 3
+Doing work on 2
+Put 4
+Doing work on 3
+Doing work on 4
+Done
+
+Pre-Python 3.5 alternative (no native async/await):
+
+```python
+@gen.coroutine
+def consumer():
+    while True:
+        item = yield q.get()
+        try:
+            print('Doing work on %s' % item)
+            yield gen.sleep(0.01)
+        finally:
+            q.task_done()
+```
+
+Note:
+- With async/await support (Python 3.5+), async for is available for iterating the queue items. The version history notes that async for support was added in version 4.3.
+- The example demonstrates join semantics: producer inserts items, consumer processes them, and join waits until all tasks have been completed (unfinished_tasks becomes zero).
+
+## Details
+
+- maxsize semantics
+  - maxsize = 0 means the queue size is unbounded.
+  - If the queue is full, put_nowait raises QueueFull; otherwise, put() waits for a free slot.
+
+- Blocking behavior
+  - get() blocks (via awaiting) until an item is available.
+  - put() blocks (via awaiting) until space is available when maxsize > 0.
+
+- Timeout behavior
+  - put(...) accepts a timeout (float seconds or datetime.timedelta). If the timeout expires before the item is put, the returned Future raises a TimeoutError.
+
+- Thread-safety
+  - The queue implementations are not safe to use from multiple threads without transferring control to the Tornado IOLoop thread first (e.g., via IOLoop.add_callback).
+
+- Subtypes
+  - The module exports Queue, PriorityQueue, and LifoQueue, enabling different ordering strategies for production/consumption patterns (e.g., FIFO, priority-based, LIFO).
+
+- Relationship to standard library
+  - These queues are designed to be similar in spirit to asyncio.queues, adapted for use with Tornado coroutines and IOLoop.
+
+For more advanced usage, see the provided examples demonstrating async for iteration, join semantics, and timeout handling.

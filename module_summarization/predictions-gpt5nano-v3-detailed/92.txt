@@ -1,0 +1,211 @@
+# distutils.rst
+
+A set of utility helpers used by distutils-related tooling. This module provides lightweight facilities for thread-local temporary directory management, path manipulation, frame-inspection helpers, and simple build-configuration utilities. The focus is on small, reusable utilities that support build orchestration and filesystem interactions.
+
+## Overview
+
+Key concepts and components include:
+- Thread-local and global management of temporary directories created during builds.
+- Lightweight path utilities to normalize and combine filesystem paths across platforms.
+- Helpers to determine the number of parallel build jobs.
+- Small utilities for inspecting the call frame to infer module paths.
+- A simple, deprecated argument-quoting helper for command-line construction.
+
+The public API (as exposed by `__all__`) includes classes and functions such as `InstallableLib`, `get_num_build_jobs`, `allpath`, `rel_path`, `get_path_from_frame`, and `njoin`, among others.
+
+## Public API
+
+### InstallableLib
+
+Container object describing a library that can be installed as part of a build process.
+
+- name: str
+  - The name of the installed library.
+- build_info: dict
+  - Dictionary containing build-related information for the library.
+- target_dir: str
+  - Absolute path where the library should be installed.
+
+Notes:
+- This class serves as a lightweight carrier for install-time information and is typically used by higher-level configuration or packaging logic.
+
+Example
+```python
+lib = InstallableLib(
+    name="mylib",
+    build_info={"sources": ["mylib.c"]},
+    target_dir="/usr/local/lib/mylib"
+)
+```
+
+### get_num_build_jobs()
+
+Determine the number of parallel build jobs to allow.
+
+Behavior:
+- Checks for a user-specified value via the --parallel option in setup/build commands, and falls back to environment variable `NPY_NUM_BUILD_JOBS`.
+- If not provided, uses the system's processor count (with a maximum cap of 8 to avoid overloading the system).
+- If a NumPy/distutils distribution is currently configured, it may use the `parallel` attribute from relevant build commands (`build`, `build_ext`, `build_clib`) to determine the actual parallelism.
+
+Return:
+- int representing the number of parallel build jobs to run.
+
+Examples
+```python
+n = get_num_build_jobs()
+print(n)
+```
+
+Edge cases:
+- If distribution info is unavailable during configuration, the environment variable or CPU count is used.
+- The maximum limit is 8 to prevent excessive parallelism on multi-core systems.
+
+### quote_args(args)
+
+Deprecated: Quote list of command-line arguments.
+
+Behavior:
+- Intended to prepare a list of arguments for safe shell usage.
+- Emits a `DeprecationWarning` indicating deprecation.
+
+Note: The implementation performs quoting for each argument (with a specific condition that may quote most inputs). Use modern subprocess handling or other safer utilities instead.
+
+Example
+```python
+args = ["gcc", "-O2", "src/main.c"]
+quoted = quote_args(args)
+```
+
+### allpath(name)
+
+Convert a POSIX-style path to the current OS path separator.
+
+Parameters:
+- name: str
+  - Path with forward slashes ("/") as separators.
+
+Returns:
+- str with the OS-native path separators.
+
+Example
+```python
+windows_path = allpath("src/utils/file.c")  # "src\\utils\\file.c" on Windows
+```
+
+### rel_path(path, parent_path)
+
+Return the path of `path` relative to `parent_path`.
+
+Parameters:
+- path: str
+- parent_path: str
+
+Returns:
+- str representing `path` relative to `parent_path`, or the original `path` if computation isn’t possible.
+
+Notes:
+- Uses realpath to resolve symlinks for both paths.
+- If `path` is the same as `parent_path`, returns an empty string.
+- If `path` is not under `parent_path`, returns `path`.
+
+Example
+```python
+rel = rel_path("/home/user/project/src", "/home/user")
+print(rel)  # "project/src"
+```
+
+### get_path_from_frame(frame, parent_path=None)
+
+Infer the filesystem path associated with a given stack frame.
+
+Parameters:
+- frame: frame object (as from a traceback or inspect stack)
+- parent_path: Optional[str]
+  - If provided, the resulting path is made relative to this path using `rel_path`.
+
+Returns:
+- str path that is the module path associated with the frame, or '.' if not determinable.
+
+Notes:
+- Tries to use `__file__` from the frame’s globals/locals.
+- If `__file__` is unavailable, falls back to importing the frame’s `__name__` module and using its `__file__` if present.
+- If neither is available, defaults to the current directory.
+
+Example
+```python
+import inspect
+def foo():
+    frame = inspect.currentframe()
+    print(get_path_from_frame(frame, "/home/user"))
+foo()
+```
+
+### njoin(*path)
+
+Join path components with normalization and support for nested sequences.
+
+Behavior:
+- Joins two or more path components.
+- Converts POSIX-style separators to the OS-specific separator.
+- Resolves `..` and `.` components.
+- Accepts either individual path components or a sequence (or mixtures) of components. If an argument is a sequence, it is unpacked and joined recursively.
+
+Note:
+- The implementation references helper predicates `is_sequence` and `is_string`, which are expected to be defined elsewhere in the module.
+
+Example
+```python
+p = njoin("src", "utils", ["..", "lib"])
+print(p)  # "src/utils/.." resolved as appropriate for the OS
+```
+
+## Important considerations and edge cases
+
+- Thread-local temporary directories:
+  - The module maintains a thread-local store for temporary directories to avoid creating multiple temp dirs per thread.
+  - All created temporary directories are tracked and cleaned up on program exit if possible.
+  - Ensure that any code creating temporary directories cooperates with `clean_up_temporary_directory` to avoid leftover dirs.
+
+- get_num_build_jobs:
+  - If called before a distribution is configured, behavior gracefully falls back to environment or CPU count.
+  - The cap of 8 prevents over-saturation of the build machine in multi-user environments.
+
+- get_path_from_frame:
+  - Relies on the frame’s accessible `__file__` attribute, with robust fallbacks.
+  - In complex packaging scenarios (e.g., eggs, easy_install, or tools that modify `__main__`), the path inference may vary.
+
+- njoin:
+  - Since the implementation details depend on `is_sequence` and `is_string`, ensure these helpers are available in the module's scope.
+  - Be aware of path normalization behavior across platforms when using `..` and `.` components.
+
+## Usage examples
+
+- Determine parallel build jobs
+```python
+from distutils.rst import get_num_build_jobs  # illustrative import path
+n = get_num_build_jobs()
+print("Parallel build jobs:", n)
+```
+
+- Normalize a POSIX path to the current OS
+```python
+from distutils.rst import allpath
+path = allpath("src/utils/file.c")
+print(path)  # "src\\utils\\file.c" on Windows
+```
+
+- Compute a path relative to a parent directory
+```python
+from distutils.rst import rel_path
+print(rel_path("/home/user/project/src", "/home/user"))
+# "project/src" (POSIX)
+```
+
+- Join path components with normalization
+```python
+from distutils.rst import njoin
+print(njoin("src", ["utils", "..", "lib"], "core"))
+# "src/utils/../lib/core" collapsed according to OS rules
+```
+
+End of distutils.rst documentation.

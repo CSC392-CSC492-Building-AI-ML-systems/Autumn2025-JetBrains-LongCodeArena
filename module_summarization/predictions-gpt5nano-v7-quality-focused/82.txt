@@ -1,0 +1,114 @@
+BaseUser (baseuser.rst)
+=======================
+
+Overview
+--------
+BaseUser provides a minimal user model with authentication helpers. It is a Piccolo ORM table
+backed by a database table named piccolo_user. The model stores user credentials and some
+basic metadata, and includes utilities for password hashing, validation, and user login.
+
+Model and table
+----------------
+- Inherits from piccolo.table.Table
+- Table name: piccolo_user
+
+Key fields
+---------
+- id: Serial
+- username: Varchar(length=100, unique=True)
+- password: Secret(length=255)
+- first_name: Varchar(null=True)
+- last_name: Varchar(null=True)
+- email: Varchar(length=255, unique=True)
+- active: Boolean(default=False)
+- admin: Boolean(default=False, help_text="An admin can log into the Piccolo admin GUI.")
+- superuser: Boolean(default=False, help_text="If True, this user can manage other users' passwords in the Piccolo admin GUI.")
+- last_login: Timestamp(null=True, default=None, required=False, help_text="When this user last logged in.")
+- _min_password_length: 6
+- _max_password_length: 128
+- _pbkdf2_iteration_count: 600_000
+
+Initialization and readability
+------------------------------
+- __init__(self, **kwargs): If a password is provided and it does not already start with pbkdf2_sha256, the password is hashed immediately.
+
+- get_salt(): Returns a random salt using secrets.token_hex(16).
+
+- get_readable(): Returns a Readable representation for a row, using the username as the display value.
+  - Example: Readable(template="%s", columns=[BaseUser.username])
+
+Password handling and validation
+-------------------------------
+- _validate_password(cls, password): Validates a raw password string.
+  - Ensures a password is provided.
+  - Enforces minimum length (_min_password_length) and maximum length (_max_password_length).
+  - Rejects passwords that already start with pbkdf2_sha256 (to prevent storing an already-hashed password).
+
+- hash_password(cls, password, salt="", iterations=None): Hashes a password for storage.
+  - Uses PBKDF2-HMAC-SHA256 with a salt and a configurable iteration count (default _pbkdf2_iteration_count).
+  - Returns a string in the format: "pbkdf2_sha256$<iterations>$<salt>$<hash>".
+  - Raises ValueError if the raw password exceeds _max_password_length.
+
+- __setattr__(self, name, value): Ensures that when password is set, it is stored hashed unless it already starts with pbkdf2_sha256.
+
+- split_stored_password(cls, password): Splits a stored hashed password into components.
+  - Expects exactly four elements: "pbkdf2_sha256", iterations, salt, and hash.
+  - Raises ValueError if the format is invalid.
+
+Password update and login helpers
+---------------------------------
+- update_password_sync(cls, user, password): Sync wrapper around update_password.
+
+- update_password(cls, user, password): Asynchronously updates a user's password.
+  - user can be a username (str) or user id (int).
+  - Validates the raw password via _validate_password.
+  - Hashes the password and updates the appropriate user row in the database.
+
+- login_sync(cls, username, password): Sync wrapper around login.
+
+- login(cls, username, password): Asynchronously authenticates a user.
+  - Validates input lengths to avoid overly long strings.
+  - Looks up the user by username and retrieves the stored password.
+  - Parses the stored password and re-hashes the provided password using the same salt and iterations.
+  - If the computed hash matches the stored one, login succeeds and last_login is updated in the database.
+  - Returns the user id on success, or None on failure.
+
+Usage examples
+--------------
+
+- Create a new user (password is hashed automatically on init)
+  .. code-block:: python
+
+     from your_module.baseuser import BaseUser
+
+     user = BaseUser(
+         username="alice",
+         password="password123",
+         email="alice@example.com",
+     )
+     # Save to DB as needed, e.g. user.save()
+
+- Hash a password directly
+  .. code-block:: python
+
+     hashed = BaseUser.hash_password("password123")
+     print(hashed)
+
+- Update a user's password
+  .. code-block:: python
+
+     await BaseUser.update_password("alice", "newstrongpassword")
+
+- Log in a user
+  .. code-block:: python
+
+     user_id = await BaseUser.login("alice", "newstrongpassword")
+     if user_id is not None:
+         print("Logged in as user id:", user_id)
+
+Notes
+-----
+- The password field stores values in a salted PBKDF2-HMAC-SHA256 format.
+- The default iteration count (600,000) follows OWASP guidelines.
+- If a password is excessively long, hashing raises ValueError.
+- The class is designed to upgrade legacy hashes by re-hashing with current parameters on login when needed.

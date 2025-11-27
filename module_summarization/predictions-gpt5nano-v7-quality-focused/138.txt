@@ -1,0 +1,97 @@
+Array Best Practices
+====================
+
+Overview
+--------
+This document describes practical patterns for working with Dask arrays, with a focus on backend dispatch and numpy.ma (masked array) interoperability. It covers how dispatch-backed backends are wired, and how to use Dask’s masked-array helpers to perform mask-aware operations efficiently in a block-wise, parallel fashion.
+
+Dispatch and backend extensibility
+----------------------------------
+- Dask arrays use Dispatch-backed lookups to route core operations to backend-specific implementations. The code defines lookup objects for several operations:
+  - concatenate, tensordot, einsum, empty, divide, percentile, numel, nannumel, to_numpy_dispatch, to_cupy_dispatch
+- Backends register implementations under these keys to customize behavior for different array backends or storage formats.
+- Practical takeaways:
+  - To optimize an operation for a new backend, register an implementation under the corresponding Dispatch key.
+  - When profiling or debugging performance, verify which backend implementation a given operation dispatches to.
+
+Masked array interoperability with numpy.ma
+------------------------------------------
+Dask provides a set of helpers that wrap numpy.ma functionality so masked arrays can be used efficiently in parallel across blocks.
+
+Key concepts
+- Token normalization for masked arrays
+  - The normalize_masked_array function converts a masked array into a normalized token triple: (data, mask, fill_value). This ensures consistent hashing and tokenization for caching and task graph construction.
+- Block-wise wrapping of masked operations
+  - The _wrap_masked decorator automates applying a binary numpy.ma operation to Dask arrays by using blockwise. It handles:
+    - Converting inputs to arrays
+    - Determining the appropriate output axes
+    - Applying the underlying numpy.ma function block-wise
+  - This enables elementwise masked operations to run efficiently on each block.
+
+Common masked-array operations
+- masked_greater, masked_greater_equal, masked_less, masked_less_equal, masked_not_equal
+  - Created via _wrap_masked. They perform the corresponding masked comparison operations in a blockwise fashion.
+- masked_equal(a, value)
+  - Requires a scalar value (array-valued inputs are not supported). Applies numpy.ma.masked_equal in a blockwise fashion.
+- masked_invalid(a)
+  - Applies numpy.ma.masked_invalid to each block.
+- masked_inside(x, v1, v2) and masked_outside(x, v1, v2)
+  - Apply range-based masking to each block using the corresponding numpy.ma function.
+- masked_where(condition, a)
+  - Masks elements of a according to a condition array. Checks that the condition shape is compatible with a’s shape; uses blockwise to apply numpy.ma.masked_where.
+- masked_values(x, value, rtol=1e-05, atol=1e-08, shrink=True)
+  - Masks values equal to value within a tolerance, evaluated blockwise via numpy.ma.masked_values.
+- fix_invalid(a, fill_value=None)
+  - Applies numpy.ma.fix_invalid to each block.
+- getdata(a) and getmaskarray(a)
+  - Expose the underlying data and the mask, respectively, by applying numpy.ma.getdata and numpy.ma.getmaskarray to each block.
+
+Best-practice patterns
+- Prefer blockwise and map_blocks for masked operations
+  - Blockwise ensures correct alignment of axes when combining multiple inputs (e.g., condition and data in masked_where).
+  - map_blocks applies a function block-by-block, which is convenient for ops like getdata, getmaskarray, and masked_invalid.
+- Enforce scalar values where required
+  - For masked_equal, the value argument must be scalar; otherwise, a ValueError is raised to avoid ambiguous broadcasting across blocks.
+- Validate shapes before masking with conditions
+  - When using masked_where, ensure the condition shape matches the input’s shape to avoid runtime misalignment.
+- Normalize tokens for reliability
+  - normalize_token and normalize_masked_array help ensure that masked arrays participate correctly in Dask’s token-based task graphs and caching.
+- Leverage dispatch for backend-specific features
+  - Use to_numpy_dispatch and to_cupy_dispatch (where applicable) to control how data moves to NumPy or CuPy backends. This helps optimize conversions and interoperability across devices.
+
+Code-oriented references (high level)
+- Dispatch lookups
+  - concatenate_lookup = Dispatch("concatenate")
+  - tensordot_lookup = Dispatch("tensordot")
+  - einsum_lookup = Dispatch("einsum")
+  - empty_lookup = Dispatch("empty")
+  - divide_lookup = Dispatch("divide")
+  - percentile_lookup = Dispatch("percentile")
+  - numel_lookup = Dispatch("numel")
+  - nannumel_lookup = Dispatch("nannumel")
+  - to_numpy_dispatch = Dispatch("to_numpy_dispatch")
+  - to_cupy_dispatch = Dispatch("to_cupy_dispatch")
+- Masked array helpers (examples)
+  - filled(a, fill_value=None)
+  - masked_greater(a, value)
+  - masked_equal(a, value)
+  - masked_invalid(a)
+  - masked_where(condition, a)
+  - masked_values(x, value, rtol=1e-05, atol=1e-08, shrink=True)
+  - getdata(a)
+  - getmaskarray(a)
+
+Practical examples
+- Fill masked elements in a Dask masked array
+  - result = filled(a, fill_value=0)
+- Retrieve underlying data and mask
+  - data = getdata(a)
+  - mask = getmaskarray(a)
+- Apply a range-based mask
+  - y = masked_inside(a, 1, 3)
+- Mask values equal to a scalar
+  - z = masked_equal(a, 5)  # raises if value is not scalar
+
+Notes
+- The implementations rely on map_blocks and blockwise to respect chunking and to maintain parallelism.
+- These patterns enable masked-array semantics to scale with large, chunked arrays while preserving the expected numpy.ma behavior.

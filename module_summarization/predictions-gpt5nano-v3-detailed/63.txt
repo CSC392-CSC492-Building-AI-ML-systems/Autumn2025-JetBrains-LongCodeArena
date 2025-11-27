@@ -1,0 +1,156 @@
+Commands API
+=============
+Overview
+--------
+This module provides programmatic access to core Alembic operations related to template management, environment initialization, and revision generation. It exposes three main functions:
+
+- list_templates(config): Discover and display available environment templates.
+- init(config, directory, template='generic', package=False): Initialize a new script environment from a template.
+- revision(config, ...): Create a new revision script, optionally autogenerating its contents.
+
+Key concepts
+------------
+- ScriptDirectory: Represents the migration scripts directory. Used to locate templates, copy files, and generate new revision scripts.
+- Config: Alembic configuration object. Used to locate template directories, configuration files, and messaging options.
+- RevisionContext (autogenerate): Encapsulates the context for creating a new revision, including parameters such as message, autogenerate, head, and dependencies.
+- Environment integration: revision() respects the environment setting (revision_environment) and may enable autogeneration if requested.
+
+Functions
+---------
+list_templates(config)
+- Purpose: Print a list of available templates found in the configured template directory.
+- Parameters:
+  - config: a Config object (alembic.config.Config).
+- Return: None.
+- Behavior:
+  - Reads the template directory from config.get_template_directory().
+  - For each template subdirectory, reads the first line of the template's README as a synopsis and prints the template name with the synopsis.
+  - Prints a usage hint showing how templates are used, e.g., alembic init --template generic./scripts.
+- Edge cases:
+  - If a template directory is unavailable, behavior depends on underlying filesystem access; the function assumes the directory exists.
+
+init(config, directory, template='generic', package=False)
+- Purpose: Create a new scripts directory initialized from a specified template.
+- Parameters:
+  - config: a Config object.
+  - directory: target path for the new environment.
+  - template: name of the template to use (default: 'generic').
+  - package: if True, write __init__.py files into the environment and versions locations.
+- Return: None.
+- Behavior:
+  - Validates the target directory: error if it exists and is non-empty.
+  - Validates the requested template exists under config.get_template_directory().
+  - Creates the target directory and a versions subdirectory.
+  - Creates a ScriptDirectory for the target.
+  - Copies non-template files from the template into the target, and generates alembic.ini from mako template if present (without overwriting an existing file).
+  - If package is True, creates __init__.py in the target and versions directories.
+  - Suggests the user edit the generated configuration (config_file).
+- Edge cases:
+  - Existing non-empty directory raises CommandError.
+  - Missing template raises CommandError.
+  - If alembic.ini already exists, it will be preserved with a notice.
+
+revision(
+  config,
+  message=None,
+  autogenerate=False,
+  sql=False,
+  head='head',
+  splice=False,
+  branch_label=None,
+  version_path=None,
+  rev_id=None,
+  depends_on=None,
+  process_revision_directives=None,
+) -> Union[Optional[Script], List[Optional[Script]]]
+- Purpose: Create a new revision file, optionally auto-generating its contents.
+- Parameters:
+  - config: a Config object.
+  - message: optional revision message (corresponds to -m).
+  - autogenerate: if True, generate the script from the current database state (corresponds to --autogenerate).
+  - sql: if True, output the generated script as SQL to stdout (corresponds to --sql).
+  - head: the parent revision (corresponds to --head).
+  - splice: whether the new revision should become a new head (corresponds to --splice).
+  - branch_label: optional branch label (corresponds to --branch-label).
+  - version_path: optional version path symbol from the configuration (corresponds to --version-path).
+  - rev_id: optional explicit revision identifier (corresponds to --rev-id).
+  - depends_on: optional list of revision identifiers this revision depends on (corresponds to --depends-on).
+  - process_revision_directives: optional callable that can alter the revision structure programmatically.
+- Return: A Script object or a list of Script objects representing the created revision(s); may return None for skipped or empty results.
+- Behavior:
+  - Builds a ScriptDirectory from the config.
+  - Creates a RevisionContext with the given command arguments.
+  - Reads the global environment setting revision_environment; if autogenerate is True, environment is forced True.
+  - If autogenerate is requested with sql, a CommandError is raised (inconsistent usage).
+  - Delegates to the RevisionContext to generate the revision(s) according to the provided options.
+- Notes:
+  - The process_revision_directives hook allows advanced programmatic customization of the generated revision structure.
+  - The function is designed to integrate tightly with Alembic’s autogeneration and script-generation mechanisms.
+
+Usage notes and considerations
+------------------------------
+- Directory and template validation are strict. Attempting to initialize into an existing non-empty directory or requesting a non-existent template will raise util.CommandError.
+- When using revision with autogenerate, ensure your database metadata is available to the environment; autogeneration will reflect the current database state in the new revision.
+- The --sql option is intended for obtaining the SQL statements for the revision without applying them to a database.
+- The process_revision_directives hook is advanced usage; it allows you to modify the revision after generation but before persistence.
+
+Usage examples
+--------------
+
+1) List available templates
+```
+# Python API
+from alembic.config import Config
+from . import commands
+
+config = Config("alembic.ini")
+commands.list_templates(config)
+
+# CLI intuition (for reference)
+# alembic templates
+```
+
+2) Initialize a new environment from the default template
+```
+# CLI usage
+alembic init --template generic ./scripts
+```
+
+3) Initialize a new environment with package initialization
+```
+# CLI usage
+alembic init --template generic --package ./scripts
+```
+
+4) Create a new revision (manual) with a message
+```
+# CLI usage
+alembic revision -m "initial revision"
+```
+
+5) Create a new revision with autogeneration
+```
+# CLI usage
+alembic revision --autogenerate -m "add users table"
+```
+
+6) Create a new revision with autogeneration and output SQL
+```
+# CLI usage
+alembic revision --autogenerate --sql -m "add users table"
+```
+
+7) Advanced: customize revision via process_revision_directives (programmatic)
+```
+# Python API (pseudo-code)
+def customize(config, script_directory, command_args, **kwargs):
+    # modify script_directory or command_args as needed
+    pass
+
+commands.revision(config, message="custom", process_revision_directives=customize)
+```
+
+Notes
+-----
+- The exact behavior of revision() depends on the RevisionContext implementation and the template/environment setup in your project.
+- The documentation reflects the public interface and intended usage as shown in the source definitions and docstrings.

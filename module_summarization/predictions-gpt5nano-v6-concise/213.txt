@@ -1,0 +1,141 @@
+# Nonparametric Methods
+
+This section documents the nonparametric machinery implemented in nonparametric.rst, focusing on univariate kernel density estimation (KDE) as exposed by KDEUnivariate. It is intended for developers integrating or extending the nonparametric workflow in Statsmodels.
+
+## Overview
+
+Nonparametric methods make minimal assumptions about the underlying distribution. The primary focus here is univariate kernel density estimation, which estimates a continuous density from data by averaging kernels centered at each observation.
+
+Key ideas:
+- Choose a kernel function (e.g., Gaussian, Epanechnikov, Uniform, Triangular).
+- Select a bandwidth (smoothing parameter) that determines the kernel width.
+- Evaluate the resulting density on a grid, optionally using FFT-based acceleration for Gaussian kernels.
+
+The implementation supports:
+- Multiple kernel choices via a kernel switch.
+- Flexible bandwidth specification (rules of thumb, fixed values, or user-provided functions).
+- FFT-based density estimation (Gaussian kernel only) for large samples.
+- Computation of the cumulative distribution function (CDF) from the estimated density.
+
+References (univariate density estimation):
+- Racine, Jeff. 2008. Nonparametric Econometrics: A Primer.
+- Silverman, B.W. Density Estimation for Statistics and Data Analysis.
+- Wikipedia: Kernel (statistics)
+
+## Core Class: KDEUnivariate
+
+The primary entry point for nonparametric univariate density estimation is KDEUnivariate.
+
+- Initialization
+  - endog: The one-dimensional data array for which the density is to be estimated.
+
+- Fitting
+  - fit(kernel, bw, fft, weights, gridsize, adjust, cut, clip)
+    - kernel: Kernel to use. Options include:
+      - "gau" (Gaussian)
+      - "epa" (Epanechnikov)
+      - "uni" (Uniform)
+      - "tri" (Triangular)
+      - "biw" (Biweight)
+      - "triw" (Triweight)
+      - "cos" (Cosine)
+      - "cos2" (Cosine2)
+    - bw: Bandwidth specification. Options include:
+      - "scott" – standard Scott rule
+      - "silverman" – Silverman rule
+      - "normal_reference" – kernel-dependent reference; roughly equivalent to Scott for Gaussian
+      - A float: fixed bandwidth
+      - A callable: user-defined function fn(x, kern) returning a scalar
+    - fft: Use FFT acceleration when available (Gaussian kernel only). If FFT=True and kernel != "gau", NotImplementedError is raised.
+    - weights: Optional weights for observations (normalized internally if provided).
+    - gridsize: Number of grid points for evaluation. If None, max(nobs, 50) is used.
+    - adjust: Multiplicative adjustment to the bandwidth.
+    - cut: Extends the grid by cut*bw on each side to ensure kernel goes to zero beyond the data range.
+    - clip: Data clipping bounds for kernel evaluation.
+
+  - Returns: The KDEUnivariate instance with attributes populated.
+
+- Attributes after fit
+  - density: Estimated density values on the evaluation grid.
+  - support: The grid (x-axis) positions corresponding to density values.
+  - bw: The bandwidth used (after adjustment).
+  - kernel: The instantiated kernel object (with h=bw).
+  - _cache: Cache for computed properties (e.g., CDF).
+
+- Properties
+  - cdf: Cached computation of the CDF evaluated on the support grid. Requires fit to have been called.
+
+Notes:
+- When using FFT-based estimation (fft=True), only Gaussian kernels are supported, and weights are not implemented.
+- The kernel instance is created with h=bw, and weights normalization is applied if weights are provided.
+- The CDF is computed via integration of the kernel density over the support.
+
+## Kernel Options
+
+Kernels are implemented in statsmodels.sandbox.nonparametric.kernels and wired into KDEUnivariate via a kernel_switch:
+
+- gau: Gaussian
+- epa: Epanechnikov
+- uni: Uniform
+- tri: Triangular
+- biw: Biweight
+- triw: Triweight
+- cos: Cosine
+- cos2: Cosine2
+
+The kernel is instantiated as kernel_switch[kernel](h=bw) when fit is called. Weights, if provided, are assigned to the kernel and renormalized as needed.
+
+## Bandwidth Selection
+
+Bandwidth selection is critical for bias-variance trade-off in KDE. Options supported:
+
+- "scott": 1.059 * A * nobs^(-1/5), where A = min(std(x), IQR/1.34)
+- "silverman": 0.9 * A * nobs^(-1/5), with A as above
+- "normal_reference": C * A * nobs^(-1/5), C depends on the kernel; behaves similarly to Scott for Gaussian
+- float: Use the provided numeric bandwidth
+- callable: A user-supplied function that takes (x, kern) and returns a float
+
+The bw_method attribute stores the selected bandwidth strategy when fit is called without an explicit numeric bandwidth.
+
+## FFT vs Non-FFT Estimation
+
+- FFT-based (fft=True) is fast for large samples but only supports the Gaussian kernel.
+- Non-FFT estimation (fft=False) computes density on a grid using the chosen kernel and bandwidth directly, which supports all kernel choices.
+
+## Example
+
+- Generate data from a normal distribution.
+- Fit a KDE with Gaussian kernel and default bandwidth.
+- Access density and support for plotting or further analysis.
+- Optionally compute the CDF from the estimated density.
+
+Code example (conceptual):
+
+- import numpy as np
+- import statsmodels.api as sm
+- x = np.random.normal(size=300)
+- kde = sm.nonparametric.KDEUnivariate(x)
+- kde.fit(kernel="gau", bw="normal_reference", fft=True)
+- density = kde.density
+- grid = kde.support
+- cdf_vals = kde.cdf  # requires fit; computes CDF on the support
+
+## Extensibility and Integration
+
+- Kernels: New kernels can be added by extending the kernel class in statsmodels.sandbox.nonparametric.kernels and updating the kernel_switch mapping accordingly.
+- Bandwidths: New bandwidth rules can be implemented by providing a callable for bw, or by enhancing bandwidth selection utilities in the bandwidths module.
+- Multivariate support: KDEUnivariate focuses on univariate data; KDEMultivariate (not shown here) handles multivariate densities and mixed data types.
+
+## Testing and Validation
+
+- Validate density estimates against known benchmarks (e.g., Silverman’s or Scott’s bandwidth references).
+- Compare FFT vs non-FFT outputs for Gaussian kernels to ensure numerical consistency.
+- Check edge behavior near support bounds, especially when cut is applied.
+
+## References
+
+- Racine, Jeff. 2008. Nonparametric Econometrics: A Primer. Foundation and Trends in Econometrics: Vol 3: No 1, pp1-88.
+- Silverman, B.W.  Density Estimation for Statistics and Data Analysis.
+- Wikipedia. Kernel (statistics)
+
+This documentation covers the KDEUnivariate interface and its nonparametric estimation workflow, with guidance for developers extending or integrating the nonparametric components.

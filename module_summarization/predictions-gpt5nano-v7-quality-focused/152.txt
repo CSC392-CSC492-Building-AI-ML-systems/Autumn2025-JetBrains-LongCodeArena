@@ -1,0 +1,190 @@
+Executing notebooks
+===================
+
+This document describes the API for executing notebooks programmatically using the preprocessors in the execute_api.rst module. It covers:
+
+- ExecutePreprocessor: executes all code cells and updates outputs
+- HighlightMagicsPreprocessor: detects magic language extensions and tags cells for syntax highlighting
+- executenb: deprecated compatibility wrapper around nbclient.execute
+
+Overview
+--------
+
+- ExecutePreprocessor
+  - Executes every code cell in a notebook and updates cell outputs.
+  - Maintains execution state via nbclient (NotebookClient) and traitlets-based configuration.
+  - Updates the notebook metadata with language information returned by the kernel.
+
+- HighlightMagicsPreprocessor
+  - Detects magic language extensions at the start of code cells (e.g., %%R, %%bash).
+  - Tags such cells with metadata.magics_language to drive syntax highlighting.
+  - Supports user-configured additional languages via a traitlets-based config.
+
+- executenb
+  - Backwards-compatibility shim that forwards to nbclient.execute.
+  - Emits a FutureWarning to encourage direct use of nbclient.execute.
+
+ExecutePreprocessor
+-------------------
+
+What it does
+- Executes all cells in a NotebookNode in a live kernel.
+- Updates cell outputs in place.
+- Sets the notebook metadata language_info based on the kernel information.
+
+Initialization
+- The preprocessor inherits from both Preprocessor and NotebookClient to preserve traitlets resolution behavior.
+- __init__(self, **kw)
+  - Accepts nb (NotebookNode) or constructs a new empty NotebookNode.
+  - Initializes both base classes with nb and other keyword arguments.
+
+Key behavior
+- _check_assign_resources(self, resources)
+  - Ensures resources are assigned to self.resources if provided or not already present.
+
+- preprocess(self, nb, resources=None, km=None) -> (NotebookNode, dict)
+  - Reinitializes the NotebookClient with the provided nb and kernel manager.
+  - Resets execution trackers.
+  - Establishes a kernel (setup_kernel) and executes each cell via preprocess_cell.
+  - After execution, applies widget metadata and returns (nb, resources).
+
+- preprocess_cell(self, cell, resources, index) -> (NotebookNode, dict)
+  - Executes a single cell using execute_cell(cell, index, store_history=True).
+  - Returns the modified cell and the resources.
+
+Usage example
+- Read a notebook and execute all code cells:
+
+.. code-block:: python
+
+    import nbformat as nbf
+    from nbconvert.preprocessors.execute import ExecutePreprocessor
+
+    with open("notebook.ipynb", "r", encoding="utf-8") as f:
+        nb = nbf.read(f, as_version=4)
+
+    ep = ExecutePreprocessor(timeout=600, kernel_name="python3")
+    nb, resources = ep.preprocess(nb, {})
+
+Notes
+- The preprocess method logs language_info from the kernel and assigns it to nb.metadata["language_info"].
+- The execution runs within a kernel managed by KernelManager (via the setup_kernel context).
+
+Highlighted API surface
+- __init__(self, **kw)
+  - Accepts nb and nbclient/traitlets-related options (e.g., timeout, kernel_name).
+
+- preprocess(self, nb, resources=None, km=None) -> (NotebookNode, dict)
+  - Executes all cells and returns the updated notebook and resources.
+
+- preprocess_cell(self, cell, resources, index) -> (NotebookNode, dict)
+  - Default behavior executes the cell in place.
+
+- _check_assign_resources(self, resources)
+  - Helper to assign resources when provided or missing.
+
+- execute_cell is provided by nbclient (via NotebookClient) and is invoked for each cell.
+
+HighlightMagicsPreprocessor
+--------------------------
+
+What it does
+- Tags code cells that use a magic language with metadata.magics_language.
+- Allows improved syntax highlighting for non-Python code blocks.
+
+Configuration and defaults
+- default_languages
+  - A traitlets Dict mapping magic language prefixes to pygments lexer names.
+  - Example entries include:
+    - "%%R": "r"
+    - "%%bash": "bash"
+    - "%%cython": "cython"
+    - "%%javascript": "javascript"
+    - "%%julia": "julia"
+    - "%%latex": "latex"
+    - "%%octave": "octave"
+    - "%%perl": "perl"
+    - "%%ruby": "ruby"
+    - "%%sh": "sh"
+    - "%%sql": "sql"
+
+- languages
+  - A traitlets Dict for user-specified language mappings. Tag(config=True) to enable config.
+
+Initialization
+- __init__(self, config=None, **kw)
+  - Calls super().__init__(config=config, **kw)
+  - Merges user-configured languages with defaults
+  - Builds a regular expression to detect magic language at the start of a code cell:
+    - re_magic_language matches lines starting with a known magic extension (e.g., "%%R ")
+
+Key behavior
+- which_magic_language(self, source) -> str | None
+  - Returns the associated language lexer for a detected magic extension, or None if none detected.
+
+- preprocess_cell(self, cell, resources, cell_index) -> (NotebookNode, dict)
+  - If the cell is a code cell, checks for a magic language.
+  - If found, sets cell.metadata.magics_language to the detected language.
+  - Returns the (potentially tagged) cell and resources.
+
+Usage example
+- Tag code cells using magics for proper highlighting:
+
+.. code-block:: python
+
+    from nbconvert.preprocessors.highlightmagics import HighlightMagicsPreprocessor
+    import nbformat as nbf
+
+    with open("notebook.ipynb", "r", encoding="utf-8") as f:
+        nb = nbf.read(f, as_version=4)
+
+    hmp = HighlightMagicsPreprocessor()
+    nb, resources = hmp.preprocess(nb, {})
+
+Notes
+- This preprocessor does not alter code execution; it only annotates cells for highlighting.
+- The magics_language metadata is useful for downstream rendering stages that apply syntax highlighting.
+
+Deprecation notice: executenb
+-----------------------------
+
+- executenb(*args, **kwargs)
+  - Deprecated wrapper around nbclient.execute.execute.
+  - Emits a FutureWarning guiding users to import nbclient.execute directly.
+  - Example usage kept for compatibility:
+
+.. code-block:: python
+
+    from nbconvert.preprocessors.execute import executenb
+
+    executenb(notebook, timeout=600)
+
+- Recommendation: use nbclient.execute directly:
+
+.. code-block:: python
+
+    from nbclient import execute
+
+    execute(...)
+  - The new approach aligns with current nbclient API and avoids the deprecation warning.
+
+See Also
+--------
+
+- nbclient.execute: core function used to execute notebook cells
+- nbclient.NotebookClient: underlying execution engine interface
+- nbconvert.preprocessors.Preprocessor: base class for preprocessors
+- nbformat.NotebookNode: in-memory notebook representation
+
+Practical guidance
+------------------
+
+- When building a pipeline, order matters:
+  - You may run HighlightMagicsPreprocessor before executing to ensure magics-related metadata is present for downstream tooling.
+  - ExecutePreprocessor updates outputs and language_info based on the executed kernel.
+
+- Configuration is supported via traitlets:
+  - Customize HighlightMagicsPreprocessor.languages to add or modify magic language mappings.
+  - Configure ExecutePreprocessor options (timeout, kernel_name, etc.) as needed.
+
+This documentation covers the primary usage and API surface for executing notebooks via the provide preprocessors in execute_api.rst.

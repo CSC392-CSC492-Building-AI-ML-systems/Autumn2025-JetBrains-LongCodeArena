@@ -1,0 +1,174 @@
+# Annihilation Transformations with Alchemical Hybrid Topologies
+
+This document describes alchemical (annihilation) transformations implemented via a HybridTopologyFactory. It explains the conceptual model, API, and practical usage for developers integrating and extending this functionality.
+
+## Overview
+
+Alchemical transformations progressively interpolate interactions between an “old” (reference) system and a “new” system as a coupling parameter lambda varies from 0 to 1. In annihilation-style protocols, certain interactions are turned off (or on) in a controlled fashion to compute free energy differences.
+
+Key idea:
+- The hybrid system contains atoms that belong to four classes, each with a distinct treatment under lambda.
+- Forces are scaled or reparameterized according to user-supplied alchemical functions.
+- The resulting hybrid topology provides a single OpenMM-compatible system and topology that can be simulated (with appropriate analysis) across lambda.
+
+## Atom Classification
+
+Atoms in the hybrid system are categorized into four classes. Each class has a specific behavior for interactions as lambda changes:
+
+- unique_old_atom
+  - Not mapped to the new system and present only in the old system.
+  - Interactions are on at lambda = 0 and off at lambda = 1.
+
+- unique_new_atom
+  - Not mapped to the old system and present only in the new system.
+  - Interactions are off at lambda = 0 and on at lambda = 1.
+
+- core_atom
+  - Mapped atoms that belong to a residue changing between old and new systems.
+  - Interactions follow the old-system behavior at lambda = 0 and the new-system behavior at lambda = 1.
+
+- environment_atom
+  - Mapped atoms that are not part of a changing residue.
+  - Interactions are always on and are alchemically unmodified.
+
+These classifications drive how each term (bonds, angles, torsions, nonbonded terms, etc.) is scaled as lambda evolves.
+
+## API and Core Concepts
+
+The primary class is HybridTopologyFactory. It encapsulates the construction of a hybrid system/topology and provides maps and positions for simulation.
+
+- Core properties
+  - hybrid_system: The OpenMM System representing the hybrid topology.
+  - new_to_hybrid_atom_map: dict[int, int] mapping new-system atom indices to hybrid indices.
+  - old_to_hybrid_atom_map: dict[int, int] mapping old-system atom indices to hybrid indices.
+  - hybrid_positions: [n, 3] numpy array with positions for the hybrid system.
+  - hybrid_topology: mdtraj.Topology representing the hybrid topology.
+  - omm_hybrid_topology: openmm.app.Topology corresponding to the hybrid system.
+
+- Known forces (for alchemical treatment)
+  - HarmonicBondForce
+  - HarmonicAngleForce
+  - PeriodicTorsionForce
+  - NonbondedForce
+  - MonteCarloBarostat
+
+- Key inputs
+  - topology_proposal: A TopologyProposal object produced by a topology proposal engine (e.g., Perses).
+  - current_positions: Array of positions for the old system.
+  - new_positions: Array of positions for the new system.
+  - use_dispersion_correction: Whether to apply long-range dispersion correction in the nonbonded/sterics treatment.
+  - functions: A dict specifying alchemical scaling functions for each force class. Keys must begin with "lambda_" and end with one of: bonds, angles, torsions, sterics, electrostatics. If None, derivatives will be unavailable.
+  - softcore_alpha: The alpha parameter for softcore sterics (defaulting to 0.5 if None is provided).
+  - bond_softening_constant, angle_softening_constant: Factors to soften force constants at the endpoints for unique-old/unique-core interactions.
+  - softcore_LJ_v2, softcore_electrostatics: Toggles for softcore LJ v2 and softcore electrostatics.
+  - softcore_LJ_v2_alpha, softcore_electrostatics_alpha: Softcore alpha parameters for LJ v2 and electrostatics.
+  - softcore_sigma_Q: Softcore sigma parameter for electrostatics.
+  - interpolate_old_and_new_14s: Whether to turn off 1-4 interactions for the new/exceptions at endpoints as lambda changes.
+  - omitted_terms: Dictionary of terms (by new topology index) that must be annealed in over a lambda protocol.
+  - flatten_torsions: If True, torsion terms involving unique_new_atoms are scaled so that at lambda = 0 and 1, the torsion term is disabled/enabled in the expected direction; similarly for unique_old_atoms.
+  - rmsd_restraint: Optional RMSD restraint between core heavy atoms and protein CA atoms.
+  - endstate: The lambda endstate parameterization; generally None for HybridTopologyFactory (raising behavior if 0 or 1 is encountered).
+
+- Important behavior note
+  - endstate must be None for HybridTopologyFactory (the API raises if endstate is 0 or 1). For specialized cases, endstate may be used in derived classes like RepartitionedHybridTopologyFactory.
+
+- Logging
+  - The module logs progress and warnings via a configured logger named "relative".
+
+## How to Use (High-Level)
+
+1) Prepare topology proposals
+   - Use a topology proposal engine (e.g., Perses) to generate a TopologyProposal that describes how atoms map between old and new systems, including which residues change.
+
+2) Create a HybridTopologyFactory
+   - Supply the topology_proposal, current_positions, and new_positions.
+   - Optionally configure dispersion corrections, softcore parameters, and alchemical functions.
+
+3) Access hybrid artifacts
+   - hybrid_system
+   - hybrid_topology / omm_hybrid_topology
+   - hybrid_positions
+   - new_to_hybrid_atom_map, old_to_hybrid_atom_map
+
+4) Run simulation
+   - Use OpenMM to simulate the hybrid system (e.g., via an expanded ensemble or NCMC framework) and collect free energy estimates from lambda progression.
+
+## Example
+
+The following is a minimal example illustrating typical usage. Adapt to your environment (Perses setup, force field, and platform).
+
+```python
+from perses.rjmc.topology_proposal import TopologyProposal
+import numpy as np
+import simtk.openmm as openmm
+import simtk.unit as unit
+from annihilation import HybridTopologyFactory  # assume this module contains the class
+
+# Assume these are provided by your workflow
+topology_proposal = ...  # Perses TopologyProposal
+current_positions = np.array([...], dtype=float) * unit.nanometer
+new_positions = np.array([...], dtype=float) * unit.nanometer
+
+functions = None  # or provide a dict with lambda_ scaling rules for bonds/angles/torsions/sterics/electrostatics
+
+factory = HybridTopologyFactory(
+    topology_proposal=topology_proposal,
+    current_positions=current_positions,
+    new_positions=new_positions,
+    use_dispersion_correction=True,
+    functions=functions,
+    softcore_alpha=0.5,
+    bond_softening_constant=1.0,
+    angle_softening_constant=1.0,
+    interpolate_old_and_new_14s=False,
+    omitted_terms=None,
+    flatten_torsions=False,
+    rmsd_restraint=False,
+    endstate=None
+)
+
+# Access hybrid artifacts
+hybrid_system = factory.hybrid_system
+hybrid_positions = factory.hybrid_positions
+hybrid_topology = factory.hybrid_topology
+
+# Use in an OpenMM Context / Integrator as appropriate
+```
+
+## API Details (Key Parameters)
+
+- topology_proposal: Perses TopologyProposal describing atom mapping and residue changes.
+- current_positions / new_positions: Coordinates for old/new systems.
+- use_dispersion_correction: Enable long-range dispersion correction for nonbonded/sterics.
+- functions: Dict with keys like lambda_bonds, lambda_angles, lambda_torsions, lambda_sterics, lambda_electrostatics. Each value defines how the corresponding force term is scaled with lambda. If None, derivatives may not be available.
+- softcore_alpha: Softcore sterics alpha parameter (default 0.5 if None).
+- softcore_LJ_v2 / softcore_electrostatics: Enable softcore LJ v2 and softcore electrostatics.
+- softcore_LJ_v2_alpha / softcore_electrostatics_alpha: Alpha parameters for softcore terms.
+- softcore_sigma_Q: Sigma parameter for softcore electrostatics.
+- bond_softening_constant / angle_softening_constant: Factors to soften endpoints for bonds/angles between unique atoms and unique-core atoms.
+- interpolate_old_and_new_14s: Controls 1-4 interactions at endpoints (lambda 0/1 behavior for new/old).
+- omitted_terms: Terms that must be annealed in over lambda (by new topology index).
+- flatten_torsions: If true, adjust torsion terms to suppress/show alchemical growth for certain atom classes.
+- rmsd_restraint: Optional RMSD restraint for core-heavy vs CA representation.
+- endstate: Must be None for HybridTopologyFactory.
+
+## Practical Tips
+
+- Start with conservative softcore parameters (e.g., softcore_alpha ~ 0.5, enable LJ v2 and electrostatics) and adjust based on convergence diagnostics.
+- Use dispersion corrections if your system’s long-range effects are significant; note this can be expensive for large systems.
+- If derivatives are required for your integrator (e.g., for parameter learning or advanced resampling), supply a complete functions dictionary.
+- Enable flatten_torsions if your protocol involves significant torsional changes only for one atom class.
+
+## Common Pitfalls
+
+- Forgetting to provide proper topology_proposal mappings can lead to inconsistent mappings between old/new atoms and the hybrid topology.
+- Mismatched shapes between current_positions and new_positions lead to runtime errors; ensure coordinate frames are aligned.
+- Not providing alchemical functions for all force classes when derivatives are needed; some integrators require complete lambdas.
+
+## References and Further Reading
+
+- Softcore alchemical methods (LJ v2, electrostatics) for free energy calculations.
+- Perses: topology proposal and alchemical transformation frameworks.
+- OpenMM hybrid or expanded ensemble simulations using lambda protocols.
+
+If you need a more compact or more detailed version, or would like an accompanying Sphinx/reStructuredText (rst) version for your docs site, I can adapt the content accordingly.

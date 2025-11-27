@@ -1,0 +1,132 @@
+w_succ.rst
+
+========================================
+w_succ — List successful (recycled) segments
+========================================
+
+Overview
+--------
+The w_succ command is a WestPA analysis tool that reports segments which have successfully reached a target state (i.e., recycled segments) during the simulation. For each such segment in each iteration, the command outputs its iteration number, segment ID, segment weight, and the final value of its progress coordinate(s) (pcoords).
+
+Key points
+- Core functionality is implemented in WSucc.find_successful_trajs().
+- Iterates over all completed iterations (from 1 up to current_iteration-1).
+- For every iteration, selects recycled segments (SEG_ENDPOINT_RECYCLED) and prints their final progress coordinates.
+- Output format includes a header describing the columns (unless header suppression is enabled).
+- Output is written to standard output by default, but can be redirected to a file with -o/--output.
+- Relies on WestPA data access utilities (WESTDataReaderMixin) to read segment indices and pcoord datasets from the WestPA HDF5 data store.
+
+Usage
+-----
+w_succ [OPTIONS]
+
+Common options are provided by WestPA’s runtime and the WSucc tool, plus:
+
+- -o, --output OUTPUT_FILE
+  Store output in OUTPUT_FILE (default: standard output).
+
+Example:
+- Print to standard output (default behavior)
+  w_succ
+
+- Print to a file
+  w_succ -o succ_trajs.txt
+
+Notes:
+- The tool reads WestPA configuration from the rc file (via westpa.rc.process_args) and applies tool-specific arguments added by WSucc.
+- Header lines are emitted by default to describe the columns. Header suppression can be controlled via the tool's configuration (output_suppress_headers).
+
+What the command outputs
+------------------------
+Header (if not suppressed)
+- Explained columns:
+  - column 0: iteration
+  - column 1: seg_id
+  - column 2: weight
+  - column > 2: final progress coordinate value(s)
+
+Data lines (one per recycled segment per iteration)
+- Format:
+  iteration (width 8, integer)
+  seg_id (width 8, integer)
+  weight (width 20, 14-figure floating)
+  final pcoord values (one value per pcoord dimension, formatted according to their dtype)
+
+Implementation details (high level)
+-----------------------------------
+
+Core class
+- WSucc(CommonOutputMixin, WESTDataReaderMixin, WESTAnalysisTool)
+  - __init__: initializes the tool, disables bin label printing for common output, and sets the output handle to stdout.
+  - find_successful_trajs: core logic that collects and prints the desired data.
+
+Data access and processing
+- For each iteration n_iter in [1, current_iteration):
+  - seg_index = get_seg_index(n_iter)
+  - recycled_seg_ids = indices where seg_index[seg_id]['endpoint_type'] == Segment.SEG_ENDPOINT_RECYCLED
+  - If no recycled segments, skip (to avoid HDF5 selection issues with zero-length pcoords)
+  - pcoord_ds = get_pcoord_dataset(n_iter)
+  - pcoord_len = pcoord_ds.shape[1]  (time-like length)
+  - pcoord_ndim = pcoord_ds.shape[2] (number of pcoord dimensions)
+  - final_pcoords = get_pcoord_dataset(n_iter)[recycled_seg_ids, pcoord_len - 1, :]
+  - final_pcoords is reshaped to (num_recycled, pcoord_ndim)
+  - For each recycled segment, print iteration, seg_id, weight, followed by the final pcoord values
+- Formatting
+  - Weight formatting uses a mapping (pcoord_formats) based on the pcoord dtype (e.g., f8, i8, etc.)
+  - If a pcoord dtype is not in the map, falls back to a generic string representation
+  - Output values are space-separated with a fixed field width for alignment
+
+Data model / dependencies
+- Segment: used to identify the SEG_ENDPOINT_RECYCLED endpoint type
+- pcoords: final progress coordinates at the end of the recycled segment’s trajectory
+- WESTDataReaderMixin: provides get_seg_index(n_iter) and get_pcoord_dataset(n_iter) to access the HDF5 data
+- CommonOutputMixin: controls common output behavior (e.g., headers, bin labels)
+
+API and integration notes
+- entry_point() wires the command-line interface:
+  - Builds the argument parser with:
+    - WestPA runtime arguments (westpa.rc)
+    - Tool-specific arguments
+  - Adds the -o/--output option
+  - Processes WestPA config and tool arguments
+  - Sets wsucc.output_file from the parsed arguments
+  - Invokes wsucc.find_successful_trajs() to generate the report
+
+Practical example
+---------------
+Assume you have a WestPA run configured in the current directory:
+- Basic usage (prints to stdout)
+  w_succ
+
+- Write output to a file
+  w_succ -o recycled_segments.txt
+
+Sample output (schematic)
+# successful (recycled) segments
+# column 0:    iteration
+# column 1:    seg_id
+# column 2:    weight
+# column>2:    final progress coordinate value
+
+       1        5    0.12345678901234    0.12345    1.23456
+       1       12    0.98765432109876    0.54321    0.98765
+       2        3    0.34567890123456    0.11111    2.22222
+
+Notes
+-----
+- The header is emitted by default; to suppress headers, configure the tool accordingly (output_suppress_headers = True).
+- The tool relies on the last pcoord value (pcoord_len - 1) for each recycled segment.
+- Output formatting adapts to the data types of pcoord fields via a small mapping; non-mapped types fall back to string formatting.
+
+Related concepts
+---------------
+- WESTAnalysisTool: base class for analysis tools
+- WESTDataReaderMixin: provides data access helpers for reading iteration indices and pcoords
+- CommonOutputMixin: centralizes common output behavior (headers, bin labels, etc.)
+
+See also
+--------
+- WestPA analysis tools for similar reporting (e.g., w_succ-like utilities)
+- WESTDataReaderMixin and Segment data structures for understanding endpoint types and pcoord data layout
+
+This documentation captures the purpose, workflow, and output format of the w_succ command as implemented in the provided code.

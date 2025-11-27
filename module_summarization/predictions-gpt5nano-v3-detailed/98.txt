@@ -1,0 +1,173 @@
+Contract Base Class (Web3 Contract Proxy)
+=========================================
+
+Overview
+--------
+This module provides the foundational Contract base class used to interact with
+Ethereum smart contracts via a Web3 connector. Contract proxy classes are
+typically created with a factory (e.g. construct_contract_factory) that supplies
+the contract ABI and related metadata. The resulting subclass of Contract can
+then be used to deploy contracts, encode function calls, and listen for events.
+
+Key concepts
+- The Contract class acts as a proxy to a deployed contract (via its address) or a contract to be deployed (via its code).
+- Class-level metadata (abi, code, code_runtime, source) can be overridden per contract class or supplied at instance creation.
+- The web3 attribute must be initialized prior to using the contract proxy (via the web3.contract interface).
+- The class provides:
+  - Deployment support through deploy(...)
+  - ABI encoding for contract functions through encodeABI(...)
+  - Event subscription support through on(...)
+
+Class: Contract
+---------------
+Base class for contract proxy objects. Subclasses are created by a factory that binds the ABI and contract metadata.
+
+Attributes
+- web3: Class-level Web3 instance. Must be initialized before creating contract proxies.
+- _abi, _code, _code_runtime, _source: Optional class-level metadata that can be overridden per instance.
+- address: The contract address (0x-prefixed hex string) for deployed contracts.
+
+Initialization
+- __init__(self, abi=None, address=None, code=None, code_runtime=None, source=None)
+  - Requires Contract.web3 to be initialized; otherwise raises AttributeError.
+  - Allows overriding class-level metadata with per-instance values.
+  - Sets the contract address for the proxy instance.
+
+Properties
+- abi: Returns the ABI if provided; otherwise raises AttributeError.
+- code: Returns the deployment bytecode if provided; otherwise raises AttributeError.
+- code_runtime: Returns the runtime bytecode if provided; otherwise raises AttributeError.
+- source: Returns the contract source if provided; otherwise raises AttributeError.
+
+Deployment
+- deploy(cls, transaction=None, args=None, kwargs=None)
+  - Deploys the contract to the blockchain.
+  - Requires that the contract has associated code (cls.code).
+  - Validates that deployment transaction does not specify 'data' or 'to'.
+  - Builds deployment data using _encode_constructor_data(args, kwargs).
+  - Sends the deployment transaction via cls.web3.eth.sendTransaction and returns the transaction hash.
+  - If no transaction dict is provided, uses an empty dict as the deployment transaction.
+
+Usage example
+.. code-block:: python
+
+   MyContract = construct_contract_factory(abi)  # Factory creates a Contract subclass
+   txn_hash = MyContract.deploy(
+       transaction={
+           'from': web3.eth.accounts[0],
+           'value': 0,
+       },
+       args=('InitialValue', 42),
+   )
+   print(txn_hash)
+
+Notes
+- If cls.code is not defined (no code associated with the contract), deployment is not possible and a ValueError is raised.
+- The _encode_constructor_data helper is responsible for encoding constructor arguments into deployment data.
+
+Public API
+- encodeABI(cls, fn_name, args=None, kwargs=None, data=None)
+  - Classmethod (with coerce_return_to_text) that encodes ABI arguments for a contract function.
+  - Parameters:
+    - fn_name: The function name to encode.
+    - args: Positional arguments for the function.
+    - kwargs: Keyword arguments for the function.
+    - data: Optional override for the data to be sent (defaults to the function selector if not provided).
+  - Behavior:
+    - Uses _get_function_info to locate the function ABI, selector, and arguments.
+    - If data is not provided, uses the function selector as the data.
+    - Encodes the ABI using _encode_abi and returns the hex data (as text).
+
+  Usage example
+  .. code-block:: python
+
+     data_hex = MyContract.encodeABI('transfer', args=[recipient, amount])
+
+  - Exceptions: Encoding/Decoding errors from eth_abi may propagate if ABI encoding fails.
+
+- on(self, event_name, filter_params=None, *callbacks)
+  - Combomethod that registers callbacks for contract events.
+  - Parameters:
+    - event_name: Name of the event to listen for.
+    - filter_params: Optional filtering parameters (e.g., from, to, value) and sub-filter under 'filter'.
+    - callbacks: One or more callback functions to execute when an event matches.
+  - Behavior:
+    - Determines the matching event ABI via _find_matching_event_abi.
+    - Constructs event filter parameters with construct_event_filter_params, providing the contract address and argument filters.
+    - Prepares a data extractor with get_event_data(event_abi).
+    - Creates a filter via web3.eth.filter and attaches a data filter set.
+    - Assigns a log entry formatter (for custom event formatting) to the filter.
+
+  Usage example
+  .. code-block:: python
+
+     def handle_transfer(event):
+         print("Transfer event:", event)
+
+     contract_instance.on(
+         'Transfer',
+         filter_params={'filter': {'from': some_account}},
+         handle_transfer
+     )
+
+  Notes
+  - The on method can be used on either the class or an instance due to combomethod semantics.
+  - The exact behavior of log_entry_formatter depends on the surrounding logging/formatting utilities.
+
+Usage considerations and edge cases
+- Initialization
+  - If Contract.web3 is not set (i.e., remains None), any attempt to instantiate a contract proxy will raise AttributeError.
+- ABI and code availability
+  - Accessing abi, code, code_runtime, or source properties will raise AttributeError if the corresponding class-level value was not provided.
+- Deployment
+  - Deployment requires contract code to be present; otherwise a ValueError is raised.
+  - The deployment transaction must not specify 'data' or 'to'; otherwise a ValueError is raised.
+  - The actual deployment data is built from constructor arguments via _encode_constructor_data.
+- ABI encoding
+  - encodeABI depends on internal helpers (_get_function_info, _encode_abi). Encoding/decoding errors (EncodingError, DecodingError) can be raised by eth_abi.
+- Event handling
+  - on requires correct event names and valid filters; otherwise _find_matching_event_abi may fail.
+  - The event filter lifecycle and callback invocation depend on the Web3 filters subsystem and may require a running event loop or polling mechanism in your environment.
+
+Code references (for context)
+- The Contract class relies on:
+  - _get_function_info(fn_name, args, kwargs)
+  - _encode_abi(fn_abi, fn_arguments, data)
+  - _encode_constructor_data(args, kwargs)
+  - _find_matching_event_abi(event_name, argument_filter_names)
+  - construct_event_filter_params(...)
+  - get_event_data(event_abi)
+
+Additional information
+- This base class is intended to be extended by a factory function (e.g. construct_contract_factory) that binds a concrete ABI and possibly other metadata to create contract proxy classes. The resulting subclass inherits the deployment, encoding, and event listening capabilities described here.
+
+Usage summary
+- Create a contract proxy class from an ABI (via a factory), then:
+  - Deploy: deploy(transaction, args, kwargs)
+  - Encode function calls: encodeABI(fn_name, args, kwargs, data)
+  - Listen to events: on(event_name, filter_params, callbacks)
+
+Code examples
+- Deploy a contract
+.. code-block:: python
+
+   MyContract = construct_contract_factory(abi)
+   txn_hash = MyContract.deploy(
+       transaction={'from': web3.eth.accounts[0], 'value': 0},
+       args=('DGD', 18),
+   )
+   print(txn_hash)
+
+- Encode function call data
+.. code-block:: python
+
+   data_hex = MyContract.encodeABI('transfer', args=[recipient_address, amount])
+
+- Listen for an event
+.. code-block:: python
+
+   def on_transfer(event):
+       print(event)
+
+   contract_instance = MyContract(abi=abi, address=deployed_address)
+   contract_instance.on('Transfer', filter_params={'filter': {'from': account}}, on_transfer)

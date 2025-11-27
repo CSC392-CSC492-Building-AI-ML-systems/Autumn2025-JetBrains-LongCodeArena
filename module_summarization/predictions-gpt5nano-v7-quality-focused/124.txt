@@ -1,0 +1,179 @@
+Header Interface Transition Guide
+=================================
+
+This guide documents the transition of the header interface used by the FITS header handling
+in Astropy, focusing on verification behavior, error reporting, and how consumers should
+interact with the header through the new API.
+
+Overview
+--------
+
+The header interface transition centralizes header validation and error handling behind a
+unified verification API. It introduces a versatile option system that combines
+verification behavior (fixing issues, reporting) with reporting style (warnings, exceptions).
+
+Key concepts
+
+- Verification options control both how issues are addressed (fixing) and how they are
+  reported to the user.
+- Error reporting uses a structured, nested formatting to present multiple issues in a
+  readable, hierarchical manner.
+- The interface remains compatible with existing header usage but standardizes how
+  validation results are returned and displayed.
+
+New Verification API
+--------------------
+
+The verification system exposes two main components: _Verify and _ErrList, which work
+together to validate header values and present issues.
+
+Options and semantics
+
+- VERIFY_OPTIONS
+  - Supported values (case-insensitive):
+    - "ignore", "warn", "exception", "fix", "silentfix",
+      "fix+ignore", "fix+warn", "fix+exception",
+      "silentfix+ignore", "silentfix+warn", "silentfix+exception"
+
+- _Verify.run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+  - Executes verification with the selected option.
+  - Behavior:
+    - If option is "warn" or "exception": fixable is False (unfixable message will be reported as a warning or exception).
+    - If fixable is False: marks as unfixable and prefixes the text with "Unfixable error: ".
+    - If a fix function is provided, it is executed and the message is augmented with a fix notice.
+  - Returns: a tuple (fixable: bool, text: str)
+
+- _Verify.verify(option="warn")
+  - Validates the entire header set using the provided option.
+  - Validates the option against VERIFY_OPTIONS; raises ValueError for unrecognized options.
+  - Splits options containing "+": fix_opt and report_opt (e.g., "fix+warn" -> fix and warn behavior).
+  - Special handling:
+    - "silentfix" with "ignore" produces no output.
+    - For "silentfix" alone, only unfixable issues are reported in the output; fixable ones are suppressed.
+    - Certain combinations influence which lines are shown (line_filter).
+  - Collects messages from errs.iter_lines(filter=line_filter) and formats them with a header:
+    - "Verification reported errors:" followed by the messages and a note about zero-based indexing.
+  - Output behavior:
+    - If fixable issues were all resolved under "silentfix" and there are no unfixable issues, nothing is reported.
+    - If report_opt is "warn" (or "fix" with no unfixable issues), issues are emitted as VerifyWarning.
+    - Otherwise, a VerifyError is raised with the detailed message.
+  - Note: The system prints a header and a concluding note to aid debugging.
+
+- _ErrList
+  - A specialized list structure that holds nested verification messages.
+  - __str__ returns a joined string of the top-level messages.
+  - iter_lines(filter=None, shift=0) yields tuples (prefix, message) to format and indent lines for nested structures.
+  - The nested structure is designed to present hierarchical error information clearly, with an optional unit header (e.g., "Element N:") for each top-level group.
+
+Example usage
+
+- Validate header with warnings (default behavior):
+  - header.verify("warn")
+
+- Validate header with fixing and warnings:
+  - header.verify("fix+warn")
+
+- Validate header with silent fixing and ignore reporting:
+  - header.verify("silentfix+ignore")
+
+- Validate header with fixed issues silently, but raise on unfixable errors:
+  - header.verify("silentfix+exception")
+
+Error reporting format
+----------------------
+
+When issues are found, the verifier constructs a human-readable report:
+
+- The report begins with:
+  - Verification reported errors:
+- Each issue is indented to reflect its place in the hierarchy, using the nested
+  structure built by _ErrList.iter_lines.
+- A final note clarifies indexing used by the library:
+  - Note: astropy.io.fits uses zero-based indexing.
+
+Internals and how to read messages
+----------------------------------
+
+- Messages come from the nested error list generated during verification.
+- Each top-level item may introduce a header like "Element N:" to denote a new section.
+- The iter_lines method handles indentation, producing a readable, hierarchical block.
+
+Migration considerations
+------------------------
+
+- If upgrading to the new header verification API, update code paths that previously
+  relied on ad-hoc validation to use header.verify(...) with the desired option.
+- Choose option semantics that match the desired behavior:
+  - Use "warn" to surface issues as warnings without failing execution.
+  - Use "exception" to fail when issues are detected.
+  - Use "fix" or "silentfix" variants when the caller can fix issues and wants either
+    reporting or silent reporting.
+  - Combine with "+ignore", "+warn", or "+exception" to tailor reporting vs. fixing.
+- When migrating, tests should assert both the presence of warnings/exceptions and the
+  formatting of the error report for readability.
+
+Backward compatibility
+----------------------
+
+- The verify(...) method remains the central entry point for header validation with a
+  flexible option syntax. Old code that uses verify with supported options should
+  continue to work.
+- The new error reporting format aims to be more consistent and readable, but the
+  semantic effect of the options remains aligned with prior behavior.
+
+API reference (quick lookup)
+----------------------------
+
+- VERIFY_OPTIONS: list of supported verification modes
+- _Verify.run_option(option, err_text, fix_text, fix, fixable)
+  - Returns: (fixable: bool, text: str)
+- _Verify.verify(option)
+  - Performs verification and reports or raises based on option
+- _ErrList
+  - Represents nested verification messages
+  - __str__(): human-readable plain text
+  - iter_lines(filter=None, shift=0): yields (prefix, message) with indentation
+
+Code excerpts (for reference)
+
+- Verification option handling (conceptual):
+  - If option in ["warn", "exception"]: fixable = False
+  - Else if not fixable: text = "Unfixable error: " + text
+  - Else if fix: fix(); text += "  " + fix_text
+
+- Report and fix flow (conceptual):
+  - Split opt into fix_opt, report_opt on "+"
+  - If silentfix with ignore: return
+  - Configure line_filter based on fix_opt/report_opt
+  - Collect messages; prepend header; append note; either warn or raise
+
+Code examples
+-------------
+
+- Verifying with default behavior (warn):
+  .. code-block:: python
+
+     header.verify("warn")
+
+- Verifying with fixing and warnings:
+  .. code-block:: python
+
+     header.verify("fix+warn")
+
+- Silent fix with ignore reporting:
+  .. code-block:: python
+
+     header.verify("silentfix+ignore")
+
+- Silent fix with exception on unfixable:
+  .. code-block:: python
+
+     header.verify("silentfix+exception")
+
+Conclusion
+----------
+
+The header interface transition standardizes verification semantics, error reporting, and
+the interaction pattern developers use when validating and potentially repairing FITS
+headers. Use the clarified option system to control behavior precisely, and rely on the
+structured error output to diagnose header issues efficiently.

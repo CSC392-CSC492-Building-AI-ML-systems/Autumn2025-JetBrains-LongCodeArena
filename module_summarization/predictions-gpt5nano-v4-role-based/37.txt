@@ -1,0 +1,141 @@
+w_trace.rst
+
+===========
+w_trace Command
+===========
+
+Overview
+--------
+
+The w_trace command reconstructs the ancestry ("trace") of a trajectory segment back to its origin within a WestPA simulation. Given a target last segment identified by its iteration number and segment id, the command walks backward through parent links, collecting per-segment metadata (iteration, segment id, weight, timing, and the final P-coordinate) and resolving the initial state and the segment’s endpoint type. The result is exposed as a Trace object that can be inspected or iterated.
+
+Key concepts
+------------
+
+- Trace: A representation of the lineage of a trajectory segment back to the initial state. It contains:
+  - summary: a structured array with per-segment information
+  - endpoint_type: type of the endpoint for the trajectory (e.g., where it ends within the state space)
+  - basis_state: the basis state associated with the first segment (if available)
+  - initial_state: the initial state of the trajectory
+  - data_manager: the WestPA data manager used to fetch data
+
+- Data model: Trace is built by walking backward from the target segment (n_iter, seg_id) to the initial segment, using:
+  - Iteration groups (per iteration) to locate the segment’s data
+  - The pcoord dataset to determine the final coordinate of each segment
+  - The segment index table to retrieve parent linkage and weights
+
+- Compatibility: The implementation handles both current and older HDF5 data layouts (with fallback logic for legacy versions).
+
+API reference
+-------------
+
+Trace class (core API)
+- Class: Trace
+  - __init__(self, summary, endpoint_type, basis_state, initial_state, data_manager=None)
+    - Purpose: Hold the reconstructed trace data and related state.
+    - Summary: numpy structured array with per-segment metadata.
+    - endpoint_type: endpoint type gleaned from the last segment.
+    - basis_state: the basis state (if available) for the initial portion of the trace.
+    - initial_state: the InitialState object for the trajectory origin.
+    - data_manager: WestPA data manager used to fetch data.
+
+- Class method: from_data_manager(n_iter, seg_id, data_manager=None) -> Trace
+  - Purpose: Construct a Trace for the trajectory whose last segment is identified by seg_id in iteration n_iter.
+  - Parameters:
+    - n_iter: iteration number of the last segment
+    - seg_id: segment identifier within that iteration
+    - data_manager: optional WestPA data manager; defaults to the global data manager
+  - Behavior:
+    - Walks backward through the trajectory’s parent links until the initial state is reached.
+    - Collects per-segment info: (n_iter, seg_id, weight, walltime, cputime, final_pcoord)
+    - Determines endpoint_type from the last segment and captures the pcoord dtype/shape for final_pcoord
+    - Retrieves initial_state (and corresponding basis_state if available) or constructs a legacy InitialState for old HDF5 layouts
+  - Returns: a Trace instance containing the assembled summary, endpoint_type, basis_state, initial_state, and data_manager
+
+- __len__(self) and __iter__(self)
+  - Purpose: Support approximate length and iteration over the trace’s summary entries.
+
+- __getitem__(self, sl)
+  - Purpose: Access a specific row from the summary (per-segment data).
+
+- get_segment_data_slice(self, datafile, dsname, n_iter, seg_id, slice_=None, index_data=None, iter_prec=None)
+  - Purpose: Retrieve a slice of a segment’s data from a dataset within an open HDF5 datafile.
+  - Parameters:
+    - datafile: open h5py.File
+    - dsname: dataset name within the iteration/group
+    - n_iter, seg_id: target iteration and segment
+    - slice_: optional numpy slicing to apply to the dataset
+    - index_data: optional iterable of (n_iter, seg_id) pairs used to locate the correct index
+    - iter_prec: optional iteration precision (used to locate iteration groups by name)
+  - Returns: the requested data slice for the given segment
+
+- trace_timepoint_dataset(self, dsname, slice_=None, auxfile=None, index_ds=None)
+  - Purpose: Return a time-ordered trace for a dataset laid out as [seg_id][timepoint][...], accounting for boundary overlaps between segments.
+  - Returns: a tuple (data_trace, weight), where data_trace is the trajectory’s time-series data for the specified dataset and weight is the corresponding trajectory weight at each time point.
+
+- Notes on implementation details
+  - The trace is constructed by progressively querying the data manager for:
+    - Iteration groups and their pcoord data
+    - The seg_index table for per-segment metadata (weight, cputime, walltime, parent_id, endpoint_type)
+  - The final_pcoord is taken from the last element of the pcoord array for each segment.
+  - The initial state may be retrieved directly (preferred) or synthesized for legacy formats, providing a robust bridge to older data layouts.
+
+Using w_trace (CLI)
+-------------------
+
+The w_trace command leverages the Trace class to reconstruct a trajectory’s ancestry. While the exact CLI syntax may evolve, the command conceptually:
+
+- Input: target last segment identified by its iteration and segment id
+  - Example: n_iter = 42, seg_id = 10
+
+- Output: a trace summary and accessors for segment-level data
+  - Per-segment records include n_iter, seg_id, weight, walltime, cputime, and final_pcoord
+  - Provides access to the initial state, basis state, and endpoint type
+
+- Typical workflow (conceptual):
+  - Run w_trace with the target (n_iter, seg_id)
+  - The tool constructs Trace.from_data_manager(n_iter, seg_id)
+  - The summary is printed or exported; initial and basis state details are available for inspection
+
+Practical example (Python)
+--------------------------
+
+# Build a trace for the trajectory whose last segment is seg_id in n_iter
+trace = westpa.tools.Trace.from_data_manager(n_iter=42, seg_id=10)
+
+# Inspect per-segment information
+print(trace.summary)
+
+# Access initial state and basis state
+print("Initial state:", trace.initial_state)
+print("Basis state:", trace.basis_state)
+
+# Access specific segment data
+first_segment = trace[0]
+print("First segment:", first_segment)
+
+# Retrieve a data slice from a dataset for a given segment
+# (requires an open HDF5 datafile object)
+# data_slice = trace.get_segment_data_slice(datafile, "observable", n_iter=42, seg_id=10)
+
+# Retrieve a timepoints trace for a dataset along this trajectory
+# (requires dataset layout compatible with trace_timepoint_dataset)
+# data_trace, weight = trace.trace_timepoint_dataset("pcoord", slice_=None)
+
+Notes and considerations
+------------------------
+
+- Compatibility: The implementation supports both current and legacy HDF5 data layouts. If an old HDF5 version is detected, the code constructs the initial state differently to maintain backward compatibility.
+
+- Performance: The Trace class caches opened auxiliary HDF5 files (self._auxfiles) to minimize file I/O overhead when accessing supplemental data.
+
+- Data provenance: The summary captures the trajectory’s per-segment evolution, including the exact iteration and segment identifiers, weights, and time metrics, enabling reproducibility and post-hoc analysis.
+
+See Also
+--------
+
+- WestPA data manager and HDF5 data model in westpa.core
+- Segment and InitialState representations used by trace reconstruction
+- Other tracing and analysis tools in WestPA’s tooling suite
+
+This documentation describes the w_trace command’s core functionality and the underlying Trace class it relies on to reconstruct trajectory ancestry.

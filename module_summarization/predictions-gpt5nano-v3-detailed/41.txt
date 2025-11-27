@@ -1,0 +1,191 @@
+## Overview
+
+This module implements the QuerySet mechanism used by the ORM to build and execute asynchronous, efficiently constructed SQL queries. It provides a chainable, high-level API for filtering, joining related models, annotating with aggregates, ordering, prefetching related data, and projecting results.
+
+The core building block is AwaitableQuery, which aggregates the state needed to compose a SQL query using PyPika (via the QueryBuilder). It supports:
+
+- Filters built from Q objects
+- Joins for related fields (automatically performed as needed)
+- Annotations and aggregates
+- Ordering (including on related fields)
+- Prefetching related data
+- Result shaping via values and values_list
+- Backed by a robust error model (e.g., FieldError, DoesNotExist, MultipleObjectsReturned)
+
+A lightweight protocol, QuerySetSingle, describes the interface for single-object results (awaitable) and common queryset operations like prefetch_related, annotate, only, values_list, and values.
+
+Key collaborators include Prefetch, Q, QueryModifier, and internal helpers for traversing related fields and forming proper joins.
+
+## Key concepts and relationships
+
+- AwaitableQuery
+  - Core builder that accumulates filters, joins, ordering, annotations, and projections for a given Model.
+  - Maintains _joined_tables to prevent duplicate joins.
+  - Uses PyPika’s QueryBuilder under the hood (self.query) to assemble SQL.
+  - resolve_filters(model, q_objects, annotations, custom_filters) applies filters, joins, and group-by logic for aggregates.
+  - resolve_ordering(model, table, orderings, annotations) applies standard and related-field ordering, including nested field ordering via joins.
+  - _join_table_by_field(...) handles joining to related models and returns the resulting table for subsequent operations.
+- Q
+  - Expression container used to build complex, combinable filter criteria (AND, OR, NOT, etc.).
+- Prefetch
+  - Mechanism to optimize loading of related data to reduce additional queries.
+- Annotations and aggregates
+  - Annotations are Function objects that can be resolved for ordering or projection.
+  - Aggregates (e.g., Count) influence grouping behavior when combined with joins.
+- Values and ValuesList
+  - Projections that shape the final result set as dictionaries or tuples/lists.
+- Relationships
+  - The query builder automatically generates left outer joins for related fields to preserve primary model results while enabling filtering and ordering on related fields.
+  - When filtering or ordering by a related field, the appropriate join is added if not already present.
+
+## API surface
+
+- QuerySetSingle (Protocol)
+  - Awaiting a single instance (e.g., via await) resolves to a model instance, not a list.
+  - Chainable methods returning the same protocol:
+    - prefetch_related(...)
+    - annotate(...)
+    - only(...)
+    - values_list(...)
+    - values(...)
+
+- AwaitableQuery
+  - __init__(model)
+  - resolve_filters(model, q_objects, annotations, custom_filters) -> None
+    - Builds where and having clauses with Q objects and applies necessary joins.
+    - Applies grouping when aggregates are present.
+  - _join_table_by_field(table, related_field_name, related_field)
+    - Performs necessary joins for a given related field and returns the joined table.
+  - _resolve_ordering_string(ordering) -> (field_name, Order)
+    - Parses ordering strings, supporting "-" for descending order.
+  - resolve_ordering(model, table, orderings, annotations) -> None
+    - Applies ordering logic, including nested ordering on related fields and annotated fields.
+    - Validates fields and raises FieldError for unknown fields.
+
+- External helpers and concepts
+  - QUERY: global placeholder QueryBuilder instance used as the base for building queries.
+  - JoinType, Table, Count, Function, F
+  - _get_joins_for_related_field: internal helper to determine join paths for related fields.
+
+## Important parameters and return values
+
+- resolve_filters(...)
+  - Parameters:
+    - model: The Model the query is based on.
+    - q_objects: List of Q objects representing filters.
+    - annotations: Extra annotations to include in the query (e.g., computed fields).
+    - custom_filters: Pre-resolved filters to pass through.
+  - Returns: None (it mutates the internal PyPika query state).
+  - Behavior: Builds where and having clauses, applies joins as needed, and may add a groupby when aggregates are present.
+
+- resolve_ordering(...)
+  - Parameters:
+    - model: The Model this query is based on.
+    - table: The current PyPika Table representing the base model (used for nested joins).
+    - orderings: Iterable of (field_name, order) pairs (order is asc/desc).
+    - annotations: Annotations that may influence ordering.
+  - Returns: None (mutates the internal query state).
+  - Behavior: Applies ordering, handles related-field ordering by joining as necessary, supports ordering by annotated fields, and validates fields.
+
+- Values/Values_list
+  - Return shaped results:
+    - values(...) -> list of dictionaries
+    - values_list(...) -> list of tuples or scalars (if flat=True)
+
+## Usage examples
+
+Basic filtering and fetching
+```python
+from tortoise.models import Model
+from tortoise.query_utils import Q
+
+# Simple filter
+users = await User.filter(is_active=True)
+
+# Fetch specific fields as dictionaries
+users_info = await User.filter(is_active=True).values("id", "username")
+```
+
+Complex filters with Q objects
+```python
+# (name contains 'admin' OR is_staff) AND (age >= 18)
+filters = [
+    Q(name__icontains="admin") | Q(is_staff=True),
+    Q(age__gte=18),
+]
+users = await User.filter(*filters)
+```
+
+Ordering, including on related fields
+```python
+# Order by a simple field
+recent_users = await User.filter(is_active=True).order_by("-created_at")
+
+# Order by a related field (joins are created automatically)
+# e.g., users ordered by their profile's last_login
+ordered = await User.filter(is_active=True).order_by("profile__last_login")
+```
+
+Prefetch related data
+```python
+# Prefetch related data to minimize queries
+users = await User.filter(is_active=True).prefetch_related("profile", "groups")
+```
+
+Annotations and aggregates
+```python
+from tortoise.functions import Count
+
+# Annotate each user with a count of posts
+users = await User.annotate(post_count=Count("posts")).order_by("-post_count")
+```
+
+Projection with values and values_list
+```python
+# Return as dictionaries
+rows = await User.filter(is_active=True).values("id", "username")
+
+# Return as tuples
+rows_tuples = await User.filter(is_active=True).values_list("id", "username")
+
+# Flat list of IDs
+ids = await User.values_list("id", flat=True)
+```
+
+Edge cases and notes
+- Unknown field errors
+  - If you reference a field name that does not exist on the model, a FieldError is raised.
+- Filtering by relationships
+  - Filtering directly on a relation (without a nested field) is not supported; you should filter on a nested field of the related model.
+- Ordering and annotations
+  - If any annotation is present, and there are joins, having, or orderings, the query may apply a group by on the primary key to support aggregates correctly.
+- Joins duplication
+  - The internal _joined_tables tracking ensures the same table is not joined multiple times.
+
+## Edge cases and best practices
+
+- When you apply aggregates (e.g., Count) via annotate, keep in mind that the query may introduce a group by. If you rely on default model ordering in such queries, it may be suppressed to avoid incorrect results.
+- When ordering by fields from related models, ensure the related fields exist and that the relationships are properly defined in the model metadata.
+- Use prefetch_related for related data to avoid N+1 query problems when accessing related objects after the initial query.
+- Use values or values_list for performance-sensitive read paths where you don’t need full model instances.
+
+## Quick start snippet
+
+```python
+# Basic usage
+users = await User.filter(is_active=True).order_by("-created_at").values("id", "username")
+
+# Complex filter with related-field ordering
+users = await (
+    User.filter(Q(is_active=True) & Q(age__gte=18))
+        .order_by("profile__last_login")
+        .prefetch_related("profile")
+        .values_list("id", "username", flat=False)
+)
+
+# Annotate and fetch
+from tortoise.functions import Count
+qs = User.annotate(post_count=Count("posts")).order_by("-post_count")
+top_users = await qs.values("id", "username", "post_count")
+```
+

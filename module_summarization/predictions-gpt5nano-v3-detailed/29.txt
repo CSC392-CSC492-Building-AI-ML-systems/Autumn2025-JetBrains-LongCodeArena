@@ -1,0 +1,142 @@
+w_ntop — Select walkers from bins using an assignment mapping
+
+Introduction
+------------
+w_ntop is a tool for selecting walkers from bins (states) at each iteration using a precomputed assignment file that maps walkers to bins over timepoints. By default, it selects the highest-weight walkers per bin, but it can also select the lowest-weight or randomly chosen walkers. The resulting selections are written to an output HDF5 file containing, for each iteration and bin, the matching segment indices and their weights.
+
+Overview and relationships
+--------------------------
+- Core purpose: Given an assignments file that maps walkers to bins at each timepoint, produce a compact representation of the selected walkers per iteration/bin along with their weights.
+- Related components:
+  - WESTTool: Base CLI tool class providing common behavior for WestPA tools.
+  - WESTDataReader: Handles iteration data access (weights and segment indices) required for selection.
+  - IterRangeSelection: Manages which iterations are included in the output.
+  - ProgressIndicatorComponent: Provides user feedback during processing.
+  - westpa.core.h5io and binning utilities: Used to read/write data and interpret bin/segment indices.
+- Input dependencies:
+  - An assignments file (default assign.h5) containing:
+    - An assignments dataset mapping walkers to bins at each timepoint.
+    - nsegs dataset indicating the number of segments per bin per iteration.
+    - nbins attribute to determine the number of bins.
+- Output:
+  - An HDF5 file (default ntop.h5) with datasets: n_iter, n_segs, seg_ids, weights.
+
+Key parameters and behavior
+----------------------------
+- Input options
+  - -a, --assignments: Assignments file to use (default: assign.h5). This file must provide binning information that maps walkers to bins at each timepoint.
+- Selection controls
+  - -n, --count: Number of walkers to select per iteration and per bin (default 1).
+  - -t, --timepoint: Timepoint within each iteration used for selection (default -1, which selects the last timepoint). The chosen timepoint determines which walkers are considered for each bin.
+  - Mutually exclusive choices for how to select walkers per bin:
+    - --highweight: Select COUNT highest-weight walkers per bin (default).
+    - --lowweight: Select COUNT lowest-weight walkers per bin.
+    - --random: Select COUNT walkers randomly per bin.
+- Output options
+  - -o, --output: Output file name (default: ntop.h5).
+- Range and progress
+  - Iteration range is controlled via IterRangeSelection (e.g., --range, etc., depending on broader WestPA conventions).
+  - Progress reporting via the built-in progress indicator.
+
+Output file format
+------------------
+The output HDF5 file contains the following datasets:
+
+- /n_iter
+  - [iteration] (Integer)
+  - Description: Iteration numbers corresponding to entries in the other datasets.
+
+- /n_segs
+  - [iteration][bin] (Integer)
+  - Description: Number of segments in each bin for the given iteration. Typically equals the requested count, but may be smaller if fewer walkers exist in the bin.
+
+- /seg_ids
+  - [iteration][bin][segment] (Integer)
+  - Description: Indices of segments that are selected for each iteration and bin. For iteration n_iter, only the first n_segs[n_iter] entries are valid in seg_ids[n_iter][bin].
+
+- /weights
+  - [iteration][bin][segment] (Floating-point)
+  - Description: Weights corresponding to each selected segment in seg_ids. Align with the same indexing.
+
+Notes
+- nbins in the output is derived from the assignments file: nbins = assignments_file.attrs['nbins'] + 1.
+- The tool reads per-iteration data from the assignments file and the per-iteration weight data from the input (via WESTDataReader).
+- If there are fewer matching segments than the requested count in a given bin, n_segs for that iteration/bin will reflect the actual available number, and seg_ids/weights will contain only that many entries.
+
+Usage examples
+--------------
+Basic usage (high-weight selection, default):
+- Command:
+  w_ntop -a assign.h5
+
+Select 2 walkers per bin using the last timepoint (default highweight):
+- Command:
+  w_ntop -a assign.h5 -n 2 -t -1
+
+Select 3 walkers per bin based on the lowest weights:
+- Command:
+  w_ntop -a assign.h5 -n 3 --lowweight
+
+Random selection of 2 walkers per bin:
+- Command:
+  w_ntop -a assign.h5 -n 2 --random
+
+Output to a user-specified file:
+- Command:
+  w_ntop -a assign.h5 -n 2 -o top.ntop.h5
+
+Notes on edge cases
+- If a bin contains fewer than count walkers for a given iteration, the tool outputs only the available walkers for that bin (n_segs will be smaller than count in that case).
+- The timepoint must be valid for all iterations in the selected range. Using an invalid timepoint will result in an error from the data reader or assumptions about the assignments array.
+- The number of bins (nbins) is determined from the assignments file attribute; ensure the file is consistent with the expected binning for your workflow.
+
+Implementation details (high level)
+- The tool reads the assignments for the chosen timepoint across all bins for each iteration.
+- It retrieves the corresponding weights for all segments in the given iteration.
+- For each bin, it selects count segments according to the chosen strategy (highweight, lowweight, random) using the weights.
+- The results are written into the output file as n_iter, n_segs, seg_ids, and weights with appropriate shapes and dtypes.
+
+Code references (conceptual)
+- Core class: WNTopTool(WESTTool)
+- Key methods:
+  - add_args: defines CLI arguments (assignments, count, timepoint, selection mode, output).
+  - process_args: stores parsed arguments for use in go().
+  - go: orchestrates reading the assignments, selecting segments, and writing the output datasets.
+- Data interactions:
+  - WESTDataReader: provides per-iteration weight data accessed as data_reader.get_iter_group(n_iter)['seg_index']['weight'].
+  - h5py: reads the assignments file; handles iteration slicing.
+  - westpa.core.h5io: utilities for handling iterations and checks.
+
+Code example (pseudo-flow)
+- Pseudocode illustrating the selection loop:
+  - for each iteration in range(iter_start, iter_stop):
+    - assignments = assignments_ds[iteration, timepoint]  # per-bin segment indices
+    - weights = data_reader.get_iter_group(iteration)['seg_index']['weight']
+    - for each bin:
+      - select 'count' segments according to chosen mode using weights
+      - store selected seg_ids and weights in the output datasets
+
+Code snippets
+- Command-line usage (bash)
+  ```
+  w_ntop -a assign.h5 -n 2 -t 0 -o top.ntop.h5
+  ```
+- Python snippet (conceptual, for integration tests)
+  ```python
+  from westpa.tools import WNTopTool
+  tool = WNTopTool()
+  # Prepare arguments as if parsing CLI
+  args = {
+      'assignments': 'assign.h5',
+      'count': 2,
+      'timepoint': 0,
+      'select_what': 'highweight',
+      'output': 'top.ntop.h5',
+  }
+  tool.process_args(type('A', (), args))
+  tool.go()
+  ```
+
+Endnote
+-------
+For comprehensive context, pair this documentation with related tools such as w_assign (which generates the assignments file) and other walker-selection utilities in WestPA.

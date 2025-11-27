@@ -1,0 +1,220 @@
+Working with Large Data Sets
+============================
+
+This module provides distributed estimation routines designed to handle large data sets efficiently. It supports sequential estimation and parallel execution (via joblib backends), enabling scalable regression analyses across partitions of data. The framework focuses on regularized estimation with optional debiasing, as well as simple coefficient averaging (naive) across partitions.
+
+Overview
+--------
+
+- Purpose
+  - Facilitate estimation on large datasets by partitioning data, performing local fits, and combining results.
+  - Support both regularized and unregularized estimation, with an option for debiasing the final estimates.
+- Estimation strategies
+  - Regularized estimation with debiasing (default)
+  - Naive coefficient averaging (unregularized or regularized)
+- Parallelization
+  - Separable into partitions that can be processed in parallel using joblib backends (e.g., local, Dask, Yarn, ipyparallel).
+  - Each partition is fitted independently, and results are combined in a final aggregation step.
+- Key concepts used in debiasing
+  - wexog: weighted design matrix used to perform node-wise regression.
+  - nodewise_row: result from node-wise regression for each variable (per LASSO).
+  - nodewise_weight: weights derived from gamma_hat values for reweighting gamma_hat in the debiasing process.
+  - approx_inv_cov: estimated inverse covariance matrix used in debiasing together with the average gradient.
+
+Key Components
+--------------
+
+This section describes the primary functions exposed by the module and their roles in distributed estimation.
+
+Estimation helpers (naive, per-partition)
+
+- _est_regularized_naive(mod, pnum, partitions, fit_kwds=None)
+  - Purpose: Estimate regularized coefficients for a single data partition.
+  - Parameters
+    - mod: statsmodels model instance for the partition (e.g., OLS(endog, exog)).
+    - pnum: int
+      Index of the current partition.
+    - partitions: int
+      Total number of partitions.
+    - fit_kwds: dict-like or None
+      Keyword arguments passed to fit_regularized.
+  - Returns
+    - An array of the estimated coefficients for the current partition (mod.fit_regularized(...).params).
+  - Notes
+    - This function requires fit_kwds to be provided; otherwise a ValueError is raised.
+
+- _est_unregularized_naive(mod, pnum, partitions, fit_kwds=None)
+  - Purpose: Estimate unregularized coefficients for a single data partition.
+  - Parameters
+    - mod: statsmodels model instance for the partition.
+    - pnum: int
+      Index of the current partition.
+    - partitions: int
+      Total number of partitions.
+    - fit_kwds: dict-like or None
+      Keyword arguments passed to fit.
+  - Returns
+    - An array of the estimated coefficients for the current partition (mod.fit(**fit_kwds).params).
+  - Notes
+    - This function requires fit_kwds to be provided; otherwise a ValueError is raised.
+
+Aggregation helper (naive)
+
+- _join_naive(params_l, threshold=0)
+  - Purpose: Aggregate results from multiple partitions by averaging coefficients (mean of the per-partition estimates).
+  - Parameters
+    - params_l: list
+      A list of arrays of coefficients from each partition.
+    - threshold: scalar
+      Coefficient magnitude below which values are zeroed after averaging.
+  - Returns
+    - A single array containing the averaged coefficients, with values below the threshold set to zero.
+
+Debiasing utilities (regularized debiased estimation)
+
+- _calc_grad(mod, params, alpha, L1_wt, score_kwds)
+  - Purpose: Compute the gradient of the log-likelihood (or score) with respect to the coefficients, used in the debiasing step.
+  - Parameters
+    - mod: statsmodels model instance for the partition.
+    - params: array-like
+      Estimated coefficients for the current partition.
+    - alpha: scalar or array-like
+      Penalty weight(s). If scalar, applied to all coefficients; if vector, per-coefficient weights.
+    - L1_wt: scalar
+      Fraction of the penalty allocated to the L1 term (0 → ridge, 1 → lasso).
+    - score_kwds: dict-like or None
+      Keyword arguments for the score function.
+  - Returns
+    - An array-like object with the gradient corresponding to the current partition.
+  - Notes
+    - The function expects a valid score function in the model context.
+
+- _calc_wdesign_mat(mod, params, hess_kwds)
+  - Purpose: Calculate the weighted design matrix used to form the approximate inverse covariance (for debiasing).
+  - Parameters
+    - mod: statsmodels model instance for the partition.
+    - params: array-like
+      Estimated coefficients for the current partition.
+    - hess_kwds: dict-like or None
+      Keyword arguments for the Hessian (or related) computations.
+  - Returns
+    - A weighted design matrix with the same number of columns as mod.exog.
+  - Notes
+    - Uses mod.hessian_factor(params, **hess_kwds) to obtain weights.
+
+- _est_regularized_debiased(mod, mnum, partitions, fit_kwds=None, score_kwds=None, hess_kwds=None)
+  - Purpose: Estimate regularized coefficients with a debiasing step in a distributed setting.
+  - Parameters
+    - mod: statsmodels model instance for the partition.
+    - mnum: int
+      Index of the current partition.
+    - partitions: int
+      Total number of partitions.
+    - fit_kwds: dict-like or None
+      Keyword arguments for fit_regularized.
+    - score_kwds: dict-like or None
+      Keyword arguments for the score function.
+    - hess_kwds: dict-like or None
+      Keyword arguments for Hessian-related computations.
+  - Returns
+    - A tuple related to the regularized fit, including the parameter estimates and additional objects used in the debiasing procedure. The exact structure depends on the surrounding framework.
+  - Notes
+    - This function provides the core debiasing workflow and is intended to be integrated into a larger orchestration pipeline.
+
+Usage Scenarios
+--------------
+
+The following scenarios illustrate how to use these utilities in typical workflows.
+
+1) Naive regularized estimation with simple averaging
+
+- Objective: Fit a regularized model on each data partition and average the results.
+
+.. code-block:: python
+
+   from statsmodels.regression.linear_model import OLS
+   from large_data_module import _est_regularized_naive, _join_naive
+
+   # Example partitions: [(mod0, fit_kwds0), (mod1, fit_kwds1), ...]
+   partitions = []
+   # For each partition, create a model and specify fit_kwds for fit_regularized
+   # mod_i = OLS(y_i, X_i)
+   # fit_kwds_i = {'method': 'elastic_net', 'alpha': ..., 'L1_wt': ...}
+   # partitions.append((mod_i, fit_kwds_i))
+
+   params_l = []
+   for pnum, (mod, fit_kwds) in enumerate(partitions):
+       params = _est_regularized_naive(mod, pnum, len(partitions), fit_kwds=fit_kwds)
+       params_l.append(params)
+
+   params_mean = _join_naive(params_l, threshold=1e-6)
+   print("Distributed regularized estimates (naive mean):", params_mean)
+
+2) Naive unregularized estimation with simple averaging
+
+- Objective: Fit an unregularized model on each partition and average the results.
+
+.. code-block:: python
+
+   from statsmodels.regression.linear_model import OLS
+   from large_data_module import _est_unregularized_naive, _join_naive
+
+   partitions = []
+   # Populate as in the previous example, but with fit_kwds suitable for mod.fit
+
+   params_l = []
+   for pnum, (mod, fit_kwds) in enumerate(partitions):
+       params = _est_unregularized_naive(mod, pnum, len(partitions), fit_kwds=fit_kwds)
+       params_l.append(params)
+
+   params_mean = _join_naive(params_l, threshold=0.0)
+   print("Distributed unregularized estimates (naive mean):", params_mean)
+
+3) Debiased regularized estimation (high-level flow)
+
+- Objective: Compute local estimates, gradients, and weighted design matrices per partition, then combine to form debiased estimates.
+
+.. code-block:: python
+
+   from large_data_module import (
+       _est_regularized_debiased, _calc_grad, _calc_wdesign_mat
+   )
+
+   # This example shows the local computation primitives. An orchestration layer
+   # would collect per-partition results and combine them to produce debiased estimates.
+
+   # Example partition loop (conceptual)
+   for pnum, (mod, params) in enumerate(partitions_with_params):
+       grad = _calc_grad(mod, params, alpha, L1_wt, score_kwds)
+       wdesign = _calc_wdesign_mat(mod, params, hess_kwds)
+       # Accumulate grads and wdesigns for a global debiasing step
+   # Then perform the global debiasing step using the accumulated objects
+   # via _est_regularized_debiased
+
+Notes and Considerations
+------------------------
+
+- Data partitioning
+  - The utilities assume data can be partitioned into independent chunks. Each partition should be large enough to fit the local model adequately.
+- Model compatibility
+  - The naive estimators rely on Statsmodels model interfaces (e.g., OLS) with fit and fit_regularized methods. Ensure your partitions provide the expected methods.
+- Edge cases
+  - _est_regularized_naive raises a ValueError if fit_kwds is None.
+  - _join_naive uses a threshold to zero-out small averaged coefficients; choose a threshold appropriate for your scale.
+- Debiasing flow
+  - The debiasing functions rely on gradient, Hessian-weighted design matrices, and the approximate inverse covariance construction. Integrate these steps into your orchestration layer to complete the debiasing pipeline.
+- Performance
+  - Parallelization via joblib backends allows exploiting multi-core and cluster resources. Network I/O, partition sizes, and backend configuration can significantly impact performance and stability.
+
+Edge Cases and Compatibility
+----------------------------
+
+- Threshold handling in _join_naive: Coefficients with absolute value below the threshold are set to zero.
+- Input validation: The naive estimators require non-None fit_kwds; otherwise a ValueError is raised.
+- Parameter shapes: Ensure that per-partition parameter arrays have consistent length across partitions before joining.
+- Debiasing parameters: alpha, L1_wt, score_kwds, and hess_kwds must be provided with meaningful values consistent with the model and objective.
+
+References
+----------
+
+- Debiased regularized estimation follows principles described in literature on communication-efficient sparse regression and distributed optimization (e.g., Lee, Liu, Sun, Taylor; arXiv:1503.04337, 2015), adapted for use with Statsmodels models and node-wise covariance approximations.

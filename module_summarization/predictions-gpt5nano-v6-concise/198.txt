@@ -1,0 +1,169 @@
+# Nearest Neighbors
+
+This document describes the Nearest Neighbors functionality implemented in the neighbors subsystem, focusing on the Ball Tree based approach used for efficient neighbor searches. It is intended for developers who work with the underlying Cython implementation and wish to understand, extend, or debug the machinery.
+
+---
+
+## Overview
+
+- Nearest neighbors search answers questions like:
+  - Given a set of data points X, for each query point y, which k points in X are closest to y?
+  - Which data points lie within a radius r of y?
+- The codebase provides a Ball Tree implementation (specialized for 64-bit and 32-bit floating point data) to accelerate distance-based queries.
+- Key ideas:
+  - The dataset is organized into a binary tree where each node stores a centroid and a radius that bounds all points in the node.
+  - Distances between a query point and a node are pruned using the node’s radius, reducing unnecessary distance calculations.
+  - A reduced distance concept is used for efficiency; for some metrics, the reduced distance preserves the ordering of true distances, enabling faster pruning (e.g., squared Euclidean for Euclidean distance).
+
+---
+
+## Algorithms and Data Structures
+
+- Ball Tree specialization
+  - Ball trees are derived from a general BinaryTree structure.
+  - Each node stores:
+    - A centroid of the points in the node
+    - A radius that bounds all points in the node
+    - The index range [idx_start, idx_end) of points in the dataset that belong to the node
+  - Pruning uses the reduced distance between the query point and the node centroid, offset by the node radius.
+
+- Reduced distance
+  - Some metrics employ a reduced distance to speed up computations while preserving the relative ordering of distances.
+  - Example: For Euclidean distance, the reduced distance is the squared Euclidean distance.
+  - The reduced distance is converted back to a true distance using a metric-specific conversion function (e.g., `dist_metric._rdist_to_dist`).
+
+- Implementation notes (from the code)
+  - Supported data types (per implementation): 64-bit and 32-bit floating point
+    - 64-bit: `float64_t` / `np.float64`
+    - 32-bit: `float32_t` / `np.float32`
+  - Core classes:
+    - BallTree64, BallTree32 (internally created as specialized BallTree{{name_suffix}})
+    - BallTree without suffix is the generic alias (64-bit in typical builds)
+  - Core functions (specialized per dtype):
+    - `allocate_data{name_suffix}(tree, n_nodes, n_features)`
+      - Allocates node_bounds: shape (1, n_nodes, n_features)
+    - `init_node{name_suffix}(tree, node_data, i_node, idx_start, idx_end)`
+      - Computes centroid and radius for the node
+      - Handles optional sample weights
+    - Distance helpers:
+      - `min_dist{name_suffix}(tree, i_node, pt)` – minimum possible distance from a point to a node
+      - `max_dist{name_suffix}(tree, i_node, pt)` – maximum possible distance
+      - `min_max_dist{name_suffix}(tree, tree, ...)` – combined bound helper (partial snippet in provided code)
+
+- Metrics
+  - The implementation supports a broad set of distance metrics, including (but not limited to):
+    - Bray-Curtis, Canberra, Chebyshev, Dice, Euclidean, Hamming, Haversine, Jaccard
+    - Mahalanobis, Manhattan, Minkowski, PyFunc-based metrics
+    - Rogers-Tanimoto, Russell-Rao, Sokal-Michener, Sokal-Sneath, SEuclidean
+    - WMinkowski (weighted Minkowski)
+  - The code maintains a per-suffix list of valid metrics, e.g., `VALID_METRICS64`, `VALID_METRICS32`.
+
+- API surface (developers)
+  - BallTree64 and BallTree32 are concrete implementations for 64-bit and 32-bit floating point data.
+  - BallTree (generic alias) is provided for common usage when the dtype is unambiguous.
+  - These classes inherit from a binary-tree-based implementation and specialize to a ball-tree representation.
+
+---
+
+## Getting Started: Quick Usage (example)
+
+Note: The exact import path may vary depending on how the package exposes internal BallTree variants. The examples assume a typical high-level API similar to scikit-learn’s BallTree interface.
+
+```python
+import numpy as np
+# Depending on your package, you may import BallTree64/BallTree32 or the generic BallTree
+from your_package import BallTree
+
+# Data: 2D points
+X = np.array([
+    [0.0, 0.0],
+    [1.0, 0.0],
+    [0.0, 1.0],
+    [1.0, 1.0],
+], dtype=np.float64)
+
+# Build the Ball Tree (64-bit by default)
+tree = BallTree(X, leaf_size=2, metric='euclidean')  # metric strings map to the supported set
+
+# Query points
+Y = np.array([[0.1, 0.2], [0.9, 0.8]], dtype=np.float64)
+
+# k-Nearest Neighbors
+dist, ind = tree.query(Y, k=2)
+print("Distances:\n", dist)
+print("Indices:\n", ind)
+
+# Radius-based neighbors
+ind_r, dist_r = tree.query_radius(Y, r=0.6, return_distances=True)
+print("Radius indices:\n", ind_r)
+print("Radius distances:\n", dist_r)
+```
+
+- Options
+  - `leaf_size`: controls the leaf size of the underlying tree (trade-off between build time and query time).
+  - `metric`: selects the distance metric; values correspond to the supported metric set (e.g., Euclidean, Manhattan, etc.). Internally, these map to the appropriate distance implementations and their reduced-distance variants.
+
+---
+
+## Extending and Maintaining
+
+Developers may want to add new distance metrics or adapt the tree for custom metrics. Here are guidelines:
+
+- Adding a new metric
+  - Implement the distance function in terms of the expected interface:
+    - A function that takes two points and returns the distance.
+    - A corresponding reduced-distance function (if applicable) that preserves ordering for pruning.
+    - A conversion to true distance if a reduced distance is used (e.g., `_rdist_to_dist`).
+  - Register the metric by updating:
+    - The relevant `VALID_METRICS{name_suffix}` list with the new metric name (e.g., `'MyNewDistance{name_suffix}'`).
+    - Ensure the metric name is used by the high-level API when users specify `metric='MyNewDistance{name_suffix}'`.
+  - Update any internal wrappers or dispatch logic to route to your new metric's implementation.
+
+- Supporting 32-bit and 64-bit data
+  - Follow the existing pattern:
+    - Implementations are split into `name_suffix` variants (e.g., 64 and 32).
+    - Each variant provides its own `allocate_data{name_suffix}`, `init_node{name_suffix}`, and distance helpers.
+  - Ensure numerical stability and performance characteristics are appropriate for the target dtype.
+
+- Debugging and validation
+  - Use unit tests that exercise:
+    - Tree construction and node radii correctness
+    - Bounding-distance pruning correctness
+    - Accuracy of k-nearest neighbors and radius queries
+  - Validate both 64-bit and 32-bit builds.
+
+---
+
+## Performance Considerations
+
+- Ball Tree construction and query complexity
+  - Build: typically near-linear in the number of points with a factor depending on dimensionality and data distribution.
+  - Query:
+    - Average-case sub-linear with respect to the dataset size due to pruning.
+    - Worst-case performance can degrade in higher dimensions or poorly distributed data.
+- Precision and data type choice
+  - 64-bit (float64) generally provides better numerical stability and accuracy.
+  - 32-bit (float32) can reduce memory usage and potentially improve cache performance but may affect precision.
+
+---
+
+## Related Concepts
+
+- BinaryTree vs BallTree
+  - BallTree is a specialization that uses a centroid and radius per node to bound distances and enable pruning during search.
+- Distance metrics and reduced distance
+  - The internal search uses a reduced distance for efficiency; actual distances are recovered when producing results.
+
+---
+
+## See Also
+
+- Internal primitives:
+  - allocate_data{name_suffix}, init_node{name_suffix}, min_dist{name_suffix}, max_dist{name_suffix}, min_max_dist{name_suffix}
+- Metrics registry and dispatch:
+  - VALID_METRICS{name_suffix}
+- Higher-level APIs (if exposed by the package):
+  - BallTree, BallTree64, BallTree32
+  - Public querying methods: query, query_radius
+
+If you need concrete, project-specific import paths or a mapping from high-level API names to these internal implementations, adjust the examples accordingly to your package’s exposure surface.

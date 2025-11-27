@@ -1,0 +1,119 @@
+# Empirical likelihood for descriptive statistics (emplike.rst)
+
+This document describes the Empirical Likelihood (EL) framework implemented in the emplike.rst module for inference on descriptive statistics. It covers the theoretical basis, data model, internal optimization machinery, and practical usage for developers who may extend or integrate the code.
+
+## Overview
+
+Empirical likelihood provides a nonparametric likelihood-based approach to inference for descriptive statistics (e.g., mean, variance, skewness, kurtosis, and correlation). The key idea is to assign weights to observations that sum to one and to enforce estimating equations that characterize the target statistic. The weights are chosen to maximize a constrained likelihood (or log-likelihood) subject to these estimating equations. The resulting likelihood ratio statistic has an asymptotic chi-square distribution under regularity conditions, enabling hypothesis tests and confidence intervals without specifying a parametric distribution for the data.
+
+Key features of the implementation:
+
+- Supports hypothesis tests and confidence intervals for:
+  - Mean, variance, skewness, kurtosis, and correlation
+- Optional multivariate descriptive statistics visualization (requires matplotlib)
+  - Multivariate confidence region plots
+  - Mean-variance contour plots
+- Public entry point via `DescStat(endog)`
+- Internal optimization driven by Lagrange multipliers (eta) to solve the constrained EL problem
+
+References:
+- Owen, A. (2001). “Empirical Likelihood.” Chapman and Hall
+
+## Public API
+
+- `DescStat(endog)`
+  - Description: Factory that returns an instance capable of conducting EL-based inference on descriptive statistics.
+  - Behavior:
+    - If `endog` is one-dimensional, returns a univariate instance `DescStatUV`.
+    - If `endog` has more than one column, returns a multivariate instance `DescStatMV`.
+  - Parameters:
+    - `endog`: ndarray of data. If 1D, reshaped to 2D with a single column internally.
+  - Returns: `DescStat` instance (either `DescStatUV` or `DescStatMV`).
+
+- Internal helper: `_OptFuncts(endog)`
+  - Description: Holds methods used to set up and solve the estimating-equation system via EL optimization.
+  - Important internal methods (for developers):
+    - `_log_star(eta, est_vect, weights, nobs)`: computes the transformed log-probability ("log-star") used by the EL optimization. This is a placeholder for the objective in the Newton-based solver; the returned vector is used to form the objective/gradient/hessian used by the optimizer.
+    - `_grad(eta, est_vect, weights, nobs)`: gradient of the EL objective with respect to the Lagrange multiplier `eta`.
+    - `_hess(eta, est_vect, weights, nobs)`: Hessian of the EL objective with respect to `eta`.
+    - `_modif_newton(eta, est_vect, weights)`: modified Newton method wrapper that uses `_log_star`, `_grad`, and `_hess` to solve for the optimal `eta` (the Lagrange multiplier) that maximizes the log-likelihood under the estimating equations.
+    - `_find_eta(eta)`: (internal entry) routine to drive the search for the optimal `eta`. This is typically invoked by the public EL workflow to obtain the EL solution for a given set of estimating equations and weights.
+  - Parameters (in typical usage):
+    - `endog`: input data used to set up the EL problem.
+  - Notes:
+    - The EL optimization is performed in terms of estimating equations `est_vect` and observation weights. The objective is to find the Lagrange multiplier(s) `eta` that satisfy the EL constraints and maximize the constrained log-likelihood.
+    - The solver uses SciPy’s internal Newton routine `_fit_newton`.
+
+## Mathematical and algorithmic notes
+
+- Estimating equations
+  - For each observation i, there is an estimating equation vector `est_vect[i, :]` of dimension `k` (the number of estimating equations, typically corresponding to the statistic of interest and its constraints).
+  - The EL weight on observation i is denoted by `p_i`, with the constraints:
+    - sum(p_i) = 1
+    - sum(p_i * est_vect[i, :]) = 0 (vector of length k)
+- Log-star and transformed objective
+  - The EL problem uses a transformed log-probability `log_star` to facilitate optimization with Newton methods. In code, `_log_star` computes this transformed quantity given `eta`, `est_vect`, and `weights`.
+  - The transformed objective is inverted in the solver (via the negative log-likelihood in the code) to fit with a standard Newton optimizer that minimizes a scalar function.
+- Gradient and Hessian
+  - `_grad` returns the gradient of the objective with respect to `eta`.
+  - `_hess` returns the Hessian with respect to `eta`.
+  - Both are used by the modified Newton routine to converge to the EL solution.
+- Modified Newton solver
+  - `_modif_newton` sets up a Newton optimization problem with:
+    - objective function `f(x) = - sum(log_star(x, ...))`
+    - gradient `grad(x) = - _grad(...)`
+    - Hessian `hess(x) = - _hess(...)`
+  - Uses `scipy`’s `_fit_newton` to obtain the optimal `eta` (the Lagrange multiplier).
+  - Configuration: tolerances and maximum iterations are exposed (e.g., `tol=1e-8`, max iterations ~50).
+- Output of the EL optimization
+  - The primary output of `_modif_newton` is the estimated Lagrange multiplier `eta` that satisfies the EL constraints and maximizes the (log) likelihood under the estimating equations.
+  - The resulting `eta` is then used to derive EL-based test statistics, confidence intervals, and, in multivariate cases, region plots if visualization is enabled.
+
+## How this fits into the inference workflow
+
+- End-to-end EL inference proceeds by:
+  1. Forming estimating equations for the statistic of interest (mean, variance, skewness, kurtosis, correlation, etc.) for each observation.
+  2. Selecting weights for observations (often uniform weights, i.e., `weights = 1/n`).
+  3. Solving for the Lagrange multipliers `eta` via the modified Newton method (`_modif_newton`) to maximize the EL subject to the estimating equations.
+  4. Computing a likelihood-ratio statistic (e.g., ELR) and comparing it to a chi-square distribution to obtain p-values or confidence intervals.
+- For multivariate statistics, the same approach applies with vector-valued estimating equations, enabling joint inferences and visualization (if matplotlib is installed).
+
+## Example usage (conceptual, for developers)
+
+This example demonstrates the internal optimization flow for a simple mean-estimation EL problem. It is intended for developers who wish to extend or debug the optimization machinery.
+
+- Given data `endog` and a target mean `mu0`, form a single estimating equation per observation:
+  - est_vect[i, 0] = endog[i] - mu0
+- Weights: `weights = np.ones(n) / n` (or any positive weights summing to 1)
+- Initialize the optimization class:
+  - opt = _OptFuncts(endog)
+- Compute the optimal Lagrange multiplier `eta`:
+  - est_vect = (endog - mu0).reshape(-1, 1)  # shape (n, k) with k=1
+  - nobs = endog.size
+  - eta0 = np.zeros((1,))  # initial guess
+  - eta_hat = opt._modif_newton(eta0, est_vect, weights)
+- Use `eta_hat` to form EL-based statistics (e.g., ELR, confidence limits) as implemented in the surrounding EL framework.
+
+Note: In the public-facing API, end users interact with `DescStat`, and the internal optimization routines are used by the implementation to realize EL-based inference.
+
+## Implementation dependencies
+
+- NumPy
+- SciPy (optimizers and numerical routines)
+- StatsModels (optimizer interface: `_fit_newton`)
+- Optional: Matplotlib (for multivariate region plots and mean-variance contours)
+
+## Practical notes and caveats
+
+- EL inference relies on regularity conditions; with very small samples or highly skewed data, finite-sample performance may be limited.
+- Choice of estimating equations determines the statistic and the corresponding EL constraints. Correct specification of these equations is crucial.
+- Numerical stability depends on the conditioning of the estimating equations and the selection of initial guesses for `eta`. The Newton-based solver uses tolerances (e.g., `tol=1e-8`) and a maximum number of iterations to guard against divergence.
+- Visualization features (multivariate confidence regions) require matplotlib to be installed.
+
+## References
+
+- Owen, A. (2001). Empirical Likelihood. Chapman and Hall.
+
+---
+
+This documentation covers the essential concepts, internal machinery, and usage context for empirical likelihood-based inference as implemented in emplike.rst. It is intended to aid developers who need to understand, extend, or debug the EL optimization workflow.

@@ -1,0 +1,155 @@
+Permutation feature importance
+==============================
+
+Overview
+--------
+This module implements permutation-based feature importance for estimators. The idea is to measure how much the model's predictive performance deteriorates when the values of a single feature are randomly permuted. A larger decrease indicates a more important feature.
+
+Key ideas
+- Compute a baseline score using the provided scoring function on the unmodified data.
+- For each feature, repeatedly permute that feature's values (across samples) and recompute the score.
+- Feature importance is the difference between the baseline score and the permuted scores.
+- Supports parallel computation, optional bootstrapping of samples, and multiple scoring metrics.
+
+API
+----
+
+Permutation feature importance
+- permutation_importance(estimator, X, y, *, scoring=None, n_repeats=5, n_jobs=None, random_state=None, sample_weight=None, max_samples=None)
+
+  Computes permutation importances for each feature of X with respect to y using the supplied estimator.
+
+  Parameters
+  - estimator : object with a fit method
+    The trained estimator used to score predictions.
+  - X : array-like of shape (n_samples, n_features)
+    Input data to score.
+  - y : array-like of shape (n_samples,) or (n_samples, n_outputs)
+    Target values.
+  - scoring : str, callable, list, tuple, dict, or None, default=None
+    Scoring function(s) to use. If None, the estimator's default scoring (e.g., accuracy, R^2) is used.
+    - Strings correspond to predefined scorers.
+    - Callables must follow the scoring API used elsewhere in the project.
+    - Multimetric specifications (list/tuple/dict) are supported.
+  - n_repeats : int, default=5
+    Number of permutation repetitions per feature.
+  - n_jobs : int or None
+    Number of parallel jobs to run. None means 1 job. See your environment for parallelism details.
+  - random_state : int, RandomState, or None
+    Seed for randomness to ensure reproducible permutations.
+  - sample_weight : array-like of shape (n_samples,), default=None
+    Sample weights to pass to the scoring function.
+  - max_samples : int or float, default=None
+    If provided and smaller than the number of samples, a subset of samples is used for the
+    permutation experiment to speed up computation. The value must be >= 0 and <= n_samples
+    depending on its type:
+    - If int: number of samples to use.
+    - If float in (0, 1]: fraction of samples to use.
+
+  Returns
+  - results : Bunch
+    A dictionary-like object with attributes:
+    - importances_mean : ndarray of shape (n_features,)
+      Mean importance of each feature over repeats.
+    - importances_std : ndarray of shape (n_features,)
+      Standard deviation of importances over repeats.
+    - importances : ndarray of shape (n_features, n_repeats)
+      Raw permutation importances for each feature and repeat.
+
+Internal helpers
+----------------
+The following private helpers support the main functionality and are not part of the public API:
+
+- _check_feature_names(X, feature_names=None)
+  Validates or derives feature names from X. If feature_names is None, uses:
+  - X.columns if X is a pandas DataFrame
+  - ["x0", "x1", ...] for NumPy arrays
+  Ensures feature names are unique.
+
+- _get_feature_index(fx, feature_names=None)
+  Convert a feature name to its index using feature_names. If fx is already an int, it is returned unchanged.
+
+- _weights_scorer(scorer, estimator, X, y, sample_weight)
+  Applies the scoring function, handling optional sample_weight.
+
+- _calculate_permutation_scores(...)
+  Core loop: for a given column, permute its values across samples, recompute scores for n_repeats, and return scores. Handles optional subsetting via max_samples and preserves thread-safety by operating on a copy of X.
+
+- _create_importances_bunch(baseline_score, permuted_score)
+  Computes importances = baseline_score - permuted_score and returns a Bunch with:
+  - importances_mean
+  - importances_std
+  - importances
+
+Usage and behavior notes
+------------------------
+- Scoring
+  - If scoring is None, the estimator's default scoring is used.
+  - Supports single or multiple scorers; can return a dict of scores when multimetric scoring is requested.
+- Parallelism
+  - Computation for features is parallelized via a Parallel/delayed interface. This speeds up the process on multi-core machines.
+- Sampling
+  - max_samples enables a speed/accuracy trade-off by using a subset of samples for the permutation test.
+- Feature naming
+  - If feature names are not provided, feature_names are derived from X via _check_feature_names. Duplicates are not allowed.
+- Edge cases
+  - If a feature cannot be mapped by name (when using string feature identifiers), a clear ValueError is raised.
+  - If scoring returns dicts (multimetric), results are aggregated appropriately.
+
+Code examples
+-------------
+
+Basic usage with a fitted classifier
+
+.. code-block:: python
+
+   from sklearn.datasets import load_iris
+   from sklearn.ensemble import RandomForestClassifier
+   from sklearn.inspection import permutation_importance
+
+   X, y = load_iris(return_X_y=True)
+   clf = RandomForestClassifier(n_estimators=100, random_state=0)
+   clf.fit(X, y)
+
+   result = permutation_importance(clf, X, y, n_repeats=30, random_state=0, n_jobs=-1)
+
+   print("Mean importances:", result.importances_mean)
+   print("Importances (std):", result.importances_std)
+
+Interpreting results
+
+.. code-block:: python
+
+   # Sort features by importance
+   idx = result.importances_mean.argsort()[::-1]
+   for i in idx:
+       print(f"Feature {i}: mean={result.importances_mean[i]:.4f} "
+             f"std={result.importances_std[i]:.4f} "
+             f"raw={result.importances[i]}")
+
+Notes on edge cases
+
+- If X is a pandas DataFrame, feature names are automatically derived from X.columns unless you override via feature_names.
+- Duplicated feature names raise a ValueError from _check_feature_names.
+- If a requested feature name is not present in feature_names, a ValueError is raised by _get_feature_index.
+- When using multimetric scoring, the returned importances will reflect the aggregation performed for the chosen metrics.
+
+See Also
+--------
+
+- sklearn.inspection.permutation_importance (public API)
+- sklearn.utils.Bunch (for the return type structure)
+
+References
+----------
+
+- Permutation feature importance concept as a model-agnostic feature attribution method
+- Parallel and random state handling in scikit-learn style APIs
+
+Usage scenarios
+---------------
+
+- Quick feature ranking for a trained model
+- Comparison of feature importances across different scoring metrics
+- Controlled experiments with max_samples to balance runtime and accuracy
+

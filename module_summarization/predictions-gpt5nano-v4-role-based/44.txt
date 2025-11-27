@@ -1,0 +1,118 @@
+Azure Storage Library Provider
+==============================
+
+Overview
+--------
+AzureStorageLibraryProvider is a library provider that reads from an Microsoft Azure Storage container (Blob Storage). It discovers the container contents by querying the Azure REST API and builds an in-memory directory tree used to list and read items. It optionally caches downloaded blobs on disk to speed up repeated reads.
+
+Configuration and URL format
+----------------------------
+- URL format (required): azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER
+- If the container is not publicly readable, you must supply an access policy with Read and List permissions and attach a Shared Access Signature (SAS) query string to the URL, e.g.:
+  azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER?sv=2020-10-02&si=XXXX&sr=c&sig=XXXXXXXXXXXXXX
+- Cache configuration (optional):
+  - Config key: library.azure_cache
+  - Possible values:
+    - false: disable caching
+    - true: enable caching in a per-path hashed directory under a system temp directory
+  - When enabled, a per-path cache directory is created:
+    <temp_dir>/asab.library.azure.<hash_of_path>
+
+Public API
+----------
+Classes
+- AzureStorageLibraryProvider
+  - Inheritance: LibraryProviderABC
+  - Purpose: Provide library items backed by an Azure Blob Storage container.
+  - Core responsibilities:
+    - Parse and store the Azure URL
+    - Build an in-memory model of the container contents
+    - List directory contents
+    - Read blob contents with optional HTTP caching support
+
+Key methods
+- __init__(self, library, path, layer)
+  - Validates the path format (must start with azure+)
+  - Parses the base Azure Blob URL from path
+  - Initializes the in-memory model (self.Model) via lazy load
+  - Determines and prepares the optional cache directory (self.CacheDir)
+  - Schedules the asynchronous startup task to load the model
+- _start(self)
+  - Async entry point invoked on provider startup
+  - Calls _load_model and marks the provider as ready if a model is built
+- _load_model(self)
+  - Async method that lists the container contents
+  - Calls the REST API: GET <container_url>?restype=container&comp=list
+  - Parses the XML response and builds an in-memory tree of AzureDirectory/AzureItem
+  - Logs success or failure
+  - TODO: cache cleanup when cache is enabled
+- list(self, path: str) -> list
+  - Validates path format (must begin with '/' and not contain '//')
+  - Resolves the in-memory model to the requested directory
+  - Returns a list of LibraryItem objects for the directory contents
+  - Raises KeyError if the path does not exist or is not a directory
+- read(self, path: str) -> typing.IO
+  - Validates path format
+  - Uses a per-path SHA-256 hash to determine a cache filename
+  - If a cached etag exists, sends If-None-Match to enable conditional requests
+  - Performs GET on the blob URL
+  - On 200 OK, caches the blob content (and updates the .etag file if caching is enabled)
+  - Returns a file-like object for the blob content
+  - If the blob is not found or an error occurs, raises an appropriate exception
+
+Internal models
+- AzureDirectory
+  - Represents a directory in the Azure container
+  - Attributes include name and a sub-dictionary of child nodes
+- AzureItem
+  - Represents a blob item
+  - Attributes include name and type (e.g., likely 'file' or similar)
+- These internal models are used to build a hierarchical structure that mirrors the container's path layout and is traversed by list().
+
+Behavior and design notes
+- Startup
+  - The provider schedules _start() on initialization, which loads the container model asynchronously.
+  - The provider is considered ready only after a successful _load_model() completes.
+- Path handling
+  - Root path is '/'. Sub-paths are constructed from blob names, split by '/' to form a tree.
+  - path validation enforces a single leading slash and no trailing slash for non-root paths.
+- Caching
+  - When enabled via library.azure_cache=true, blob reads are cached on disk with a corresponding .etag file.
+  - Reads attempt to use If-None-Match with the cached ETag to avoid re-downloading unchanged blobs.
+  - Cache directory is a transient location under the system temporary directory, hashed by the provider path.
+- Logging
+  - Uses a module-level logger (L) to report connection status, errors, and important events.
+
+Usage examples
+- Basic Azure Blob container
+  - Path: azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER
+- With SAS for restricted containers
+  - Path: azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER?sv=2020-10-02&si=XXXX&sr=c&sig=XXXXXXXXXXXXXX
+- Enable caching
+  - Set in config: library.azure_cache = true
+- Read a blob
+  - read('/path/to/blob.txt') returns a file-like object containing the blob data
+- List a directory
+  - list('/') returns top-level items; list('/path') returns items in that directory
+
+Implementation notes and limitations
+- The XML response from the container listing is parsed via xml.dom.minidom.
+- The current implementation builds an in-memory tree (AzureDirectory/AzureItem) to support fast listing without additional network calls.
+- The cache eviction/cleanup logic is marked as TODO.
+- The read() method’s exact handling of non-200/304 responses is not fully shown in the excerpt; the documented behavior assumes standard HTTP error handling.
+
+See Also
+- Config: The Config class used to fetch library.azure_cache
+- LibraryItem: The item representation returned by list()
+- LibraryProviderABC: The abstract base class implemented by this provider
+- aiohttp: Used for async HTTP requests
+- urllib.parse: Used to construct and parse URLs
+
+Examples
+- URL to a public container:
+  azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER
+- URL with SAS token:
+  azure+https://ACCOUNT-NAME.blob.core.windows.net/BLOB-CONTAINER?sv=2020-10-02&si=XXXX&sr=c&sig=XXXXXXXXXXXXXX
+
+Notes
+- This documentation describes the AzureStorageLibraryProvider as implemented in the provided code excerpt. If the surrounding package uses a different module path, adjust autodoc references accordingly in the Sphinx configuration.

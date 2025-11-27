@@ -1,0 +1,161 @@
+File Objects
+============
+
+Introduction
+------------
+This module provides the low-level machinery for managing HDF5 object identifiers
+within h5py. It defines the base ObjectID class used to represent HDF5 ids
+(hid_t) and the infrastructure that ensures safe, thread-aware lifecycle handling
+of these identifiers. Central concerns are preventing “zombie” identifiers, and
+safely invalidating stale IDs when nonlocal events occur (e.g., closing a file
+that has multiple open objects).
+
+Overview
+--------
+Key concepts and components include:
+- ObjectID: Base class representing an HDF5 identifier. Each instance tracks
+  its id, whether it is locked (not closable), a Python-side identity, and a
+  weak reference for registry management.
+- Registry: A global mapping of Python object id to a weak reference of the
+  corresponding ObjectID. This allows the system to walk live ObjectID instances
+  and invalidate stale IDs when necessary.
+- Locking: A dedicated lock (phil) serializes access to the low-level HDF5 API
+  to prevent race conditions when identifiers may be created or invalidated while
+  other threads are calling into Python or the C extensions.
+- nonlocal_close(): A function that scans the registry and, for non-locked, non-valid
+  objects, sets their id to 0 to avoid zombie identifiers after nonlocal events.
+- print_reg(): Debug helper to print the contents of the registry.
+
+Important concepts and terms
+- hid_t: HDF5 identifier type.
+- zombie identifier: an identifier that has been closed or invalidated and could
+  be erroneously reused if not cleared from the Python side.
+- nonlocal event: events that invalidate identifiers outside the local Python
+  context (e.g., closing a file, or HDF5 actions that close objects remotely).
+
+Key components
+- Global locking:
+  - USE_LOCKING controls whether a recursive lock is used.
+  - _phil is the actual lock object (either FastRLock or BogoLock).
+  - phil is a Python alias for access from other modules.
+  - with_phil decorator provides a simple way to lock surrounding code.
+- Registry:
+  - registry maps Python id(obj) to weakref.ref(obj) for live ObjectID instances.
+  - Entry creation occurs in ObjectID.__cinit__; removal occurs in ObjectID.__dealloc__.
+- ObjectID class:
+  - Primary interface for representing HDF5 identifiers within h5py.
+  - Attributes:
+    - id: The underlying HDF5 identifier (hid_t).
+    - locked: Flag indicating that this object cannot be closed automatically.
+    - _pyid: Python-side unique identifier (used as registry key).
+  - Properties:
+    - fileno: Returns a tuple (fileno[0], fileno[1]) from HDF5 metadata of the
+      object, via H5Gget_objinfo.
+    - valid: Indicates whether the object is currently a valid HDF5 object (via is_h5py_obj_valid).
+  - Lifecycle:
+    - __cinit__(self, id_): Registers the new ObjectID in the registry under
+      its Python id and records a debug message when DEBUG_ID is enabled.
+    - __dealloc__(self): Unregisters from the registry and may interact with
+      HDF5 reference counting (H5Idec_ref) as part of object destruction.
+
+- Helper functions:
+  - nonlocal_close(): Iterates the registry to invalidate stale IDs by setting
+    obj.id = 0 for non-locked and invalid objects, ensuring no zombie identifiers
+    remain around after nonlocal events.
+  - print_reg(): Debug helper to show the current contents of the registry.
+
+Public API surface (high level)
+- ObjectID
+  - __cinit__(self, id_): Initialize and register the identifier.
+  - __dealloc__(self): Cleanup and unregister the identifier.
+  - fileno (property): Obtain the object’s file descriptor information.
+  - valid (property): Check whether the object is a valid HDF5 object.
+- nonlocal_close()
+  - Invalidate stale ObjectID instances after nonlocal events.
+- print_reg()
+  - Debug printout of the registry’s current state.
+
+Usage notes and considerations
+- Locking model:
+  - The _phil lock serializes access to low-level operations that may affect
+    identifiers. Use the with_phil decorator (or the _phil lock) to guard any
+    code that interacts with HDF5 identifiers when threading is involved.
+- Zombie identifiers:
+  - When closing objects or in scenarios where HDF5 may reuse identifiers
+    quickly, zombie identifiers can arise. nonlocal_close() is designed to
+    proactively invalidate such identifiers to prevent cross-file contamination.
+- Object lifecycle:
+  - ObjectID instances are registered on creation and unregistered on
+    destruction. Locked objects are exempt from nonlocal invalidation to avoid
+    unintended side effects.
+- Debugging:
+  - DEBUG_ID enables verbose logging for creation and destruction of ObjectID
+    instances, which can aid diagnosing registry or lifecycle issues.
+- Edge cases:
+  - If HDF5 returns an invalid id for an object, nonlocal_close() will set its
+    Python-side id to 0, preventing access to an already-closed underlying
+    resource.
+  - Access to fileno relies on HDF5’s H5Gget_objinfo and may reflect filesystem
+    details of the underlying object.
+
+Code examples
+- Example: Creating and inspecting an ObjectID (conceptual; actual usage is via
+  higher-level wrappers like FileID, GroupID, etc.)
+  ```
+  # Pseudo-usage: high-level code manages Objects; the low-level layer handles IDs
+  # Creating an ObjectID would happen inside the Cython extension as part of
+  # FileID/GroupID initialization.
+  # Accessing a fileno descriptor:
+  fd = obj.fileno  # -> (device, inode) pair or equivalent descriptor info
+  is_valid = obj.valid
+  ```
+
+- Example: Cleaning up stale IDs after a nonlocal event
+  ```
+  # This would be invoked after a nonlocal event, such as closing a file
+  nonlocal_close()
+  ```
+
+- Example: Debugging the registry contents
+  ```
+  print_reg()
+  ```
+
+Edge cases and caveats
+- If an ObjectID is marked locked, nonlocal_close will not invalidate it. This
+  is by design to avoid side effects for objects that are provided by the HDF5
+  library (e.g., property lists) or explicitly protected for lifecycle reasons.
+- The registry is global and keeps weak references to objects. If an ObjectID is
+  garbage collected, its entry may be removed from the registry, which is why
+  deallocation and reference counting must be carefully coordinated.
+- The locking mechanism is important for multithreaded contexts. In single-threaded
+  scenarios it remains functional but may add negligible overhead.
+
+Implementation notes (for maintainers)
+- The module uses a single recursive lock to serialize all low-level API access to
+  prevent concurrent modifications to HDF5 identifiers.
+- The registry stores weak references to ObjectID instances, avoiding strong
+  reference cycles and enabling proper garbage collection.
+- The nonlocal_close() routine iterates a safely captured list of registry keys
+  to minimize GC overhead during iteration.
+
+Code references (conceptual)
+- Global controls:
+  - registry: cdef dict mapping id(obj) -> weakref.ref(obj)
+  - USE_LOCKING: enables or disables locking
+  - _phil / phil: locking primitives
+- Core class:
+  - ObjectID.__cinit__(self, id_)
+  - ObjectID.__dealloc__(self)
+  - ObjectID.fileno
+  - ObjectID.valid
+- Helpers:
+  - nonlocal_close()
+  - print_reg()
+
+Notes
+-----
+This documentation reflects the internal design and lifecycle management of
+File Objects within h5py’s low-level ID handling. Higher-level user code should
+rarely interact with ObjectID directly; instead, rely on the public File, Group,
+Dataset, and other high-level interfaces which encapsulate these details.

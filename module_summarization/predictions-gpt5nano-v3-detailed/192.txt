@@ -1,0 +1,162 @@
+# Manifold learning with Multidimensional Scaling (MDS)
+
+This module documents the manifold learning approach implemented for non-linear dimensionality reduction using Multidimensional Scaling (MDS), specifically the SMACOF (Scaling by MAjorizing a COmplicated Function) algorithm. It supports both metric and non-metric MDS, offering flexible initialization, convergence control, and stress-based optimization.
+
+## Overview
+
+- Purpose: Embed objects into a low-dimensional Euclidean space while preserving pairwise dissimilarities as well as possible.
+- Core idea: Given a matrix of pairwise dissimilarities D, find coordinates X in a low-dimensional space (n_components) that minimize a stress objective measuring the discrepancy between D and the pairwise distances in X.
+- Metric vs non-metric: 
+  - Metric MDS preserves the dissimilarities directly in the embedding (Euclidean distances approximate D).
+  - Non-metric MDS preserves the rank order of dissimilarities; it uses isotonic regression to map dissimilarities to disparities before embedding.
+- Algorithm: SMACOF iteratively updates the embedding via the Guttman transform to reduce stress until convergence.
+
+## Public API and relationships
+
+- Public estimator: MDS (from sklearn.manifold). It orchestrates the SMACOF optimization by calling the internal _smacof_single routine and exposing a user-facing interface.
+- Internal component: _smacof_single
+  - Inputs:
+    - dissimilarities: symmetric pairwise dissimilarities (shape (n_samples, n_samples))
+    - metric: whether to perform metric (True) or non-metric (False) MDS
+    - n_components: embedding dimensionality
+    - init: optional starting coordinates (n_samples, n_components)
+    - max_iter: maximum SMACOF iterations per run
+    - eps: convergence tolerance
+    - random_state: seed for reproducibility
+    - normalized_stress: whether to return normalized stress (Stress-1) for non-metric MDS
+  - Outputs:
+    - X: embedding coordinates
+    - stress: final stress value (or Stress-1 when normalized_stress is True)
+    - n_iter: number of iterations performed
+
+- Related components:
+  - IsotonicRegression: used for non-metric MDS to obtain monotone disparities from the rank-ordered dissimilarities.
+  - euclidean_distances: computes Euclidean distances between points in the current embedding.
+  - check_symmetric, check_random_state, check_array: input validation utilities.
+  - Hidden/Interval/StrOptions validators: parameter validation for safe configuration.
+
+## Key concepts and behavior
+
+- Dissimilarities input
+  - Must be a square, symmetric matrix with zeros on the diagonal.
+  - For non-metric MDS, zeros in the dissimilarities are treated as missing values and are ignored in the monotone regression step.
+- Metric vs non-metric
+  - metric=True: disparities = dissimilarities directly.
+  - metric=False: disparities are obtained by monotone regression of the observed distances against the dissimilarities (handling missing values for zeros).
+- Stress
+  - Stress measures the discrepancy between the observed dissimilarities and the embedding distances.
+  - If normalized_stress is True (only for non-metric MDS), the stress is normalized to a Stress-1 value.
+- Convergence
+  - The algorithm uses a convergence criterion based on stress improvement (eps) and tracks the best stress achieved.
+  - The embedding is updated via the Guttman transform, using a computed B matrix derived from the ratio of disparities to distances.
+- Initialization
+  - If init is not provided, a random initialization is used.
+  - If init is provided, its shape determines the embedding dimensionality and is used as the starting point.
+- Outputs
+  - X: low-dimensional coordinates for each sample.
+  - stress: final stress value (or Stress-1 when applicable).
+  - n_iter: number of iterations performed to obtain the final embedding.
+
+## Parameters (high level)
+
+- dissimilarities: array-like, shape (n_samples, n_samples)
+  - Symmetric pairwise dissimilarities.
+- metric: bool, default True
+  - If True, perform metric MDS; otherwise perform non-metric MDS.
+- n_components: int, default 2
+  - Embedding dimensionality.
+- init: array-like of shape (n_samples, n_components) or None
+  - Starting configuration. If provided, overrides n_components.
+- n_init: int
+  - Number of SMACOF runs with different initializations (explained by the higher-level MDS wrapper in practice).
+- max_iter: int, default 300
+  - Maximum iterations for a single SMACOF run.
+- verbose: int, default 0
+  - Verbosity level for progress output.
+- eps: float, default 1e-3
+  - Convergence tolerance for the improvement in stress.
+- random_state: int or RandomState, default None
+  - Seed for reproducible initialization.
+- return_n_iter: bool
+  - If True, return the number of iterations performed (in addition to embedding and stress).
+- normalized_stress: bool, default False
+  - If True and metric=False, return Stress-1 (normalized stress). Must be False for metric MDS.
+
+Notes:
+- Symmetry check: The input dissimilarities must be symmetric; the implementation enforces this and raises an error otherwise.
+- Zeros handling (non-metric): In non-metric MDS, zeros in dissimilarities are treated as missing values during the isotonic regression step.
+
+## Usage examples
+
+Basic metric MDS (2D)
+
+```
+from sklearn.manifold import MDS
+import numpy as np
+
+# Example dissimilarities (must be symmetric with zeros on the diagonal)
+D = np.array([
+    [0.0, 1.0, 2.0],
+    [1.0, 0.0, 1.5],
+    [2.0, 1.5, 0.0]
+])
+
+mds = MDS(n_components=2, metric=True, random_state=42)
+X = mds.fit_transform(D)
+
+print("Embedding:\n", X)
+print("Stress:", mds.stress_)
+```
+
+Basic non-metric MDS
+
+```
+mds = MDS(n_components=2, metric=False, random_state=42)
+X = mds.fit_transform(D)
+print("Embedding (non-metric):\n", X)
+print("Stress (non-metric):", mds.stress_)
+```
+
+Using an explicit init
+
+```
+init = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+mds = MDS(n_components=2, init=init, random_state=0)
+X = mds.fit_transform(D)
+print("Embedding with provided init:\n", X)
+```
+
+Requesting iteration count and Stress-1
+
+```
+mds = MDS(n_components=2, metric=False, random_state=0, return_n_iter=True)
+X = mds.fit_transform(D)
+print("Embedding:\n", X)
+print("Stress:", mds.stress_)
+print("Iterations:", mds.n_iter_)
+```
+
+Note: The exact attribute names (stress_, n_iter_, embedding_) may depend on the library version. Access the embedding via the appropriate attribute or via fit_transform return as shown.
+
+## Important considerations and edge cases
+
+- Symmetry requirement: The dissimilarities matrix must be symmetric. The implementation enforces symmetry and will raise an error if violated.
+- Zeros in non-metric MDS: In non-metric mode, zeros are treated as missing dissimilarities during the isotonic regression step.
+- Normalized stress: Only available for non-metric MDS. If you enable normalized_stress, you must set metric=False.
+- Initialization impact: Initialization can influence the convergence speed and final embedding, especially for larger datasets.
+- Scalability: SMACOF operates on the full pairwise dissimilarities matrix, leading to O(n^2) memory usage and computations for n samples. For very large datasets, consider sampling or alternative manifold learning methods.
+- Convergence behavior: The algorithm uses a finite max_iter and a convergence tolerance (eps). In practice, you may need to adjust max_iter or eps for difficult datasets.
+- Random state: Reproducibility is controlled via random_state. Use a fixed seed for consistent results across runs.
+
+## References
+
+- Kruskal, J. (1964). Nonmetric multidimensional scaling: a numerical method.
+- Kruskal, J. (1964). Multidimensional scaling by optimizing goodness of fit to a nonmetric hypothesis.
+- Borg, I., & Groenen, P. (1997). Modern Multidimensional Scaling: Theory and Applications.
+
+## See also
+
+- IsotonicRegression: used for non-metric MDS to map dissimilarities to disparities in a monotone fashion.
+- euclidean_distances: distance computation used to derive current embedding distances during optimization.
+
+This documentation provides a practical guide to using MDS for non-linear dimensionality reduction via SMACOF, including parameter choices, outputs, and representative usage patterns.

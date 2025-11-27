@@ -1,0 +1,156 @@
+Feature extraction for model inspection
+=======================================
+
+Overview
+--------
+
+This document describes techniques and utilities for feature extraction from models to aid model inspection and debugging. The approach uses Torch FX tracing to capture intermediate feature maps and operation outputs while preserving meaningful, human-readable names for the traced nodes. It is designed for developers who want to inspect or export intermediate representations from neural networks, diagnose mismatches between training and evaluation graphs, or surface specific internal features for analysis.
+
+Key ideas
+---------
+
+- Node path tracing: Each operation in the model trace is labeled with a hierarchical node name that represents the path from the top-level module down to the operation or leaf module. The top-level module name is not included in the node name; instead, the path starts from the leaf operation or leaf module.
+- Leaf module handling: You can specify a set of leaf modules that should not be traced into. Such modules will appear as single nodes calling their forward methods, rather than being expanded in the trace.
+- Unique node names: If the same node name appears multiple times during tracing, a suffix _{i} is appended to disambiguate them, where i starts at 1.
+- Train vs. eval parity: There are utilities to warn if the traced train graph differs from the traced eval graph, since feature extraction nodes might need to be chosen differently for training and evaluation.
+
+Core components
+---------------
+
+- LeafModuleAwareTracer
+  - An FX Tracer that supports designating a set of leaf modules to be treated as atomic during tracing.
+  - If a module is in the leaf set, tracing does not walk inside it; instead, calls to the leaf’s forward are recorded as a single proxy node.
+
+- NodePathTracer
+  - Extends LeafModuleAwareTracer to record, for every operation, the qualified name (node path) from the top-level module to that operation.
+  - Maintains a mapping from FX nodes to node names (node_to_qualname), preserving the order in which tracing executes.
+  - Overrides call_module and create_proxy to capture and store node names for each traced node.
+  - Computes a local, human-friendly node name with a path that reflects module hierarchy and operation, and ensures uniqueness by appending indices when duplicates occur.
+
+- _warn_graph_differences
+  - Utility to warn when the train graph and eval graph have differences in their node names, so users may need to specify different return_nodes for train and eval modes.
+
+- _get_node_qualname
+  - Internal helper used by NodePathTracer to construct a unique, readable node name for a given node, handling duplicates and stripping/renaming Torch FX’s own postfixes as needed.
+
+Public API (high level)
+------------------------
+
+- create_feature_extractor(model, return_nodes, ...)
+  - Creates a feature-extraction wrapper around a model that returns outputs from specified nodes.
+  - return_nodes defines which internal nodes’ outputs should be returned, and the names under which they will be exposed.
+  - Uses NodePathTracer to assign human-friendly names to traced nodes and to build a structure that returns the requested features when the wrapper is called.
+  - Supports configuring leaf modules to control tracing depth.
+
+- get_graph_node_names(model)
+  - Returns the set or list of graph node names that would be produced by tracing the model.
+  - Helpful for discovering valid node selections when constructing return_nodes for feature extraction.
+
+Usage notes
+-----------
+
+- The node names produced by tracing reflect the path to the operation or leaf module, but do not include the top-level module name.
+- If two or more nodes share the same name in the path, a numeric suffix is added to make them unique within the trace.
+- You can designate leaf_modules to limit tracing to high-level blocks, which is useful when importing large submodels as black boxes or when you only care about higher-level features.
+- When building return_nodes, you can specify a single node name or a list of node names. The wrapper will return a dictionary of outputs with the custom keys you provide.
+- If there are differences between how the model behaves in training vs. evaluation, you may need to specify separate node selections for train and eval modes. The _warn_graph_differences helper can inform you of potential mismatches.
+
+Examples
+--------
+
+Basic example: extract features from a simple model
+
+- Goal: capture outputs from a couple of early layers of a model.
+
+.. code-block:: python
+
+   from torchvision import models
+   from torchvision.feature_extraction import create_feature_extractor, get_graph_node_names
+
+   # Example model
+   model = models.resnet18(pretrained=False)
+
+   # Discover available node names to know which features you can extract
+   graph_node_names = get_graph_node_names(model)
+   print(graph_node_names)
+
+   # Define which features to extract and how to name them in the output
+   # Here we assume you want the output of two internal nodes (replace with actual names found)
+   return_nodes = {
+       'feat1': 'layer1.0.relu',  # example path to a ReLU after first block
+       'feat2': 'layer4.0.avgpool',  # example path to an internal feature
+   }
+
+   feature_extractor = create_feature_extractor(model, return_nodes=return_nodes)
+
+   # Run a forward pass and collect features
+   x = torch.randn(1, 3, 224, 224)
+   features = feature_extractor(x)
+   # features is a dict: {'feat1': tensor(...), 'feat2': tensor(...)}
+
+Using leaf_modules to keep submodules intact
+
+- Goal: avoid tracing into a large submodule (e.g., a backbone block), treat it as a leaf module.
+
+.. code-block:: python
+
+   from torchvision import models
+   from torchvision.feature_extraction import create_feature_extractor
+
+   model = models.resnet50(pretrained=False)
+
+   # Treat certain modules as leaves to prevent tracing inside them
+   leaf_modules = {model.layer1: None, model.layer4: None}
+   feature_extractor = create_feature_extractor(
+       model, return_nodes={'layer1_out': 'layer1'}, leaf_modules=leaf_modules
+   )
+   x = torch.randn(1, 3, 224, 224)
+   feats = feature_extractor(x)
+
+Inspecting graph node names
+
+- Goal: list all node names produced by tracing to plan return_nodes.
+
+.. code-block:: python
+
+   from torchvision import models
+   from torchvision.feature_extraction import get_graph_node_names
+
+   model = models.resnet18(pretrained=False)
+   names = get_graph_node_names(model)
+   print(names)
+
+Handling train vs. eval differences
+
+- If you intend to extract features differently during training and evaluation, you can compute separate sets of return_nodes for each mode. The tracing utilities allow you to inspect and compare the corresponding graphs.
+
+Internals you might customize
+------------------------------
+
+- Node naming behavior:
+  - The same base node name can appear multiple times; the tracer ensures uniqueness by appending _{n}.
+  - Names are built by joining module qualnames and operation identifiers where appropriate.
+- Duplicate-name resolution:
+  - The tracer attempts to avoid collisions by scanning existing names in node_to_qualname and applying a suffix as needed.
+
+Notes and caveats
+-----------------
+
+- The quality and usefulness of feature extraction depend on accurate return_nodes definitions. Use get_graph_node_names to explore available node names before selecting return_nodes.
+- When tracing complex models, beware of extremely long node paths or many duplicated names which can produce verbose keys. Consider using leaf_modules to reduce trace complexity when appropriate.
+- Differences between train and eval graphs can affect which nodes are safe or meaningful to extract. Use the warning utilities to catch potential mismatches.
+
+See also
+--------
+
+- NodePathTracer: internal FX-based tracer that records node paths.
+- LeafModuleAwareTracer: tracer variant that supports leaf-module tracing behavior.
+- _warn_graph_differences: utility to warn about train/eval graph differences.
+- _get_node_qualname: internal helper for constructing stable, unique node names.
+
+Known limitations
+---------------
+
+- The exact function signatures and return formats may evolve with library versions. Refer to the current implementation in your codebase to align with the latest behavior of create_feature_extractor and get_graph_node_names.
+
+This documentation is intended for developers integrating feature extraction into model inspection workflows and customizing tracing behavior for their debugging and analysis tasks.

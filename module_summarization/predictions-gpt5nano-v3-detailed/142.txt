@@ -1,0 +1,132 @@
+# dask.delayed API
+
+Introduction
+------------
+The dask.delayed interface enables lazy, task-based computation by wrapping Python values and functions into Delayed objects. These objects carry a small task graph (a HighLevelGraph) that can be executed later by a Dask scheduler. This API provides utilities to normalize, merge, and inspect graphs built from mixed Python structures (lists, dicts, dataclasses, namedtuples, etc.) containing Delayed objects or plain literals.
+
+Key concepts
+------------
+- Delayed: A lightweight wrapper representing a computation or value that will be produced lazily. Delayed objects carry a key (identifier) and an associated Dask graph.
+- delayed: The primary factory to create Delayed objects (not defined in this excerpt, but central to the interface). Delayed objects can be composed into larger graphs by combining with Python objects or other Delayed values.
+- Graph composition: Helper functions to extract and merge sub-graphs from complex Python structures, making it possible to compute nested or compound results.
+
+Core functions
+--------------
+
+unzip
+- Purpose: Unzip a list of outputs into a fixed number of outputs.
+- Signature: unzip(ls, nout)
+- Behavior:
+  - If ls contains sublists, returns a list of tuples representing the transposed structure.
+  - If there are no outputs to unzip, returns a list with nout empty tuples.
+- Typical use: Internal helper for decomposing nested task results.
+
+finalize
+- Purpose: Create a finalization step for a dask collection, producing a Delayed that runs a finalizer after the collection’s graph.
+- Signature: finalize(collection)
+- Returns: A Delayed object representing the finalization step, with a single-key graph that runs the collection’s original graph and then the finalize function.
+- Notes:
+  - Uses the collection’s __dask_keys__ and __dask_postcompute__ to assemble the final task.
+  - Useful to attach clean-up or post-processing once the main computation completes.
+
+unpack_collections
+- Purpose: Normalize a Python object containing Delayed objects and/or dask collections, merging all sub-graphs into a single, ready-to-execute structure.
+- Signature: unpack_collections(expr)
+- What it does:
+  - Replaces Delayed instances with their keys.
+  - Converts literals to scheduler-friendly forms.
+  - Extracts and aggregates sub-graphs from all enclosed values.
+- Return:
+  - A pair: (normalized_task, collections)
+  - normalized_task is a Python structure (e.g., list, dict, namedtuple) with Delayed references replaced by their keys or by lightweight constructors.
+  - collections is a tuple of Delayed objects found in the input.
+- Key behavior by type:
+  - Delayed: returns the Delayed key and a tuple with the Delayed itself.
+  - is_dask_collection: finalizes the collection and returns its final key with the finalized collection in a singleton.
+  - Iterator: coerces to a Python iterator (tuple) and processes its elements.
+  - list/tuple/set: recursively unpack elements, preserve input type, and gather unique sub-collections.
+  - dict: unpacks to a (dict, args) form and returns the corresponding collections.
+  - slice: unpacks start/stop/step.
+  - dataclass / namedtuple: specialized handling to reconstruct the instance while tracking sub-collections in fields.
+  - Other types: returned as-is with no extra collections.
+- Edge cases:
+  - For dataclasses, if a field is missing (init=False), it may be skipped.
+  - If reconstruction of a dataclass with a custom __init__ is attempted, a TypeError is raised indicating unsupported custom __init__.
+  - For fields marked init=False, those fields are not included in the unpacking process, which can limit reconstruction.
+
+to_task_dask
+- Purpose: A deprecated helper to normalize an object into a task and a merged Dask graph.
+- Signature: to_task_dask(expr)
+- Behavior:
+  - Emits a warning that this function is deprecated in favor of unpack_collections.
+  - Replaces Delayed with its key and dask graph.
+  - If given a dask collection, builds a finalize task and merges graphs, including __dask_postcompute__ args and any optimization steps.
+  - For sequences (list/tuple/set) or mappings (dict), recursively computes a task structure and a merged dask graph.
+- Return:
+  - A pair: (task, dask)
+  - task is a normalized task structure (e.g., list of keys).
+  - dask is a merged graph (a dictionary-like structure) containing all sub-graphs.
+- Important notes:
+  - This function is deprecated; prefer unpack_collections for normalization and graph extraction.
+
+Usage examples
+--------------
+
+Basic example: simple Delayed values in a list
+```python
+from dask import delayed
+# Wrap simple values
+a = delayed(1, "a")
+b = delayed(2, "b")
+c = 3
+
+# Normalize a simple structure
+task, collections = unpack_collections([a, b, c])
+
+print(task)          # ['a', 'b', 3]
+print(collections)   # (Delayed('a'), Delayed('b'))
+```
+
+Dictionary example
+```python
+a = delayed(1, "a")
+b = delayed(2, "b")
+task, collections = unpack_collections({a: 1, b: 2})
+
+print(task)          # (<class 'dict'>, [['a', 1], ['b', 2]])
+print(collections)   # (Delayed('a'), Delayed('b'))
+```
+
+Task and dask graph (deprecated helper)
+```python
+a = delayed(1, "a")
+b = delayed(2, "b")
+
+task, dask = to_task_dask([a, b, 3])
+print(task)  # ['a', 'b', 3]
+print(dict(dask))  # {'a': 1, 'b': 2}
+```
+
+Finalization example
+```python
+# Given a dask collection `col`, create a finalize Delayed
+final = finalize(col)
+# final is a Delayed representing the finalization step of the collection
+```
+
+Edge cases and considerations
+------------------------------
+- Namedtuples and dataclasses: unpack_collections supports reconstructing these structures with their fields, but note:
+  - If fields are missing due to init=False or custom __init__, Unpacking may fail or raise helpful errors.
+  - Dataclass fields with init=False are not guaranteed to participate in graph extraction.
+- Dataclass reconstruction errors: If a custom __init__ is used in a dataclass, unpack_collections raises a TypeError indicating unsupported custom initialization.
+- Deprecated API: to_task_dask is deprecated. Use unpack_collections for normalization and graph extraction, or directly integrate Delayed objects into your own structures.
+- Collections flattening: Unpacking may consolidate multiple sub-graphs into a single, merged graph; this enables efficient scheduling by exposing all dependencies to the scheduler in one place.
+- Scheduling and get: The module relies on Dask’s configuration and scheduler selection (DEFAULT_GET, named_schedulers). Real execution depends on the runtime environment and configured schedulers (threads, processes, or single-threaded).
+
+Notes on relationship and design
+-------------------------------
+- The helpers are designed to work with any Python object containing Delayed instances or dask collections, enabling seamless composition of large, nested task graphs.
+- The approach emphasizes normalization: convert user-friendly Python structures into a standardized task representation plus a merged graph, which can then be executed by a Dask scheduler.
+
+End of documentation

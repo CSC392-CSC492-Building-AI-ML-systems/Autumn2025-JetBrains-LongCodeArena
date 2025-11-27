@@ -1,0 +1,85 @@
+# Handling large datasets
+
+## Overview
+This module provides methods to compute moment maps from spectral cubes while balancing speed and memory usage. It offers multiple strategies to process data (cubewise, raywise, and slicewise) and a convenience interface that automatically selects the most suitable approach based on the cube’s properties. This is essential when working with large datasets where loading the entire cube into memory is impractical.
+
+Key concepts:
+- Moment maps can be computed along any axis (numpy convention) with varying orders (0, 1, 2, …).
+- Strategies trade memory consumption for speed and are selected automatically via iterator strategy heuristics.
+- Masking, NaN handling, and pixel-sizing are integrated to ensure accurate, robust results on large data.
+
+## Key Components
+- moment_auto(cube, order, axis): Build a moment map by choosing a strategy (cubewise, raywise, or slicewise) to balance speed and memory.
+- moment_cubewise(cube, order, axis): Compute moments using the entire data at once (fast but memory-intensive).
+- moment_raywise(cube, order, axis): Compute moments one ray at a time (memory-efficient; may be slower due to Python loops).
+- moment_slicewise(cube, order, axis): Compute moments plane by plane (moderate memory usage with reasonable throughput).
+- _moment_shp(cube, axis): Shape of the resulting moment map after collapsing along axis.
+- _slice0(cube, axis) and _slice1(cube, axis): Slice-wise implementations for 0th and 1st moments.
+- Internal helpers rely on cube data access patterns (e.g., _get_filled_data, _pix_size_slice, _pix_cen, and iterator utilities).
+
+- iterator_strategy(cube, axis): Determines which strategy to use (cubewise, ray, or slice) based on the cube’s size, masking, and other properties.
+
+Code excerpts (illustrative):
+- Strategy-based dispatcher used by moment_auto:
+  - moment_auto builds a strategy map and selects the implementation with:
+    - strategy = dict(cube=moment_cubewise, ray=moment_raywise, slice=moment_slicewise)
+    - return strategy[iterator_strategy(cube, axis)](cube, order, axis)
+
+- Order handling:
+  - For order == 0, values are computed as a sum over the collapsed axis (with appropriate NaN handling).
+  - For order == 1, a weighted mean is computed using pixel centers and pixel sizes.
+  - For order > 1, higher-order moments are computed relative to the first moment (mom1).
+
+- Moment shape:
+  - _moment_shp returns the shape of the moment map after collapsing along the given axis.
+
+## Usage
+
+- Compute moment maps along a specified axis using the automatic strategy selector:
+```python
+# Compute 0th and 1st moments along the spectral axis (axis index may vary; numpy convention)
+mom0 = moment_auto(cube, order=0, axis=2)
+mom1 = moment_auto(cube, order=1, axis=2)
+```
+
+- Explicitly compute a higher-order moment with a chosen (slice) approach:
+```python
+# Example: 2nd moment using slice-wise processing
+mom2 = moment_slicewise(cube, order=2, axis=2)
+```
+
+- For clarity, you can inspect or force a specific strategy (if exposed in your environment):
+```python
+# Force a specific strategy (depending on the available API in your version)
+mom0_slice = moment_slicewise(cube, order=0, axis=2)
+```
+
+- Axis and data handling:
+  - The axis parameter follows numpy conventions (0, 1, 2, …).
+  - Moment computations respect masking and fill values, using NaN propagation where appropriate.
+
+## Details
+
+- Strategies and memory:
+  - cubewise: loads and processes the entire data array at once; fastest but memory-intensive.
+  - raywise: processes data one ray at a time; low memory usage; potentially slower due to Python loop overhead.
+  - slicewise: processes one plane (slice) at a time; intermediate memory usage with good throughput.
+
+- How moments are computed:
+  - 0th moment (order=0): sum over the collapsed axis, with NaN handling to avoid bias from missing data.
+  - 1st moment (order=1): weighted mean using pixel centers and pixel sizes.
+  - Higher-order moments (order>1): computed relative to the first moment, using weights that depend on the data and pixel geometry.
+
+- Handling large datasets:
+  - The automatic selection via moment_auto helps you avoid manual tuning. It chooses a strategy based on cube size, masking complexity, and available memory.
+  - When memory is abundant, cubewise computation is fastest.
+  - When memory is constrained, raywise or slicewise approaches minimize peak memory usage while still returning correct results.
+
+- Data integrity:
+  - NaN handling is integrated to ensure that missing data do not skew moment calculations.
+  - Masks and WCS information are respected to ensure consistent moment maps across large datasets.
+
+- Related classes (context):
+  - The module also references multi-Stokes support (e.g., StokesSpectralCube) in the surrounding codebase, which can impact how large datasets with multiple components are processed, but the large-dataset moment computation logic itself is exposed via moment_auto, moment_cubewise, moment_raywise, and moment_slicewise.
+
+---

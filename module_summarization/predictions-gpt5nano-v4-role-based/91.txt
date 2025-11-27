@@ -1,0 +1,114 @@
+rand_augment.rst
+
+RandAugment integration for NVIDIA DLADI (rand_augment)
+
+Overview
+- This module provides the rand_augment(...) API to apply the RandAugment augmentation scheme to a batch of samples using NVIDIA DALI.
+- RandAugment randomly selects a fixed number of augmentation operations and applies them with magnitudes determined by a discrete binning parameter.
+- The augmentation suite can be selected in monotonic or non-monotonic fashion and supports optional exclusions to tailor the suite.
+
+Public API
+
+rand_augment(data, n, m, num_magnitude_bins=31, shape=None, fill_value=128,
+             interp_type=None, max_translate_abs=None, max_translate_rel=None,
+             seed=None, monotonic_mag=True, excluded=None) -> _DataNode
+
+Purpose
+- Apply RandAugment to a batch of samples (images or videos) in a single pipeline step.
+- Supports both image data with HWC layout and video data with FHWC layout. Data type is uint8.
+
+Parameters
+- data: DataNode
+  - A batch of samples to process. Supported: images (HWC) and videos (FHWC), uint8.
+- n: int
+  - Number of randomly sampled augmentation operations to apply to each sample.
+- m: int
+  - Magnitude (strength) of each operation. Must be in [0, num_magnitude_bins - 1].
+- num_magnitude_bins: int (default 31)
+  - Number of magnitude bins to discretize operation strengths.
+- shape: DataNode or Tuple[int, int], optional
+  - Shape (height, width) to which to apply augmentations. If provided, magnitude of translation-based operations depends on shape and spans from 0 to max_translate_rel * shape. When not provided, magnitudes range from 0 to max_translate_abs.
+- fill_value: int, optional (default 128)
+  - Padding value used by warp_affine operations (translation, shear, rotate). If None, padding uses border value repetition (clamped).
+- interp_type: types.DALIInterpType, optional
+  - Interpolation method for warp_affine ops. Supported: types.INTERP_LINEAR (default) and types.INTERP_NN.
+- max_translate_abs: int or (int, int), optional
+  - Only valid when shape is not provided. Maximum translation in pixels. If a tuple, first component limits height, second limits width. Default typically 100 (max magnitude of translation).
+- max_translate_rel: float or (float, float), optional
+  - Only valid when shape is provided. Maximum translation as a fraction of image shape. If a tuple, first component controls height, second controls width. Default around 0.45 (e.g., 100/224).
+- seed: int, optional
+  - RNG seed used to sample the operations and to negate magnitudes for reproducibility.
+- monotonic_mag: bool, optional (default True)
+  - Chooses between two RandAugment styles:
+    - True: Magnitude bins monotonically increase augmentation strength with bin index.
+    - False: Some color operations (e.g., posterize, solarize) have non-monotonic magnitudes; others (brightness, contrast, color, sharpness) use a defined range. See non-monotonic suite for details.
+- excluded: List[str], optional
+  - Names of augmentations to exclude from the default RandAugment suite. If provided, every named operation must exist in the suite; otherwise an exception is raised. This is useful to customize or restrict the augmentation set without supplying a full custom suite.
+
+Returns
+- DataNode
+  - A batch of transformed samples.
+
+Behavior and internals
+- The function constructs augmentation kwargs with fill_value and interp_type. If shape is provided, it is added to the kwargs for subsequent augmentations.
+- It selects an augmentation suite via:
+  - get_rand_augment_suite(use_shape, max_translate_abs, max_translate_rel) when monotonic_mag is True, or
+  - get_rand_augment_non_monotonic_suite(use_shape, max_translate_abs, max_translate_rel) when monotonic_mag is False.
+- It ensures all augmentations in the computed suite have unique names and validates the excluded list against that set. If any excluded name is not in the suite, an exception is raised with a helpful message listing the available augmentations.
+- It filters the suite to remove the excluded augmentations and passes the remaining augmentations to apply_rand_augment along with the data and parameters (n, m, num_magnitude_bins, seed, and augmentation kwargs).
+- The actual augmentation execution is delegated to apply_rand_augment, which applies a random subset of the selected augmentations to each sample according to the RandAugment algorithm.
+
+Notes
+- The augmentation operations originate from nvidia.dali.auto_aug.augmentations and are represented internally as _Augmentation objects with a .name attribute.
+- The function enforces that the chosen excluded names are valid for the current suite, ensuring predictable behavior.
+- This API is designed to plug seamlessly into a DALI pipeline as a preprocessing step for either images or videos.
+
+Usage examples
+
+Example 1: Basic RandAugment on a batch of images
+- Apply 3 random augmentations to each image with magnitude bin 12, using default magnitudes.
+- No shape-based translation; translations use max_translate_abs (default behavior).
+- No explicit seed; RNG is used.
+
+python
+from nvidia.dali.auto_aug.rand_augment import rand_augment
+# assuming 'images' is a DataNode with a batch of HWC uint8 images
+augmented = rand_augment(images, n=3, m=12)
+
+Example 2: RandAugment with shape-aware translations and explicit padding
+- Shape provided as (256, 256) to scale translation magnitudes.
+- Use linear interpolation for warp operations and a padding value of 0.
+
+python
+from nvidia.dali.auto_aug.rand_augment import rand_augment
+augmented = rand_augment(
+    images, n=2, m=15,
+    shape=(256, 256),
+    fill_value=0,
+    interp_type=None,  # default is linear
+    seed=42
+)
+
+Example 3: Non-monotonic magnitudes with exclusion
+- Use non-monotonic magnitudes.
+- Exclude the 'brightness' operation from the default suite.
+
+python
+from nvidia.dali.auto_aug.rand_augment import rand_augment
+augmented = rand_augment(
+    images, n=2, m=10,
+    monotonic_mag=False,
+    excluded=['brightness']
+)
+
+See also
+- nvidia.dali.auto_aug.rand_augment.get_rand_augment_suite
+- nvidia.dali.auto_aug.rand_augment.get_rand_augment_non_monotonic_suite
+- nvidia.dali.auto_aug.augmentations (available augmentation operations)
+
+References
+- RandAugment: X. Wu et al., "RandAugment: Practical automated data augmentation with a fixed set of augmentations" (arXiv:1909.13719)
+
+Notes for maintainers
+- The module relies on internal helper utilities to select augmentation suites and to validate keyword usage (e.g., _forbid_unused_kwargs). Ensure these helpers remain compatible with changes to augmentation suites.
+- The function enforces that the excluded augmentations exist in the selected suite to avoid silent misconfigurations.

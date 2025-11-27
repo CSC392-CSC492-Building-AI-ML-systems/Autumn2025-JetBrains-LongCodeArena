@@ -1,0 +1,209 @@
+# How to Generate Pydantic Models from Tortoise Models
+
+This guide explains how to create Pydantic models from Tortoise ORM models using the pydantic integration provided in tortoise.contrib.pydantic. It covers the API, configuration options, and practical usage patterns for common scenarios (excludes, includes, computed fields, recursion, etc.).
+
+## Overview
+
+- The primary entry point is `pydantic_model_creator(cls, ...)`, which builds a Pydantic model class that mirrors the given Tortoise model.
+- You can customize which fields appear, add computed fields, and control recursion and relationship handling via a nested `PydanticMeta` class on the Tortoise model.
+- The generated Pydantic model can be used like any Pydantic model (e.g., `from_orm`, `parse_obj`, validation, etc.).
+
+## Prerequisites
+
+- Python environment with Tortoise ORM and Pydantic installed.
+- A defined Tortoise model (subclass of `tortoise.models.Model`).
+
+## Core Concept: PydanticMeta
+
+To configure generation behavior, define a nested `PydanticMeta` class on your Tortoise model. If a model does not provide this, sensible defaults from `PydanticMeta` are used.
+
+Possible options (as used by the generator):
+
+- `include: Tuple[str, ...]`  
+  Only include fields listed here in the generated Pydantic model. If empty (default), all fields are considered.
+
+- `exclude: Tuple[str, ...]`  
+  Exclude specified fields from the generated Pydantic model.
+
+- `computed: Tuple[str, ...]`  
+  Include computed fields (names of methods on the Tortoise model that return values) in the Pydantic model.
+
+- `backward_relations: bool`  
+  Use backward relations without annotations. This can be convenient but may produce large models if relationships are dense.
+
+- `max_recursion: int`  
+  Maximum allowed recursion depth when expanding related models.
+
+- `allow_cycles: bool`  
+  Allow cycles in recursion (use with care; can produce huge structures).
+
+- `exclude_raw_fields: bool`  
+  Exclude raw fields (e.g., fields with `_id` suffixes) from related models.
+
+- `sort_alphabetically: bool`  
+  Sort fields alphabetically in the generated Pydantic model. If `False`, fields retain their declaration order.
+
+Example:
+```python
+class User(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=100)
+    password = fields.CharField(max_length=128)
+    # ... relations ...
+
+    class PydanticMeta:
+        exclude = ("password",)
+        computed = ("full_name",)
+        max_recursion = 2
+        sort_alphabetically = True
+```
+
+## Generating Pydantic Models: Step-by-Step
+
+1. Import the generator:
+   - `from tortoise.contrib.pydantic.base import PydanticModel`
+   - `from tortoise.contrib.pydantic.utils import get_annotations` (used internally by the generator)
+
+2. Call the generator with your model class:
+   - `MyPydanticModel = pydantic_model_creator(MyTortoiseModel)`
+
+3. Use the generated Pydantic model just like any Pydantic model:
+   - `instance = await MyTortoiseModel.get(id=1)`
+   - `pydantic_instance = MyPydanticModel.from_orm(instance)`
+
+Notes:
+- If you pass non-default options (e.g., `include`, `exclude`, `computed`), the generator appends a short hash suffix to the resulting Pydantic model’s class name to keep each configuration distinct.
+- You can generate multiple distinct Pydantic models from the same Tortoise model by varying `exclude`, `include`, `computed`, or recursion-related options.
+
+## Practical Examples
+
+### Example 1: Basic Model (Exclude Sensitive Fields)
+
+Tortoise model:
+```python
+from tortoise import fields
+from tortoise.models import Model
+
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=50)
+    email = fields.CharField(max_length=100)
+    password = fields.CharField(max_length=128)
+```
+
+Generate a Pydantic model excluding the password:
+```python
+from tortoise.contrib.pydantic import pydantic_model_creator
+
+UserPydantic = pydantic_model_creator(User)
+
+# Usage
+user = await User.get(id=1)
+user_pydantic = UserPydantic.from_orm(user)
+```
+
+### Example 2: Include Computed Fields
+
+Suppose `User` has a computed method:
+```python
+class User(Model):
+    id = fields.IntField(pk=True)
+    first_name = fields.CharField(max_length=50)
+    last_name = fields.CharField(max_length=50)
+
+    def full_name(self) -> str:
+        return f"{self.first_name} {self.last_name}"
+```
+
+Generate a model that includes the computed field:
+```python
+class UserPydanticComputed(UserPydantic):  # optional alias naming
+    class PydanticMeta:
+        computed = ("full_name",)
+
+UserPydantic = pydantic_model_creator(User)
+
+# Usage
+user = await User.get(id=1)
+user_pydantic = UserPydantic.from_orm(user)
+```
+
+### Example 3: Nested Relations and Recursion Control
+
+A self-referential model (e.g., a Comment with parent/child relationships) can lead to deep recursion. Control it via `max_recursion` and `allow_cycles`.
+
+```python
+class Comment(Model):
+    id = fields.IntField(pk=True)
+    text = fields.TextField()
+    parent = fields.ForeignKeyField("models.Comment", null=True, related_name="replies")
+
+    class PydanticMeta:
+        max_recursion = 2
+        allow_cycles = False
+```
+
+```python
+CommentPydantic = pydantic_model_creator(Comment)
+
+comment = await Comment.get(id=123)
+pp = CommentPydantic.from_orm(comment)
+```
+
+### Example 4: Backward Relations and Sorting
+
+If you want to include backward relations and prefer alphabetical order:
+```python
+class Post(Model):
+    id = fields.IntField(pk=True)
+    title = fields.CharField(max_length=200)
+
+    class PydanticMeta:
+        backward_relations = True
+        sort_alphabetically = True
+```
+
+```python
+PostPydantic = pydantic_model_creator(Post)
+```
+
+## API Reference (Key Arguments)
+
+- `pydantic_model_creator(cls, *, name=None, exclude=(), include=(), computed=(), allow_cycles=None, sort_alphabetically=None, _stack=(), exclude_readonly=False) -> Type[PydanticModel]`
+
+  - `cls`: Tortoise ORM model to wrap.
+  - `name`: Optional explicit name for the generated Pydantic model.
+  - `exclude`: Fields to exclude from the Pydantic model.
+  - `include`: Fields to explicitly include in the Pydantic model.
+  - `computed`: Names of computed fields to include.
+  - `allow_cycles`: Allow cycles in recursion (default is based on usage; use with caution).
+  - `sort_alphabetically`: Sort fields alphabetically in the Pydantic model.
+  - `_stack`: Internal recursion tracking used to prevent infinite expansion.
+  - `exclude_readonly`: Build a subset model that excludes readonly fields.
+
+- Helper (internal): `_pydantic_recursion_protector(...)`  
+  Used to protect against cyclic generation of models when traversing relations. Not typically called directly by user code.
+
+- Internal cache/index: `_MODEL_INDEX`  
+  Used to cache generated Pydantic models for reuse with identical configuration.
+
+## Best Practices
+
+- Use `exclude` to quickly remove sensitive or non-API fields (e.g., `password`, `token`).
+- Use `computed` for derived values without storing them in the database.
+- Use `max_recursion` and `allow_cycles` to safely navigate recursive relationships.
+- When generating multiple variants from the same Tortoise model, provide distinct `exclude/include/computed` configurations to avoid class name collisions (the generator appends a hash suffix when non-default options are used).
+- Prefer `sort_alphabetically=True` for stable, predictable field order in generated models.
+
+## Troubleshooting
+
+- If you see unexpected missing fields, verify your `PydanticMeta` configuration and ensure fields exist on the Tortoise model.
+- Large or deeply nested relations can blow up memory usage; reduce `max_recursion`, or selectively use `include`/`exclude`.
+- If you rely on computed fields, ensure the corresponding methods exist on the Tortoise model and return serializable values.
+
+## Related Resources
+
+- Pydantic models usage: https://pydantic-docs.helpmanual.io/usage/models/
+- Tortoise ORM: https://tortoise-orm.readthedocs.io/
+
+If you need a tailored example (specific model definitions and usage), share your Tortoise models and I’ll provide concrete code snippets.

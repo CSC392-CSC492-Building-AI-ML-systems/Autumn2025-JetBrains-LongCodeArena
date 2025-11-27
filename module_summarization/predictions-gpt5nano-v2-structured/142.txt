@@ -1,0 +1,248 @@
+Delayed API
+===========
+
+This document describes the dask.delayed interface, including the Delayed type and the delayed function used to build lazy task graphs.
+
+Overview
+--------
+
+dask.delayed provides a lazy computation model: you wrap values and functions in Delayed objects to construct a task graph without executing until you explicitly request a result. The resulting graph can be executed with a scheduler (by default, a thread pool or any configured scheduler).
+
+Key concepts
+- Delayed: A lightweight object that represents a single task or a composition of tasks. It is lazy and carries a key and a graph describing its computation.
+- delayed: A function (and decorator) used to create Delayed objects and to enable function composition with delayed values.
+- Graph and keys: Delayed objects carry a dask graph and keys that uniquely identify the computation. These are used by the scheduler to execute the task graph.
+- Collections support: Delayed objects can be embedded inside lists, tuples, dicts, sets, and dataclasses; dask.delayed provides helpers to normalize and extract the underlying task graphs from nested structures.
+
+Creating delayed values
+-----------------------
+
+The primary entry point is the delayed function, which can be used as a decorator or as a factory to wrap values and functions into Delayed objects.
+
+Examples
+- As a decorator to create a delayed function:
+
+  .. code-block:: python
+
+     from dask import delayed
+
+     @delayed
+     def inc(x):
+         return x + 1
+
+     a = inc(1)  # Delayed object representing inc(1)
+
+     result = a.compute()  # 2
+
+- As a factory to wrap a value:
+
+  .. code-block:: python
+
+     from dask import delayed
+
+     x = delayed(1)            # a Delayed object representing the constant 1
+     y = x + 2                 # Delayed object representing 1 + 2
+     assert y.compute() == 3
+
+- Creating a Delayed from a function and arguments:
+
+  .. code-block:: python
+
+     from dask import delayed
+
+     @delayed
+     def add(x, y):
+         return x + y
+
+     a = delayed(1)
+     b = delayed(2)
+     c = add(a, b)             # Delayed object for add(1, 2)
+     c.compute()                 # 3
+
+Building graphs with delayed objects
+------------------------------------
+
+Delayed objects support Python operator overloading and function application to compose complex graphs.
+
+Examples
+- Arithmetic composition:
+
+  .. code-block:: python
+
+     from dask import delayed
+
+     @delayed
+     def mul(x, y):
+         return x * y
+
+     a = delayed(3)
+     b = delayed(4)
+     c = mul(a, b)             # Represents 3 * 4
+     d = mul(c, 2)             # Represents (3 * 4) * 2
+     d.compute()                 # 24
+
+- Working with standard Python functions:
+
+  .. code-block:: python
+
+     @delayed
+     def sum3(x, y, z):
+         return x + y + z
+
+     x = delayed(1)
+     y = delayed(2)
+     z = delayed(3)
+     s = sum3(x, y, z)
+     s.compute()                 # 6
+
+Working with collections
+------------------------
+
+You can embed Delayed objects inside common Python collections. The helper utilities unpack_collections and related logic normalize the input for execution.
+
+Examples
+- List of delayed values:
+
+  .. code-block:: python
+
+     from dask import delayed
+
+     a = delayed(1)
+     b = delayed(2)
+     coll = [a, b, 3]
+     # coll represents a structure that includes delayed values
+     # The graph will be computed when needed
+
+- Dict of delayed values:
+
+  .. code-block:: python
+
+     d = { 'x': a, 'y': b }
+     # d represents a dictionary with delayed values
+
+- Nested structures and dataclasses:
+
+  .. code-block:: python
+
+     from dataclasses import dataclass
+
+     @dataclass
+     class Point:
+         x: int
+         y: int
+
+     p = Point(1, 2)
+     p_del = delayed(p)
+     # unpack_collections will normalize and extract sub-graphs
+
+Internal helpers (reference)
+----------------------------
+
+The following helpers are used internally to manage and normalize delayed graphs. They are exposed in the module for advanced usage and internal consistency.
+
+- unzip(ls, nout):
+  Unzip a list of lists into nout outputs. Useful when processing nested collections.
+
+- finalize(collection):
+  Create a finalizing step for a dask collection by applying a finalizer to all its keys. Returns a Delayed object representing the finalization.
+
+- unpack_collections(expr):
+  Normalize a Python object containing Delayed values, literals, and nested collections. This function:
+  - Replaces Delayed values with their keys
+  - Converts literals to scheduler-friendly forms
+  - Extracts and merges graphs from enclosed values
+  Returns a task descriptor and a tuple of any sub-collections found.
+
+  Note: This function is central to building task graphs from mixed structures and is preferred over older helpers in many cases.
+
+- to_task_dask(expr):
+  Deprecated: Normalize an object and merge sub-graphs, returning a task and a merged graph. Use unpack_collections instead. This function emits a deprecation warning.
+
+  Example of deprecation notice:
+  The dask.delayed.to_dask_dask function has been Deprecated in favor of unpack_collections
+
+Computing and scheduling
+------------------------
+
+Delayed objects can be executed using compute() or by using the dask scheduler machinery.
+
+- compute(): Evaluate the delayed computation and return the result. Accepts optional scheduler arguments to choose or customize the execution backend.
+
+- persist(): Optionally persist the delayed result in memory across the cluster/scheduler, if supported by the scheduler.
+
+- Scheduling and keys:
+  - Each Delayed object carries a unique key (the _key) used to identify tasks in the graph.
+  - The underlying graph is stored in the dask attribute (the graph may be a dict-based LowLevelGraph or a HighLevelGraph).
+
+Examples
+- Computing with a specific scheduler:
+
+  .. code-block:: python
+
+     from dask import delayed
+
+     @delayed
+     def f(x):
+         return x + 1
+
+     x = delayed(5)
+     y = f(x)
+     result = y.compute(get=dask.threaded.get)  # example custom scheduler
+
+- Inspecting the graph:
+
+  .. code-block:: python
+
+     g = y.dask  # or y.__dask_graph__()
+     keys = y.__dask_keys__()
+
+API reference (quick look)
+--------------------------
+
+- Delayed: The core class representing a lazy task or composition of tasks. Instances carry a key and a graph and support operations to build new delayed tasks.
+
+- delayed: Function/decorator to create Delayed objects from values or to decorate functions for delayed execution.
+
+- unzip: Helper to unzip a list of iterables.
+
+- finalize: Helper to append a finalization step to a collection’s graph.
+
+- unpack_collections: Core normalization helper for converting nested structures containing Delayed values into a runnable task and a merged graph.
+
+- to_task_dask: Deprecated helper that previously performed similar normalization and merging; use unpack_collections instead.
+
+Examples recap
+--------------
+
+- Simple delayed value and arithmetic:
+
+  .. code-block:: python
+
+     from dask import delayed
+
+     @delayed
+     def add(x, y):
+         return x + y
+
+     a = add(1, 2)  # Delayed object
+     b = a + 3       # Further delayed computation
+     b.compute()       # 6
+
+- Delayed inside a collection:
+
+  .. code-block:: python
+
+     from dask import delayed
+
+     x = delayed(1)
+     y = delayed(2)
+     data = [x, y, 3]
+     total = sum(data)  # builds a graph with delayed components
+     total.compute()      # 6
+
+Note on deprecation
+-------------------
+
+The to_task_dask function is deprecated in favor of unpack_collections. Prefer unpack_collections for modern, robust graph normalization.
+
+For more details, refer to the module source where Delayed and delayed are defined, along with the helpers: unzip, finalize, unpack_collections, and to_task_dask.

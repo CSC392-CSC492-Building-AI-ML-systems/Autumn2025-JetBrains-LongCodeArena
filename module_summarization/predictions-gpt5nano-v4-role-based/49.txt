@@ -1,0 +1,154 @@
+Duration
+--------
+
+Overview
+--------
+This module provides core utilities for right-censored survival analysis and cumulative incidence estimation. It includes internal helpers for computing the survival function (and its standard error) for a single group, for computing cumulative incidence functions (CIF) across multiple causes, a validation utility for inputs, and a public class CumIncidenceRight intended for CIF estimation with optional inference. The implementation supports optional frequency weights and left-truncation via entry times, and it offers two standard error formulas depending on the weighting configuration.
+
+Public API
+-----------
+
+Function: _calc_survfunc_right(time, status, weights=None, entry=None, compress=True, retall=True)
+- Purpose: Compute the survival function and (optionally) its standard error for a single group.
+- Parameters:
+  - time: array_like
+    Event or censoring times.
+  - status: array_like
+    Integer codes where 0 indicates censored, and values >= 1 indicate observed events.
+  - weights: array_like, optional
+    Frequency weights for each subject. If provided, standard errors are computed using a weighting-based formula.
+  - entry: array_like, optional
+    Entry (left-truncation) times. If provided, risk sets are adjusted accordingly.
+  - compress: bool, default True
+    If True, retain only times at which at least one event occurred.
+  - retall: bool, default True
+    If True, return (sp, se, utime, rtime, n, d). If False, return (sp, utime, rtime, n, d).
+- Returns:
+  - If retall is True: (sp, se, utime, rtime, n, d)
+    - sp: survival function estimates at unique event times
+    - se: standard errors of the survival function
+    - utime: unique event times (untruncated)
+    - rtime: rank/indices of observation times corresponding to utime
+    - n: size of the risk set just prior to each event time
+    - d: number of deaths at each unique time
+  - If retall is False: (sp, utime, rtime, n, d)
+
+Notes:
+- sp is computed as sp = 1 - d / n, with numerical safeguards (clip and log-transform for SE calculation).
+- Greenwood’s formula is used when weights is None; a distinct formula (Tsiatis, 1981) is used when weights are provided.
+- The function is intended as an internal helper; it is not a drop-in public API for end users without understanding the surrounding machinery.
+
+Function: _calc_incidence_right(time, status, weights=None)
+- Purpose: Compute cumulative incidence functions (CIF) for all causes and, where applicable, their standard errors.
+- Parameters:
+  - time: array_like
+  - status: array_like
+    Codes where 0 indicates censored and 1..J indicate cause-specific events.
+  - weights: array_like, optional
+    Frequency weights. If provided, the function returns CIFs without standard errors.
+- Returns:
+  - ip: list of arrays
+    CIFs for each cause (one array per cause). The number of causes corresponds to the maximum status code.
+  - se: list of arrays or None
+    Standard errors for CIFs. If weights are provided, this is None.
+  - utime: array_like
+    Unique event times used for CIF estimation.
+- Notes:
+  - Uses the all-cause survival function computed via _calc_survfunc_right as input.
+  - When weights are None, a CIF-specific variance propagation is performed to yield SEs.
+
+Function: _checkargs(time, status, entry, freq_weights, exog)
+- Purpose: Validate input arguments and raise informative errors on invalid configurations.
+- Parameters:
+  - time: array_like
+  - status: array_like
+  - entry: array_like, optional
+  - freq_weights: array_like, optional
+  - exog: array_like, optional
+- Behavior:
+  - Ensures time and status have the same length.
+  - If entry is provided, ensures its length matches time and that entry < time for all observations.
+  - If freq_weights is provided, ensures its length matches time.
+  - If exog is provided, ensures its row count matches the length of time.
+- Returns: None (raises ValueError on invalid input).
+
+Class: CumIncidenceRight
+- Purpose: Estimation and inference for a cumulative incidence function (CIF) under right censoring.
+- Description (summary of available docstring):
+  - For J = 1, 2, ..., the CIF for cause j is I(t, j) = P(T <= t and J = j).
+  - Supports right censoring; if frequency weights are provided, only the point estimate is returned (no SE).
+  - Parameters (from the class docstring snippet):
+    - time: array_like
+      Times of censoring or events.
+    - status: array_like
+      Coding where status >= 1 indicates an event of the corresponding type; status = 0 indicates censoring.
+    - title: string, optional
+      Title used for plotting and summary output.
+    - freq_weights: array_like, optional
+      Frequency weights for observations.
+    - exog: array_like, optional
+      Additional covariate information used to account for potential violations of independent censoring.
+    - bw_factor: float
+      Bandwidth factor for kernel-based estimation (used if exog is provided).
+    - dimred: bool
+      If True, proportional hazards modeling or dimensionality reduction approaches may be engaged (details depend on implementation).
+- Returns / Behavior:
+  - This class provides CIF estimation and inference capabilities for right-censored data with optional weighting and covariate adjustment. The exact public methods (e.g., fit, predict, summarize) are not shown in the excerpt, but the class is documented as the primary public-facing API for CIF in this module.
+- Notes:
+  - The provided docstring indicates intended usage for CIF with optional adjustment for dependent censoring via exog and kernel-based estimation when exog is present.
+
+Usage Examples
+--------------
+
+Basic usage with internal helpers (illustrative, for developers):
+- Survival function for a single group
+  - Example:
+    time = [5, 8, 12, 3, 7]
+    status = [1, 0, 2, 1, 0]  # 0 = censored; 1..J = event types
+    sp, se, utime, rtime, n, d = _calc_survfunc_right(time, status)
+- Cumulative incidence function for all causes
+  - Example:
+    ip, se_ci, utime = _calc_incidence_right(time, status)
+- Input validation
+  - Example:
+    _checkargs(time, status, entry=None, freq_weights=None, exog=None)
+
+Public API notes
+----------------
+- The underscore-prefixed functions (_calc_survfunc_right, _calc_incidence_right, and _checkargs) are internal helpers intended for use by higher-level classes or for advanced usage. They are documented here for completeness and to aid developers who need to understand the underlying computations.
+- CumIncidenceRight is the primary public estimator for CIF in this module. Its complete usage (including method names and typical workflows) is described by its class docstring; the excerpt provided primarily documents the constructor signature and intended purpose.
+
+Dependencies
+------------
+- numpy
+- pandas
+- scipy (scipy.stats.distributions: chi2, norm)
+- statsmodels (statsmodels.graphics.utils)
+
+Notes for developers
+--------------------
+- The implementation uses non-trivial survival analysis logic, including risk-set calculations, left-truncation handling via entry times, and two SE formulas depending on weighting.
+- If extending or integrating this module, ensure that internal helpers remain consistent with the public CIF estimator and that input validation remains robust to prevent misleading outputs.
+- The presence of an internal and public API implies careful versioning and compatibility considerations when exposing additional features or refactoring.
+
+Example code blocks
+-------------------
+Here are representative usage snippets to illustrate how the functions behave with simple inputs:
+
+.. code-block:: python
+
+    import numpy as np
+
+    time = np.array([5, 8, 12, 3, 7])
+    status = np.array([1, 0, 2, 1, 0])
+
+    # Survival function for a single group
+    sp, se, utime, rtime, n, d = _calc_survfunc_right(time, status)
+
+    # Cumulative incidence function for all causes
+    ip, se_ci, utime = _calc_incidence_right(time, status)
+
+    # Argument validation
+    _checkargs(time, status, entry=None, freq_weights=None, exog=None)
+
+This documentation focuses on the module-level functionality and the core computations implemented in the provided code. For a complete end-user experience, refer to the higher-level CIF estimator usage if additional public methods are available in the full implementation.

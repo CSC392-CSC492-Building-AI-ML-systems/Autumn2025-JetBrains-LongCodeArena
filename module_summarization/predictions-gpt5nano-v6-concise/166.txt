@@ -1,0 +1,187 @@
+filenode.rst
+============= 
+filenode - simulating a filesystem with PyTables
+------------------------------------------------
+
+Overview
+--------
+filenode provides a file-like interface that stores data inside a PyTables
+HDF5 file as a PyTables node. It gives Python code the ability to read and
+write data with the semantics of a regular binary file, but the data are kept
+inside the PyTables file structure. This is useful when you want to simulate a
+filesystem-like API for large binary blobs while benefiting from PyTables’
+efficient storage and metadata capabilities.
+
+Key characteristics
+- File interface inside PyTables: new_node() creates a brand-new file node; open_node() opens an existing one.
+- Read access is always available; write access is granted only in modes that allow appending.
+- Currently limited to binary I/O.
+- Fully io-compatible: rewritten in version 3.0 to comply with Python’s io interfaces.
+- Data is stored using PyTables atoms; the internal representation is versioned to allow evolution.
+
+Concepts and terminology
+- NODE_TYPE: A system attribute that identifies the node as a filenode (value: 'file').
+- NODE_TYPE_VERSION: A version number (supported: 1, 2) to distinguish internal storage formats.
+- RawPyTablesIO: The core file-like class that implements an io.RawIOBase-compatible interface on top of a PyTables node.
+- nrows: The current logical size (in bytes) of the filenode data as seen inside the PyTables node.
+- _v_file: Underlying PyTables file handle used to access and close the host file.
+- _node: The PyTables node backing the filenode.
+
+API reference
+-------------
+
+Public objects
+- NodeType
+  - Description: The node system attribute value indicating a filenode.
+  - Value: 'file'
+- NodeTypeVersions
+  - Description: Supported version numbers for NODE_TYPE_VERSION.
+  - Values: [1, 2]
+- RawPyTablesIO
+  - Description: A binary I/O base class providing a file-like interface for PyTables filenodes.
+  - Inheritance: io.RawIOBase
+  - Key responsibilities:
+    - Validate node and attributes, expose mode, position, and version information.
+    - Implement tell(), seek(), seekable(), fileno(), flush(), close(), truncate(), readable(), writable(), readinto(), and related methods.
+    - Manage append-only writes (write operations are allowed only in write-enabled modes).
+    - Provide binary read access via the underlying PyTables node (read is performed with node.read()).
+  - Important attributes:
+    - _node: The PyTables node backing the filenode.
+    - _mode: Open mode for the filenode (e.g. 'r', 'w', 'a', '+', etc.).
+    - _pos: Current byte position in the filenode.
+    - _version: NODE_TYPE_VERSION read from the node’s attributes.
+    - _vshape: A function mapping length to a shape, dependent on version (see _size_to_shape).
+    - _vtype: Data type (dtype) of the underlying PyTables atom.
+  - Important methods (high level):
+    - tell(): Return current position.
+    - seek(pos, whence): Change current position according to whence.
+    - readinto(b): Read up to len(b) bytes into the provided buffer.
+    - truncate(pos=None): Grow the node if needed; only growth is supported for filenodes.
+    - flush(): Flush write buffers to the host PyTables file.
+    - close(): Release resources and mark the object as closed.
+  - Notes:
+    - The class is designed to be used through new_node/open_node entry points, and to integrate cleanly with Python’s I/O ecosystem.
+    - The underlying storage layout is versioned; see NODE_TYPE_VERSION and _size_to_shape for how byte lengths map to conceptual shapes.
+
+- new_node()
+  - Description: Create a brand-new filenode inside a PyTables file for read/write access.
+  - Returns: A file-like object (RawPyTablesIO-based) that supports binary I/O and can be wrapped or used directly with Python I/O abstractions.
+  - Semantics: The new node starts empty and grows as data is appended. Write access is controlled by the mode used to open the filenode.
+
+- open_node()
+  - Description: Open an existing filenode inside a PyTables file for read-only or read-write access.
+  - Returns: A file-like object (RawPyTablesIO-based) bound to the existing node.
+  - Semantics: Read access is always available. Write access depends on the opening mode (append-only writes for growth).
+
+- Usage note
+  - filenode’s API is intended to be used in concert with PyTables’ File objects and the io module. See the filenode_usersguide for detailed usage scenarios and best practices.
+
+Internal design highlights
+--------------------------
+- Versioning and storage shape
+  - NodeTypeVersions = [1, 2]
+  - _size_to_shape maps a logical length to a storage shape depending on version:
+    - Version 1: shape = (length, 1)
+    - Version 2: shape = (length,)
+  - This design allows evolving the internal representation while preserving compatibility with older nodes.
+
+- IO compatibility
+  - RawPyTablesIO is an io.RawIOBase-derived class to provide a low-level binary IO interface with seek/tell and readinto capabilities.
+  - The module was rewritten in version 3.0 to be fully compliant with the Python io interfaces.
+
+- Data access and growth
+  - Reading uses the node.read(start, stop) method to fetch data in the requested byte range.
+  - Growth/truncation is implemented via a dedicated mechanism to append zeros when extending a filenode; currently, truncation to a smaller size is not allowed (except to enforce append semantics), and growth is the primary supported operation.
+  - The filenode exposes the host PyTables file via _v_file, with fileno() delegating to the underlying file descriptor when available.
+
+- Write semantics
+  - Write operations are allowed only when the filenode is opened in a mode that permits writing (e.g., modes including 'w', 'a', or '+').
+  - The current design emphasizes append behavior; in-place overwriting of existing data is not supported by default.
+
+Getting started
+---------------
+
+Prerequisites
+- PyTables installed and available as tb (import tables as tb).
+- A PyTables File context (tb.File or tb.open_file) to host the filenode.
+
+Common workflow (high-level)
+1. Open a PyTables file that will contain filenodes:
+   - with tb.File('mydb.h5', 'a') as f:
+       ...
+2. Create a new filenode inside the PyTables file:
+   - from filenode import new_node
+   - fnode = new_node(f)  # mode defaults to an appropriate write-enabled mode
+   - The returned object supports binary I/O (read, write, seek, etc.) via the standard Python IO patterns.
+3. Read or write data through the filenode:
+   - fnode.write(b'some binary data')  # if mode allows writing
+   - fnode.seek(0)
+   - data = fnode.read(1024)
+4. Open an existing filenode:
+   - from filenode import open_node
+   - fnode = open_node(f, mode='r+')  # read-write if allowed
+   - Use the filenode as a normal file-like object.
+5. Close the filenode and the PyTables file when done.
+
+Examples
+--------
+
+Example 1: Create a new filenode and append data, then read back
+.. code-block:: python
+
+   import tables as tb
+   from filenode import new_node
+
+   with tb.File('example.h5', 'a') as f:
+       # Create a new filenode inside the PyTables file
+       with new_node(f, mode='a+b') as fn:
+           # Write data
+           fn.write(b'Hello, filenode!')
+           # Move to beginning and read back
+           fn.seek(0)
+           buf = fn.read(len(b'Hello, filenode!'))
+           assert buf == b'Hello, filenode!'
+
+Example 2: Open an existing filenode for reading only
+.. code-block:: python
+
+   import tables as tb
+   from filenode import open_node
+
+   with tb.File('example.h5', 'r') as f:
+       with open_node(f, mode='r') as fn:
+           # Read data in chunks
+           chunk = fn.read(1024)
+           # Process chunk...
+
+Example 3: Seek and partial read using the filenode
+.. code-block:: python
+
+   import tables as tb
+   from filenode import open_node
+
+   with tb.File('example.h5', 'r') as f:
+       with open_node(f, mode='r') as fn:
+           fn.seek(10)
+           part = fn.read(20)
+           # Use the 20-byte portion starting at byte 10
+
+Notes and caveats
+-----------------
+- Binary I/O only: filenode is designed for binary data. Text-mode I/O is not provided.
+- Append-only writes: In many scenarios, writes are append-only to avoid overwriting existing data. Use truncate to grow when needed; shrinking is generally unsupported.
+- IO compatibility: RawPyTablesIO is designed to be used like any other binary stream (potentially wrapped by io.BufferedReader/Writer for convenience).
+- Versioning: NODE_TYPE_VERSION controls the internal storage layout. The code supports versions 1 and 2; the _size_to_shape mapping ensures correct interpretation of byte lengths for each version.
+- Documentation: See the filenode_usersguide for end-to-end usage patterns and advanced scenarios.
+
+Migration and compatibility
+---------------------------
+- Version 3.0: The module was rewritten to align with Python’s io interfaces. If upgrading from an older filenode version, review changes in how modes are expressed and how the IO interface is consumed.
+- NodeType and NODE_TYPE_VERSION attributes must be preserved to ensure backward compatibility with existing filenodes.
+
+See also
+---------
+- filenode_usersguide: Detailed usage and advanced scenarios (refer to the cross-reference in the codebase).
+- PyTables documentation: For information about the host file (.h5) interactions and how filenodes are stored within PyTables.
+
+End of documentation.

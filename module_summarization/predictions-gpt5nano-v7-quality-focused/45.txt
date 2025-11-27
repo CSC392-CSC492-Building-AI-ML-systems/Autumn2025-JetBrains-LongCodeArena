@@ -1,0 +1,156 @@
+log.rst
+
+Module overview
+- This module implements application-wide logging with support for console, file, and syslog handlers.
+- It introduces a custom log level NOTICE (value 25) and provides a central Logging class that wires up logging according to configuration.
+
+Constants
+- LOG_NOTICE
+  - Value: 25
+  - Description: Info log level visible in non-verbose mode. Not intended for warnings or errors.
+  - The constant is registered in the logging system with the name "NOTICE" via logging.addLevelName.
+
+Global logger
+- L
+  - A module-level logger obtained by logging.getLogger(__name__).
+  - Used for internal logging within this module.
+
+Name-to-level mapping
+- _NAME_TO_LEVEL
+  - A dictionary that maps string level names to numeric levels.
+  - Examples:
+    - "NOTSET", "NOT SET", "NOT_SET" -> logging.NOTSET
+    - "DEBUG" -> logging.DEBUG
+    - "INFO" -> logging.INFO
+    - "NOTICE", "LOG_NOTICE", "LOG NOTICE" -> LOG_NOTICE
+    - "WARNING", "WARN" -> logging.WARNING
+    - "ERROR" -> logging.ERROR
+    - "FATAL", "CRITICAL" -> logging.CRITICAL
+
+Logging class
+- Class purpose
+  - Configures the root logger with console, file, and syslog handlers as dictated by runtime configuration.
+  - Uses asynchronous and timer-based mechanisms for log rotation and syslog delivery.
+
+- Constructor: Logging(app)
+  - Parameter
+    - app: An application object that provides an event loop (app.Loop) and likely other lifecycle hooks.
+  - Behavior
+    - Retrieves the absolute root logger via logging.getLogger().
+    - Initializes internal handler references to None: ConsoleHandler, FileHandler, SyslogHandler.
+    - If the root logger currently has no handlers, the constructor proceeds to configure logging components in this order:
+      1. Console logging
+         - If stdout is a TTY (os.isatty(sys.stdout.fileno())) or the environment variable ASABFORCECONSOLE is set (not "0"), the internal method _configure_console_logging() is invoked to set up console output.
+      2. File logging
+         - Reads file_path from Config["logging:file"]["path"].
+         - If a non-empty path is provided:
+           - Ensures the target directory exists (creates it if needed).
+           - Creates a RotatingFileHandler with:
+             - path = file_path
+             - backupCount = Config.getint("logging:file", "backup_count")
+             - maxBytes = Config.getint("logging:file", "backup_max_bytes")
+           - Sets the file handler level to DEBUG.
+           - Sets the formatter to StructuredDataFormatter with:
+             - fmt = Config["logging:file"]["format"]
+             - datefmt = Config["logging:file"]["datefmt"]
+             - sd_id = Config["logging"]["sd_id"]
+           - Attaches the file handler to the root logger.
+           - Rotation scheduling (optional):
+             - Reads rotate_every from Config.get("logging:file", "rotate_every").
+             - If rotate_every is non-empty, it must match the pattern ^([0-9]+)([dMHs])$.
+               - Parses the numeric interval i and unit u.
+               - Converts the interval to seconds (H: hours, M: minutes, d: days; s is seconds).
+               - Schedules a timer that periodically invokes _on_tick_rotate_check to perform rotation checks.
+               - The timer is created via a small asynchronous schedule function and started using i seconds.
+             - If the pattern is invalid, an error is logged.
+      3. Syslog logging
+         - If Config["logging:syslog"].getboolean("enabled") is true:
+           - Reads the address from Config["logging:syslog"]["address"].
+           - If address starts with '/', uses a UNIX domain socket (AF_UNIX, SOCK_DGRAM) delivered via AsyncIOHandler.
+           - Otherwise, parses the address as a URL and creates an AsyncIOHandler based on the scheme:
+             - tcp: AF_INET, SOCK_STREAM
+               - Host: hostname or "localhost"
+               - Port: port or logging.handlers.SYSLOG_UDP_PORT
+             - udp: AF_INET, SOCK_DGRAM
+               - Host and port as above
+             - unix-connect: AF_UNIX, SOCK_STREAM, path
+             - unix-sendto: AF_UNIX, SOCK_DGRAM, path
+             - Other schemes: log a warning and abandon syslog address
+           - If a SyslogHandler is created:
+             - Set its level to DEBUG.
+             - Choose a formatter based on Config["logging:syslog"]["format"]:
+               - 'm': MacOSXSyslogFormatter(sd_id=Config["logging"]["sd_id"])
+               - '5': SyslogRFC5424Formatter(sd_id=Config["logging"]["sd_id"])
+               - '5micro': SyslogRFC5424microFormatter(sd_id=Config["logging"]["sd_id"])
+               - otherwise: SyslogRFC3164Formatter(sd_id=Config["logging"]["sd_id"])
+             - Attach the syslog handler to the root logger.
+- Internal methods referenced by Logging
+  - _configure_console_logging()
+    - Sets up console-based logging (not shown in the excerpt but invoked by __init__).
+  - _on_tick_rotate_check
+    - Callback used by the rotation timer to perform log rotation checks (not shown in the excerpt but referenced by rotation scheduling).
+- Dependencies and integration
+  - Config: Central configuration object used to read logging settings.
+    - logging:file.path
+    - logging:file.backup_count
+    - logging:file.backup_max_bytes
+    - logging:file.format
+    - logging:file.datefmt
+    - logging:file.rotate_every
+    - logging:syslog.enabled
+    - logging:syslog.address
+    - logging:syslog.format
+    - logging.sd_id
+  - StructuredDataFormatter: Formatter used for file logging.
+  - MacOSXSyslogFormatter, SyslogRFC5424Formatter, SyslogRFC5424microFormatter, SyslogRFC3164Formatter: Syslog formatters selected based on configuration.
+  - AsyncIOHandler: Handler that integrates with the asyncio event loop for syslog delivery.
+  - Timer: Used to schedule periodic tasks such as log rotation checks.
+  - running_in_container: Imported for potential container-related handling (not shown in excerpt).
+
+Usage examples
+- Basic instantiation
+  - app is an application object that exposes an event loop (app.Loop).
+  - logger = Logging(app)
+- Logging a message at NOTICE level
+  - logger uses the custom LOG_NOTICE level; to log a notice:
+    - logger.RootLogger.log(LOG_NOTICE, "Custom notice message")
+  - Typically, use a module logger with the standard Python logging API, leveraging the custom level when needed.
+
+Configuration examples (illustrative)
+- File logging only
+  - logging:file:
+      path: /var/log/myapp/app.log
+      backup_count: 5
+      backup_max_bytes: 10485760
+      format: "%(asctime)s %(levelname)s %(name)s: %(message)s"
+      datefmt: "%Y-%m-%d %H:%M:%S"
+  - logging:syslog.enabled: false
+- Syslog over UDP with RFC 5424 format
+  - logging:file: (optional, for file logging)
+  - logging:syslog:
+      enabled: true
+      address: "udp://syslog.example.com:514"
+      format: "5"
+  - logging:sd_id: "myapp"
+
+Notes
+- The module creates parent directories for the log file if needed.
+- Rotation scheduling is optional and relies on the rotate_every configuration value.
+- If the syslog address is invalid or unsupported, the code logs a warning and does not attach a syslog handler.
+- The implementation relies on external formatters and handlers (StructuredDataFormatter, AsyncIOHandler, and various Syslog formatters) that must be available in the runtime environment.
+
+Code references (for quick lookup)
+- LOG_NOTICE constant and its usage
+- _NAME_TO_LEVEL mapping
+- L module logger
+- Logging class and its __init__ method
+- Internal helper methods: _configure_console_logging, _on_tick_rotate_check
+- External dependencies: Config, Timer, AsyncIOHandler, StructuredDataFormatter, and syslog formatters
+
+Example minimal snippet
+- Initialize logging with an app object:
+  - app = …  # provides app.Loop and lifecycle
+  - log = Logging(app)
+- Log a message at the standard level or at NOTICE level as appropriate:
+  - L.info("Application started")
+  - L.log(LOG_NOTICE, "Running in NOTICE level")

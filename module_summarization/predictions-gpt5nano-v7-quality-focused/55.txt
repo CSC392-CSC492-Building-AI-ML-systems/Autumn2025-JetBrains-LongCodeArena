@@ -1,0 +1,111 @@
+# miscmodels.rst
+
+Description
+-----------
+This module provides robust linear and ARMA modeling utilities that use Student-t distributed errors. The heavier tails of the t distribution offer robustness to outliers and model misspecification compared to Gaussian errors. The implementations are designed as practical examples of maximum likelihood estimation (MLE) using the generic MLE framework in Statsmodels.
+
+Key components
+--------------
+- TLinearModel: Maximum Likelihood Estimation of a linear model with t-distributed errors.
+- TArma: Univariate ARMA model with t-distributed errors.
+
+TLinearModel
+------------
+Overview
+- Implements MLE for a linear model with t-distributed errors.
+- Extends GenericLikelihoodModel; most functionality is generic, while the negative log-likelihood is model-specific.
+- Gradients and Hessians are computed via numerical differentiation.
+- The model includes two extra parameters beyond the regression coefficients: degrees of freedom (df) and a scale parameter. Both can be estimated jointly; there is an option to fix df.
+
+Initialization and parameters
+- The model determines:
+  - k_vars: number of regressors (exog columns)
+  - k_params: total number of parameters
+    - If df is not fixed: k_params = number of exog columns + 2 (df and scale)
+    - If df is fixed: k_params = number of exog columns + 1 (only scale)
+- Extra parameters names are either ['df', 'scale'] or ['scale'] depending on whether df is fixed.
+- Start values:
+  - Start values for the coefficients are based on an OLS fit.
+  - If df is not fixed, a starting df is chosen (default 5 or based on kurtosis if requested).
+  - Scale starts from the OLS scale (square root of the scale measure).
+
+Fixed degrees of freedom (df)
+- You can fix df by setting the attribute fix_df before fitting:
+  - If fix_df is provided, the model estimates only the scale.
+  - If fix_df is False (default), df is estimated along with the coefficients and scale.
+
+Fitting and likelihood
+- The objective is the log-likelihood of a linear model with t-distributed errors.
+- loglike(params) returns the negative of the summed per-observation log-likelihoods (as required by the GenericLikelihoodModel interface).
+- nloglikeobs(params) computes the log-likelihood contributions per observation using the standard Student-t log-pdf formula with location, scale, and df parameters.
+- The scale parameter is constrained to be positive by taking its absolute value.
+- The location is loc = X @ beta, where beta are the regression coefficients.
+
+Prediction
+- predict(params, exog=None) returns the linear predictor using the first p coefficients (where p is the number of exog columns).
+- If exog is provided, it uses those values; otherwise it uses the model’s own exog.
+
+Code sketch
+- Fitting example:
+  - mod = TLinearModel(endog, exog)
+  - res = mod.fit()
+- Predict on new data:
+  - pred = mod.predict(res.params, exog=new_exog)
+
+Notes
+- The log-likelihood is derived from the standard t-distribution. The scale parameter represents a scale for the t distribution, not the standard deviation of the residuals in the Gaussian sense.
+- The implementation uses a straightforward, numerically differentiated gradient/Hessian approach by the generic MLE framework.
+
+References
+- The approach relates to robust statistical modeling using the t distribution, as discussed in:
+  - Lange, Little, and Taylor (1989). Robust Statistical Modeling Using the t Distribution.
+
+TArma
+-----
+Overview
+- Univariate ARMA model with t-distributed errors.
+- Inherits from statsmodels.tsa.arma_mle.Arma, reusing its structure while replacing the error distribution with a t-distribution.
+- The implied error variance is not equal to the scale; for a t-distribution with df and scale, variance is df/(df-2) * scale^2 (for df > 2).
+
+Key features
+- loglike(params) delegates to -nloglikeobs(params).sum(0).
+- nloglikeobs(params) computes per-observation log-likelihood contributions for the t-distributed errors:
+  - Residuals (errorsest) are obtained from the ARMA structure given all parameters except the last two.
+  - df and scale are the last two parameters; scale is taken as abs(scale) to ensure positivity.
+  - The per-observation log-likelihood uses the t-distribution log-pdf with the current residuals scaled by the scale parameter, plus a Jacobian term for the scale.
+
+Fitting
+- The class provides fit_mle(...) for maximum likelihood estimation with configurable order, starting parameters, and optimization settings (default method and tolerances are provided in the signature).
+
+Notes
+- This class focuses on providing a robust alternative to Gaussian-error ARMA models by using a t-distribution for the innovations instead of a normal distribution.
+- The implied variance relationship between scale and the t-distribution is noted in the class docstring and is relevant when interpreting the estimated scale parameter.
+
+Usage examples
+- Linear model with t errors:
+  - from miscmodels import TLinearModel
+  - mod = TLinearModel(endog, exog)
+  - res = mod.fit()
+  - print(res.params)
+  - print(res.summary())
+
+- ARMA model with t errors:
+  - from miscmodels import TArma
+  - arma = TArma(endog, exog, order=(p, d, q))
+  - res = arma.fit_mle(order=(p, d, q))
+  - print(res.params)
+
+See Also
+- GenericLikelihoodModel: base class for models defined via a custom log-likelihood.
+- statsmodels.tsa.arma_mle.Arma: provides ARMA structure for Gaussian errors; TArma adapts it for t-distributed errors.
+- scipy.stats and scipy.special: used to compute the t-distribution log-pdf and related functions.
+
+Code references (high level)
+- TLinearModel
+  - initialize: determines parameters, handles fix_df option, sets up names and start values.
+  - _set_start_params: derives starting values from OLS residuals.
+  - loglike / nloglikeobs: compute the likelihood for t-distributed errors.
+  - predict: compute linear predictor from parameters.
+- TArma
+  - loglike / nloglikeobs: implement t-distributed error likelihood for ARMA residuals.
+  - fit_mle: interface for MLE fitting with configurable optimization settings.

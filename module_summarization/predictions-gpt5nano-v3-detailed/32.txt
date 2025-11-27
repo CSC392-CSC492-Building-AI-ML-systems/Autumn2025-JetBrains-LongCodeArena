@@ -1,0 +1,79 @@
+# w_run: Start/Continue a WEST simulation
+
+Overview
+- w_run is the entry point for starting or continuing a WEST simulation. It wires together the runtime configuration (rc), the chosen work manager, and the core simulation components (sim_manager, data_manager, system, propagator, and we_driver). The command executes the simulation loop either in the master process or in worker processes managed by the work manager.
+
+Key concepts and relationships
+- westpa.rc: Central runtime configuration. Provides helpers to add/parse command-line arguments, process them, and retrieve core drivers (sim_manager, system, data_manager, propagator, we_driver).
+- work_managers.environment: Handles work-manager related command-line arguments. Used to configure distributed or multi-process execution.
+- make_work_manager(): Factory that creates a work manager instance based on runtime configuration.
+- work_manager: Orchestrates the master/worker execution model. The master prepares and runs the simulation; workers participate in the run loop via work_manager.run().
+- sim_manager: Core simulation driver responsible for loading plugins, preparing the run, executing, and finalizing.
+- data_manager, system, propagator, we_driver: Components wired into the sim_manager to perform the actual propagation, data handling, and WESTPA workflow logic.
+- only_one_segment (via --oneseg): When set, propagates only a single segment, useful for debugging propagators.
+
+Important functions and their roles
+- entry_point(): Entry point that constructs the CLI, processes runtime configuration, and delegates to run_simulation().
+  - Adds rc args (westpa.rc.add_args) and work-manager args (work_managers.environment.add_wm_args).
+  - Supports --oneseg to enable single-segment propagation.
+  - Parses arguments, processes rc and WM args, then calls run_simulation().
+- run_simulation(): Main orchestration function that:
+  - Creates the work_manager via make_work_manager() and assigns it to westpa.rc.work_manager.
+  - Loads the sim_manager and other drivers (system, data_manager, we_driver, propagator).
+  - Wires dependencies: propagator.system, data_manager.system, we_driver.system, and assigns these components to the sim_manager.
+  - Executes the run inside a with work_manager: block.
+  - If running as master:
+    - Installs a SIGINT handler.
+    - Loads plugins (sim_manager.load_plugins()).
+    - Calls sim_manager.prepare_run(), sim_manager.run(), and sim_manager.finalize_run() in sequence.
+    - Handles KeyboardInterrupt and generic exceptions with appropriate status messages.
+  - If running as a worker:
+    - Executes work_manager.run() to participate in the work loop.
+
+Parameters and return values
+- entry_point():
+  - Parameters: None (reads from command line).
+  - Returns: None.
+  - Side-effects: Configures runtime (westpa.rc), parses command-line arguments, and initiates the run via run_simulation().
+- run_simulation():
+  - Parameters: None.
+  - Returns: None.
+  - Side-effects: Creates and wires the runtime components, runs the simulation, and handles master/worker behavior and errors.
+
+Usage notes and considerations
+- Master vs. worker:
+  - The master process sets up the run, loads plugins, and drives the simulation lifecycle (prepare, run, finalize).
+  - Worker processes participate via work_manager.run() and do not perform orchestration tasks.
+- Error handling:
+  - KeyboardInterrupt: Graceful shutdown with a status message.
+  - Other exceptions: Logged with a general shutdown message and a traceback for debugging.
+- Debugging:
+  - --oneseg enables propagating a single segment, which is useful for debugging propagators or the propagation logic.
+- Configuration:
+  - Command-line arguments rely on westpa.rc for core configuration and on work_managers.environment for work-manager related options. Ensure rc is properly configured (e.g., data dirs, plugin paths) before invoking w_run.
+
+Example usage
+- Basic run:
+  - w_run
+- Debug run with a single segment:
+  - w_run --oneseg
+- Run with configured runtime/WM settings (via rc/WM args as exposed by westpa.rc and work_managers.environment):
+  - w_run
+  (Assumes proper runtime configuration and environment setup prior to invocation.)
+
+Code references (high-level)
+- entry_point():
+  - Creates ArgumentParser
+  - Integrates rc and WM args
+  - Adds --oneseg option
+  - Parses args and processes configuration
+  - Calls run_simulation()
+- run_simulation():
+  - Creates and assigns work_manager
+  - Retrieves sim_manager, system, data_manager, we_driver, propagator
+  - Wires dependencies
+  - With work_manager:
+    - If master: install SIGINT handler, load plugins, prepare/run/finalize, handle exceptions
+    - Else: run work loop via work_manager.run()
+
+Note: The documentation reflects the current implementation in w_run.rst and may evolve with future WESTPA updates.

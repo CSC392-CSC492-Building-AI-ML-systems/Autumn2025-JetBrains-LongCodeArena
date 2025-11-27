@@ -1,0 +1,227 @@
+# Config usage
+
+A configurable, feature-rich parser used to drive application settings. This ConfigParser is an extension of Python’s ConfigParser with defaults, environment-aware values, includes, and optional Zookeeper-backed configuration.
+
+## Overview
+
+- Provides a central place to define defaults and override them via configuration files.
+- Supports automatic defaults addition, environment-variable expansion, and nested includes.
+- Optional Zookeeper-backed configuration via ASAB_ZOOKEEPER_SERVERS.
+- Structured sections for general app behavior, metrics, logging, and housekeeping.
+
+## Quick start
+
+1. Create or load a configuration file, optionally providing defaults.
+2. Use the ConfigParser API to read values, e.g., get, getint, getboolean.
+3. Override values via environment variables or by providing additional defaults.
+
+Example (Python):
+
+```python
+from .config import config  # Assuming the module exports a ConfigParser subclass instance
+
+# Add/override defaults if needed
+config.add_defaults({
+    'general': {
+        'tick_period': 2,
+        'pidfile': '/var/run/myapp.pid',
+    }
+})
+
+# Load configuration from a file (path may be provided by environment or code)
+config.read('/etc/myapp/config.ini')
+
+# Access values
+tick = config.getint('general', 'tick_period')
+pidfile = config.get('general', 'pidfile')
+```
+
+Note: Values read from the file are strings; use getint/getboolean/getfloat as appropriate, or cast manually.
+
+## Default configuration
+
+The parser ships with a comprehensive set of defaults organized by section. Key defaults include:
+
+- general
+  - config_file: '' (can be overridden by ASAB_CONFIG)
+  - tick_period: 1
+  - var_dir: path under the user’s home (based on the script name)
+  - changelog: ''
+  - manifest: ''
+  - pidfile: '!' (special meaning to compute a platform-specific location)
+  - working_dir: '.'
+  - uid: ''
+  - gid: ''
+
+- asab:metrics
+  - native_metrics: "true"
+  - web_requests_metrics: False
+  - expiration: 60
+
+- asab:doc
+  - default_route_tag: "module_name"
+
+- logging
+  - verbose: (ENV ASAB_VERBOSE, default False)
+  - app_name: basename of the running script
+  - sd_id: "sd" (Structured Data ID)
+  - level: "NOTICE"
+  - levels: ""
+
+- logging:console
+  - format: "%(asctime)s %(levelname)s %(name)s %(struct_data)s%(message)s"
+  - datefmt: "%d-%b-%Y %H:%M:%S.%f"
+
+- logging:syslog
+  - enabled: "false"
+  - address: platform-dependent default (e.g., /dev/log or a socket)
+  - format: platform-dependent default (e.g., "3" or "m")
+
+- logging:file
+  - path: ""
+  - format: "%(asctime)s %(levelname)s %(name)s %(struct_data)s%(message)s"
+  - datefmt: "%d-%b-%Y %H:%M:%S.%f"
+  - backup_count: 3
+  - backup_max_bytes: 0
+  - rotate_every: ""
+
+- library
+  - azure_cache: "false"
+
+- passwords
+  - (empty by default; use a dedicated [passwords] subsection to store secrets)
+
+- housekeeping
+  - at: "03:00"
+  - limit: "05:00"
+  - run_at_startup: "no"
+
+If ASAB_ZOOKEEPER_SERVERS is set in the environment, a default zookeeper entry is provided:
+- zookeeper.servers is initialized with the value of ASAB_ZOOKEEPER_SERVERS
+
+## Include mechanism
+
+- The configuration system supports including other files. Nested includes are supported.
+- Includes may be file globs or a zookeeper reference (e.g., "zookeeper...").
+- Each included file is read with the directory of the including file added to the search path.
+- Includes are processed in order, and an include may be executed only once to prevent loops.
+- After processing, the parser resets the include field in the general section.
+
+Usage pattern:
+
+- Include patterns are separated by whitespace or newlines.
+- Each include path is expanded (environment variables expanded) and loaded if not already loaded.
+
+Code reference (behavioral summary):
+- _traverse_includes(includes, this_dir)
+  - Splits includes by newline or space.
+  - Supports "zookeeper" inclusions via _include_from_zookeeper.
+  - For each include glob, expands variables, loads files, and recurses for nested includes.
+
+## Zookeeper-backed configuration
+
+- If ASAB_ZOOKEEPER_SERVERS is defined, the parser uses those servers as a default for the zookeeper config section.
+- This enables dynamic configuration fetches from Zookeeper during startup.
+
+## Using add_defaults
+
+- add_defaults allows injecting a dictionary of defaults into the current configuration without disturbing existing values.
+- If a value for a key already exists, the default is not applied.
+- Values are optionally expanded if they contain environment references (e.g., ${VAR}).
+
+Usage example:
+
+```python
+config.add_defaults({
+    'general': {
+        'tick_period': 5,
+        'config_file': '/etc/myapp/default.ini',
+    },
+    'logging:console': {
+        'format': "%(levelname)s:%(name)s:%(message)s"
+    }
+})
+```
+
+## Accessing configuration values
+
+- Use the standard ConfigParser API:
+  - get(section, option)
+  - getint(section, option)
+  - getboolean(section, option)
+  - getfloat(section, option)
+
+Notes:
+- Values in the configuration file are strings by default; cast as needed.
+- Some defaults (e.g., verbose) may derive from environment variables.
+
+## Configuration file example
+
+A minimal example configuration that illustrates sections and overrides:
+
+```ini
+[general]
+config_file = /etc/myapp/config.ini
+tick_period = 2
+pidfile = /var/run/myapp.pid
+working_dir = /opt/myapp
+uid = 
+gid = 
+
+[asab:metrics]
+native_metrics = true
+web_requests_metrics = true
+expiration = 120
+
+[asab:doc]
+default_route_tag = module_name
+
+[logging]
+verbose = false
+level = NOTICE
+levels =
+
+[logging:console]
+format = %(asctime)s %(levelname)s %(name)s %(message)s
+datefmt = %Y-%m-%d %H:%M:%S
+
+[logging:syslog]
+enabled = false
+address = /dev/log
+format = 3
+
+[logging:file]
+path = /var/log/myapp.log
+rotate_every = 7d
+backup_count = 5
+backup_max_bytes = 10485760
+
+[library]
+azure_cache = false
+
+[passwords]
+# Example (do not store plain secrets in source in real setups)
+# kafka_password = <SECRET>
+
+[housekeeping]
+at = 04:00
+limit = 06:00
+run_at_startup = no
+
+# Optional: include other config files
+#include = /etc/myapp/conf.d/*.ini
+```
+
+## Best practices
+
+- Use add_defaults for sane fallbacks and to document required configuration keys.
+- Keep sensitive values in a dedicated passwords section and avoid printing them in logs.
+- Rely on environment-based overrides (e.g., ASAB_VERBOSE, ASAB_CONFIG) for flexible deployments.
+- Use includes to modularize configuration (e.g., per-environment settings or component-specific files).
+
+## See also
+
+- ConfigParser.add_defaults: merge new defaults into an existing configuration.
+- ConfigParser._traverse_includes: include additional configuration files or sources (supports zookeeper).
+- ASAB_ZOOKEEPER_SERVERS: environment variable to enable Zookeeper-based defaults.
+- get/getint/getboolean: standard methods to retrieve values with proper types.

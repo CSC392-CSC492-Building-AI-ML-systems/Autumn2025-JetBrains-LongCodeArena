@@ -1,0 +1,94 @@
+Getting Started
+===============
+
+Overview
+--------
+This module provides functionality common to master and parent processes in Mitogen. It exposes environment probes, OS-specific constants, and helpers used when preparing and spawning child contexts. It also includes utilities for determining the interpreter to use for child processes and for efficiently transferring Mitogen’s core source to children.
+
+Public constants and helpers
+----------------------------
+- SELINUX_ENABLED
+  - Indicates whether SELinux is enforcing. If enabled, Mitogen avoids using socketpairs to sidestep SELinux restrictions.
+- OPENPTY_MSG
+  - User-facing error message when PTY creation fails, suggesting OS-level tunables to adjust.
+- BROKER_SHUTDOWN_MSG
+  - Standard message used when a broker begins shutdown; used to signal cancellation.
+- SYS_EXECUTABLE_MSG
+  - Message shown when sys.executable is not set, explaining fallback behavior.
+- LINUX_TIOCGPTN
+  - PTY number query ioctl constant (Linux-specific).
+- LINUX_TIOCSPTLCK
+  - PTY lock/unlock ioctl constant (Linux-specific).
+- IS_LINUX
+  - Boolean indicating whether the current OS is Linux.
+- SIGNAL_BY_NUM
+  - Mapping from signal numbers to their canonical names (e.g., 9 -> SIGKILL).
+
+Key internal state
+------------------
+- _preexec_hook
+  - Optional callable invoked in a child process just before exec. Used to apply per-child pre-exec configuration (for example, CPU affinity).
+- _core_source_lock
+  - Threading lock used to serialize access to core source minification/cache.
+- _core_source_partial
+  - Cached, lazily-initialized partial/minified representation of mitogen.core suitable for transfer to child contexts.
+
+Public functions
+----------------
+- get_log_level()
+  - Returns the effective logging level for this module; falls back to logging.INFO if not set.
+  - Return: integer log level (e.g., logging.INFO).
+- get_sys_executable()
+  - Resolves the Python interpreter path to use for child processes.
+  - If sys.executable is set, returns it.
+  - If not set, logs SYS_EXECUTABLE_MSG once and returns '/usr/bin/python'.
+  - Return: filesystem path to the interpreter as a string.
+- _get_core_source()
+  - Internal helper. In non-master contexts, fetches the cached mitogen.core source via import mechanism. In master contexts, this is replaced to perform minification directly.
+  - Return: string containing Python source for mitogen.core.
+- get_core_source_partial()
+  - Returns a lazily-initialized, compressed representation (PartialZlib) of mitogen.core source.
+  - Initialization is guarded by _core_source_lock to ensure thread-safety and avoid redundant work.
+  - Return: a PartialZlib-like object that represents the minified core source.
+
+Notes on behavior and relationships
+-----------------------------------
+- This module is designed to support both master and child contexts. It centralizes cross-cutting concerns like interpreter resolution, PTY handling, and efficient transmission of core code.
+- The minification/partial mechanism (get_core_source_partial) is intended to optimize the cost of sending Mitogen’s core source to child processes. It is thread-safe and lazy.
+- The _preexec_hook can be configured to influence child process behavior just before exec().
+
+Usage examples
+--------------
+- Determine the interpreter path for a child process:
+  .. code-block:: python
+  
+     path = get_sys_executable()
+     print("Child interpreter:", path)
+
+- Check the current logging level:
+  .. code-block:: python
+  
+     level = get_log_level()
+     print("Log level:", level)
+
+- Obtain a minified representation of Mitogen’s core source for transmission:
+  .. code-block:: python
+  
+     partial = get_core_source_partial()
+     print("Core source partial type:", type(partial))
+
+- Access PTY-related constants (Linux):
+  .. code-block:: python
+  
+     print("TIOCGPTN:", LINUX_TIOCGPTN)
+     print("TIOCSPTLCK:", LINUX_TIOCSPTLCK)
+
+Important considerations and edge cases
+---------------------------------------
+- sys.executable may be unset in some environments. In such cases, a warning is logged once (via SYS_EXECUTABLE_MSG) and '/usr/bin/python' is used as a fallback.
+- On systems with SELinux enforcement, Mitogen avoids PTY/socketpair usage to minimize permission-related issues.
+- Access to _core_source_partial is lazy and thread-safe; multiple threads may trigger its initialization, but the lock ensures only one initialization occurs.
+- The exact behavior of _get_core_source() differs between master and non-master contexts; be aware that it may be replaced in certain deployments to support minification.
+
+End of getting started
+----------------------

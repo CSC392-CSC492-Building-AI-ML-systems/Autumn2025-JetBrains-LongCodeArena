@@ -1,0 +1,206 @@
+feature_extraction.rst
+=======================
+
+Overview
+--------
+
+This module provides utilities to perform feature extraction from torchvision models
+using Torch FX graph tracing. It enables selecting arbitrary intermediate feature
+maps by name during a forward pass, while preserving a clean, reusable API.
+
+Key ideas
+
+- create_feature_extractor(model, return_nodes) builds a new module that, when called, returns
+  a dictionary of intermediate features specified by return_nodes.
+- get_graph_node_names(model, return_nodes=None) helps discover the node names in the model
+  graph that you can use with create_feature_extractor.
+- LeafModuleAwareTracer and NodePathTracer implement advanced tracing semantics, including
+  optional leaf-module handling and a stable, human-readable node naming scheme.
+- The tracing records the exact path to each operation or leaf module, and ensures
+  unique node names even when duplicates occur.
+
+Public API
+----------
+
+Functions
+---------
+
+- create_feature_extractor(model, return_nodes, leaf_modules=None)
+  - Returns a new nn.Module that forwards inputs through the original model and
+    returns a dict of outputs for the requested nodes.
+  - return_nodes specifies which nodes’ outputs to return. It can be a dict or a set
+    of dotted-path names depending on the exact API surface; see examples for usage.
+  - leaf_modules (optional) can be provided to treat certain submodules as leaves
+    during tracing (pass a tuple or iterable of module classes/instances).
+
+- get_graph_node_names(model, return_nodes=None)
+  - Returns the set/list of graph node names that correspond to the requested
+    nodes in the model. This is useful for discovering which names to pass to
+    create_feature_extractor.
+
+Classes
+-------
+
+- LeafModuleAwareTracer(fx.Tracer)
+  - Tracer that allows you to specify a set of leaf modules that are not traced
+    through. The traced graph contains a single node that calls the leaf module’s
+    forward method.
+
+  - __init__(..., leaf_modules=None)
+    - Stores the specified leaf modules. If provided, only modules in this set
+      are treated as leaves.
+
+  - is_leaf_module(m, module_qualname)
+    - Returns True if m is one of the leaf modules, otherwise defers to the base
+      Tracer logic.
+
+- NodePathTracer(LeafModuleAwareTracer)
+  - An FX tracer that, for each operation, records the node’s qualified name
+    (a dot-separated path from the top-level module to the operation).
+  - The top-level module name is not included in the node name.
+  - Keeps an ordered mapping from FX Nodes to their node names: node_to_qualname.
+  - Provides stable, duplicate-safe names by appending a numeric suffix when needed.
+
+  - __init__(...)
+    - Initializes internal state, including current_module_qualname and node_to_qualname.
+
+  - call_module(m, forward, args, kwargs)
+    - Overrides FX’s call_module to manage the current module name during traversal.
+    - When a non-leaf module is reached, executes forward as normal.
+    - When a leaf module is reached, creates a proxy node to record the call.
+
+  - create_proxy(kind, target, args, kwargs, name=None, type_expr=None, ...)
+    - Creates a FX proxy node and stores its node name in node_to_qualname.
+
+  - _get_node_qualname(module_qualname, node)
+    - Builds a node’s qualified name from the current module path and the node’s
+      operation.
+    - Ensures uniqueness by appending a locally-scoped _{index} suffix when duplicates exist.
+
+Miscellaneous helpers
+---------------------
+
+- _is_subseq(x, y)
+  - Utility to check whether y is a subsequence of x. Used for comparing
+    train/eval tracing outcomes.
+
+- _warn_graph_differences(train_tracer, eval_tracer)
+  - Warns when the training and evaluation graphs produce different node orders or
+    names. Helps diagnose issues when using the same extractor in different modes.
+  - Suggests that you may need to specify output nodes separately for train and eval.
+
+Getting started
+--------------
+
+Basic usage: extract features from a pretrained model
+
+- Import the API
+  - from torchvision.models.feature_extraction import create_feature_extractor
+
+- Prepare a model and the nodes to extract
+  - model = torchvision.models.resnet50(pretrained=False)
+  - return_nodes = {'layer4': 'feat_layer4', 'avgpool': 'feat_pool'}
+
+- Create the feature extractor
+  - feature_extractor = create_feature_extractor(model, return_nodes)
+
+- Run a forward pass and obtain the features
+  - import torch
+  - feature_extractor.eval()
+  - x = torch.randn(1, 3, 224, 224)
+  - with torch.no_grad():
+      outputs = feature_extractor(x)
+  - print(outputs.keys())  # dict_keys(['feat_layer4', 'feat_pool'])
+
+Notes
+
+- The keys of the returned dictionary correspond to the names you provide in
+  return_nodes.
+
+Advanced usage
+--------------
+
+- Using leaf modules
+  - You can treat certain modules as leaves to avoid tracing inside them. For example:
+    - from torch import nn
+    - leaf_modules = (nn.ReLU,)  # or [nn.ReLU]
+    - feature_extractor = create_feature_extractor(model, return_nodes, leaf_modules=leaf_modules)
+
+  - This is useful when you want a clean, stable feature-extraction graph without
+    tracing through every internal operation of some submodules.
+
+- Inspecting graph node names
+  - If you want to discover which node names correspond to particular parts of the
+    model, use get_graph_node_names:
+    - from torchvision.models.feature_extraction import get_graph_node_names
+    - names = get_graph_node_names(model, return_nodes=return_nodes)
+    - print(names)
+
+- Handling differences between train and eval graphs
+  - The internal _warn_graph_differences function emits a warning if the train and
+    eval graphs yield different node sets or orders. Use this as guidance when
+    designing your return_nodes to ensure consistent extraction across modes.
+
+Example: extracting features from a pretrained backbone
+------------------------------------------------------
+
+- This example demonstrates extracting two intermediate features from a ResNet-like backbone.
+
+.. code-block:: python
+
+   import torch
+   import torchvision
+   from torchvision.models.feature_extraction import create_feature_extractor
+
+   # Build model
+   model = torchvision.models.resnet50(pretrained=False)
+
+   # Specify which nodes to return (keys are feature names in the output dict)
+   return_nodes = {
+       'layer4': 'feat_layer4',
+       'avgpool': 'feat_pool',
+   }
+
+   # Create feature extractor
+   feature_extractor = create_feature_extractor(model, return_nodes)
+
+   # Run a forward pass
+   feature_extractor.eval()
+   x = torch.randn(1, 3, 224, 224)
+   with torch.no_grad():
+       feats = feature_extractor(x)
+
+   # Access extracted features
+   feat4 = feats['feat_layer4']  # shape depends on layer4 output
+   feat_pool = feats['feat_pool']  # typically [N, C, 1, 1] for avgpool
+
+Notes on naming and ordering
+----------------------------
+
+- Node names are registered in the order they are executed during tracing.
+- If a node name would collide with an existing one, a suffix _{index} is appended.
+- The top-level module name is not included in the node name; paths start from the module's immediate substructure.
+
+Troubleshooting
+---------------
+
+- If you see a mismatch between train and eval node names, use get_graph_node_names
+  to verify which nodes you should request for each mode, or adjust your return_nodes
+  to be mode-specific.
+- If certain submodules appear unexpectedly in the extracted outputs, consider
+  supplying leaf_modules to treat them as atomic units during tracing.
+
+Reference
+---------
+
+- LeafModuleAwareTracer: Provides leaf-module tracing semantics so that certain modules
+  are treated as atomic leaves during FX tracing.
+- NodePathTracer: Augments tracing with a stable, human-readable node name for every
+  operation, while preserving execution order and handling duplicates gracefully.
+- _get_node_qualname: Builds a unique, dot-separated node name from the current module
+  path and the FX node, with per-parent suffixing to avoid collisions.
+- _warn_graph_differences: Emits guidance when train/eval graphs differ in the nodes
+  recorded, helping users adjust return_nodes accordingly.
+
+This documentation reflects the public surface and intended usage of the feature
+extraction utilities provided by the module.

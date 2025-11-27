@@ -1,0 +1,127 @@
+Cockroach Engine
+================
+
+Overview
+--------
+
+CockroachEngine is an extension of the PostgresEngine designed to work with CockroachDB. It inherits the core PostgreSQL support from Piccolo and adds CockroachDB-specific behavior, including a lightweight setup step that enables an experimental alter-column-type option when the connected user has sufficient privileges.
+
+Key points
+- Inherits from PostgresEngine.
+- Engine type: "cockroach".
+- Version handling: min_version_number set to 0 because Cockroach versioning is not reliably aligned with Piccolo's versioning scheme.
+- Uses lazy loading for the asyncpg driver.
+- During database preparation, attempts to enable a CockroachDB cluster setting. If the connected user lacks privileges, a warning is emitted.
+
+API Reference
+--------------
+
+Class: CockroachEngine
+Inherits from: PostgresEngine
+
+Attributes
+- engine_type: "cockroach"
+- min_version_number: 0
+
+Constructor
+- __init__(
+    config: dict[str, Any],
+    extensions: Sequence[str] = (),
+    log_queries: bool = False,
+    log_responses: bool = False,
+    extra_nodes: dict[str, CockroachEngine] | None = None,
+  ) -> None
+
+  - config: Connection/configuration dictionary for the database.
+  - extensions: Optional list of extensions to load.
+  - log_queries: Enable query logging.
+  - log_responses: Enable response logging.
+  - extra_nodes: Optional mapping for additional connected nodes.
+
+  This constructor simply forwards its arguments to the base class constructor.
+
+Methods
+- prep_database() -> None
+
+  - Attempts to run the following on a new connection:
+    SET CLUSTER SETTING sql.defaults.experimental_alter_column_type.enabled = true;
+
+  - If an asyncpg.exceptions.InsufficientPrivilegeError is raised, a warning is emitted informing that the user may not have permission to set cluster options and functionality may not behave as expected.
+
+Usage
+-----
+
+Example: Basic instantiation and preparation
+
+.. code-block:: python
+
+  from piccolo.engine.cockroach_engine import CockroachEngine
+
+  config = {
+      "database": "mydb",
+      "user": "myuser",
+      "password": "secret",
+      "host": "localhost",
+      "port": 26257,
+  }
+
+  engine = CockroachEngine(config=config)
+  # Prepare the database (best-effort; may emit a warning if privileges are insufficient)
+  await engine.prep_database()
+
+Notes
+-----
+
+- The preparation step is optional at runtime, but enabling the cluster setting can improve certain operations when using CockroachDB.
+- If the connected user does not have sufficient privileges to alter cluster settings, a colored warning will be emitted to inform you of potential limitations.
+
+See Also
+--------
+
+- PostgresEngine: Base class providing the core PostgreSQL support used by this engine.
+- CockroachDB cluster settings: sql.defaults.experimental_alter_column_type.enabled (CockroachDB documentation for the feature and permissions)
+
+Code Reference
+--------------
+
+The implementation (excerpt)
+
+.. code-block:: python
+
+  class CockroachEngine(PostgresEngine):
+      """
+      An extension of
+      :class:`PostgresEngine <piccolo.engine.postgres.PostgresEngine>`.
+      """
+
+      engine_type = "cockroach"
+      min_version_number = 0  # Doesn't seem to work with cockroach versioning.
+
+      def __init__(
+          self,
+          config: t.Dict[str, t.Any],
+          extensions: t.Sequence[str] = (),
+          log_queries: bool = False,
+          log_responses: bool = False,
+          extra_nodes: t.Dict[str, "CockroachEngine"] = None,
+      ) -> None:
+          super().__init__(
+              config=config,
+              extensions=extensions,
+              log_queries=log_queries,
+              log_responses=log_responses,
+              extra_nodes=extra_nodes,
+          )
+
+      async def prep_database(self):
+          try:
+              await self._run_in_new_connection(
+                  "SET CLUSTER SETTING sql.defaults.experimental_alter_column_type.enabled = true;"  # noqa: E501
+              )
+          except asyncpg.exceptions.InsufficientPrivilegeError:
+              colored_warning(
+                  "=> Unable to set up Cockroach DB "
+                  "functionality may not behave as expected. Make sure "
+                  "your database user has permission to set cluster options.",
+                  level=Level.medium,
+              )

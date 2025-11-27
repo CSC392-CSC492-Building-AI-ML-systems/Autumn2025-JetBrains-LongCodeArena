@@ -1,0 +1,220 @@
+# w_init: initialize a new WESTPA simulation
+
+This document describes the w_init command implemented in the provided code. It explains how w_init constructs the initial WEST HDF5 file, how basis/target/start states are supplied (via files or command line), and how the initial set of segments for the first iteration is prepared. It is intended for developers working with the WESTPA codebase.
+
+---
+
+## Overview
+
+- Purpose: Create a new WESTPA simulation, creating the WEST HDF5 file and preparing the first iteration’s segments.
+- State sources:
+  - Basis states (initial states) come from:
+    - a file specified with `--bstates-from`/`--bstate-file`, or
+    - one or more `--bstate` arguments, or
+    - if neither is provided, a default basis state with ID 0 and label "basis" and probability 1 is created (with a warning).
+  - Target states (for non-equilibrium steady-state simulations) come from:
+    - a file specified with `--tstates-from`/`--tstate-file`, or
+    - one or more `--tstate` arguments, or
+    - if neither is provided, an equilibrium simulation (no sinks) is performed.
+  - Start states (optional) come from:
+    - a file specified with `--sstates-from`/`--sstate-file`, or
+    - one or more `--sstate` arguments.
+- Segments: For each basis state, `segs-per-state` segments are initialized (default 1).
+- Execution model: The work manager is used; the master process constructs the initial data structures (target states, basis states, and start states) and initializes the simulation data.
+
+---
+
+## Command interface
+
+w_init is implemented via an entry point that configures argument parsing and then calls an internal `initialize(...)` function.
+
+Key behavior:
+- The command constructs a work manager and resolves system/data managers through `westpa.rc`.
+- Only the master process (in the work manager) actually builds the state objects and the initial configuration.
+- The initial states are created from files or command-line specifications and aggregated into:
+  - `target_states` (for t-states),
+  - `basis_states` (for b-states),
+  - `start_states` (for s-states).
+- The arguments are parsed and then passed to `initialize(...)` for processing.
+
+---
+
+## Arguments and options
+
+- `--force`
+  - Overwrite any existing simulation data (HDF5 file) if it already exists.
+
+- Basis states
+  - `--bstate-file` / `--bstates-from` <BSTATE_FILE>
+    - Read basis state names, probabilities, and optionally data references from the file.
+  - `--bstate` 
+    - Append a basis state to the list. String format: `label,probability[,auxref]`.
+    - May be used multiple times; states are appended in the order given.
+
+- Target states
+  - `--tstate-file` / `--tstates-from` <TSTATE_FILE>
+    - Read target state names and representative progress coordinates from the file.
+    - WESTPA uses the representative progress coordinate of a target state and converts the entire bin containing that progress coordinate into a recycling sink.
+  - `--tstate`
+    - Append a target state to the list. String format: `label,pcoord0[,pcoord1[,...]]`.
+    - May be used multiple times; states are appended in the order given.
+
+- Start states
+  - `--sstate-file` / `--sstates-from` <SSTATE_FILE>
+    - Read start state names, probabilities, and optionally data references from the file.
+  - `--sstate`
+    - Append a start state to the list. String format: `label,probability[,auxref]`.
+    - May be used multiple times; states are appended in the order given.
+
+- Segments and execution mode
+  - `--segs-per-state` <N>
+    - Initialize N segments from each basis state (default: 1).
+  - `--no-we` / `--shotgun`
+    - Do not run the weighted-ensemble bin/split/merge algorithm on newly-created segments.
+
+- Other
+  - Arguments related to the westpa runtime and environment are wired through `westpa.rc` and `work_managers.environment`.
+
+---
+
+## File formats and parsing
+
+The code relies on helper methods to parse state definitions from files:
+
+- Basis states (BSTATE_FILE)
+  - Each line in the file represents a basis state, with fields:
+    - `label`, `probability`, and optionally `auxref`.
+  - In code: `BasisState.states_from_file(...)` is used to parse the file into `BasisState` objects.
+
+- Target states (TSTATE_FILE)
+  - Each line in the file represents a target state, beginning with:
+    - `label` and one or more `pcoords` (progress coordinates).
+  - In code: `TargetState.states_from_file(..., system.pcoord_dtype)` is used to parse.
+
+- Start states (SSTATE_FILE)
+  - Each line in the file represents a start state, with fields:
+    - `label`, `probability`, and optionally `auxref`.
+  - In code: `BasisState.states_from_file(...)` is used to parse the file into `BasisState` objects.
+
+CLI-provided definitions are parsed by splitting on commas:
+- Basis/start states: `label,probability[,auxref]`
+- Target states: `label,pcoord0[,pcoord1[,...]]`
+
+If both a file and CLI-based definitions are provided for the same category, the code appends the CLI-defined states after those from the file.
+
+---
+
+## Behavior and data flow
+
+- Initialization happens within a `with work_manager:` context.
+- Only the master process constructs the state lists:
+  - `target_states` (from tstate file and/or CLI)
+  - `basis_states` (from bstate file and/or CLI)
+  - `start_states` (from sstate file and/or CLI)
+- The constructed states are used to initialize WESTPA's simulation data structures for the first iteration.
+- If no target states are provided, an equilibrium (no sinks) simulation is configured.
+- If no basis states are provided, a default basis state with probability 1, ID 0, and label "basis" is created (and a warning is emitted).
+- If `segs-per-state` is specified, the specified number of segments is created per basis state.
+- If `--shotgun` is not specified, the WE algorithm will be applied by default to newly-created segments; if `--no-we` is given, the WE logic is skipped for these segments.
+
+---
+
+## Examples
+
+Minimal initialization (uses default basis state and equilibrium target state):
+
+- Command
+  - w_init
+
+- Result
+  - Creates the WEST HDF5 file, writes a single basis state (default), and prepares a single segment for iteration 0.
+
+---
+
+Initialize with explicit basis states (from CLI) and default target state:
+
+- Command
+  - w_init --bstate "basis1,1.0" --bstate "basis2,0.0"
+
+- Explanation
+  - Two basis states are created: basis1 with probability 1.0 and basis2 with probability 0.0 (can be used for later reweighting). If any probability is invalid per the implementation, an error would occur.
+
+---
+
+Initialize with basis states from a file and one target state from CLI:
+
+- Command
+  - w_init --bstates-from basis.txt --tstate "tstate1,0.5"
+
+- Basis file (basis.txt) example:
+  - basis1,0.6
+  - basis2,0.4
+
+- Target state option:
+  - The CLI provides a single target state with a single pcoord.
+
+---
+
+Initialize a non-equilibrium steady-state run with tstates and sstates from files:
+
+- Command
+  - w_init --tstates-from tstates.txt --sstates-from sstates.txt
+
+- tstates.txt example:
+  - sink1,0.5
+  - sink2,1.2
+
+- sstates.txt example:
+  - start1,1.0
+  - start2,0.0
+
+---
+
+Force-overwrite example:
+
+- Command
+  - w_init --force
+
+- Explanation
+  - Overwrites any existing simulation data in the WEST HDF5 file if present.
+
+---
+
+Do not run WE for the newly-created segments:
+
+- Command
+  - w_init --no-we
+
+- Explanation
+  - Skips the weighted-ensemble operations (bin/split/merge) for the initial segments.
+
+---
+
+## Developer notes
+
+- The initialization workflow is orchestrated through a work manager:
+  - A master process builds the `target_states`, `basis_states`, and `start_states` from files and CLI inputs.
+  - The worker processes defer to the master for this initialization step.
+- State objects:
+  - `BasisState(label=..., probability=..., auxref=...)`
+  - `TargetState` is built from file/strings, with the system-provided `pcoord_dtype` used for parsing coordinates.
+- The command integrates with WESTPA's runtime configuration via `westpa.rc`:
+  - System driver, simulation manager, and data manager are resolved.
+  - The data manager is configured with the resolved system.
+- Behavior guarantees:
+  - Consistency: If neither tstates nor tstate file is provided, the simulation defaults to an equilibrium run (no sinks).
+  - Safety: If neither bstates nor bstate file is provided, a warning is emitted and the default basis state is used.
+  - Determinism: The master process constructs the initial state lists; non-master processes do not modify these lists.
+
+---
+
+## See also
+
+- BasisState.states_from_file: parsing basis state definitions from a file.
+- TargetState.states_from_file: parsing target state definitions from a file.
+- westpa.rc: runtime configuration, including system/driver resolution.
+- westpa.work_managers: work manager integration and environment argument handling.
+
+---
+
+This documentation provides a developer-focused guide to how w_init works, what inputs it accepts, and how those inputs influence the initial WESTPA run. For practical usage, refer to the examples above and the file formats described.

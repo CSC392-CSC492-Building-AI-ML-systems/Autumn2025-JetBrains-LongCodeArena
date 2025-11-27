@@ -1,0 +1,142 @@
+# Callback: BestEffortCallback
+
+A lightweight, on-the-fly visualization helper for Bluesky runs. The BestEffortCallback provides optional live display of a LiveTable, LivePlot/L iveGrid/LiveScatter figures, and peak statistics. It is designed to be “best effort” and inexpensive, updating the UI as data arrives without requiring a full-blown plotting backend.
+
+## Overview
+
+- Purpose: Real-time, minimal-overhead feedback during data acquisition. It prints stream information, renders plots for selected fields, and can show a table of hinted readings.
+- Core dependencies:
+  - Core utilities: `LiveTable`, `make_class_safe`
+  - Plotting helpers: `LivePlot`, `LiveGrid`, `LiveScatter`, `QtAwareCallback`
+  - Fitting/analysis: `PeakStats` (and `PeakResults` for bookkeeping)
+- Design notes:
+  - The class is decorated with `@make_class_safe`, enabling safe usage across threads with a logger.
+  - It inherits from `QtAwareCallback`, integrating with the plotting widgets in a Qt-aware context.
+  - Behavior is controlled via public flags (`overplot`, `noplot_streams`, `omit_single_point_plot`, etc.) and per-instance configuration.
+
+## Class and Relationships
+
+- Class: `BestEffortCallback`
+  - Inherits from: `QtAwareCallback`
+  - Decorator: `@make_class_safe(logger=logger)`
+  - Public API to enable/disable features:
+    - Headings
+    - Table
+    - Baseline fields
+    - Plots
+  - Core state:
+    - `_start_doc`, `_descriptors`, `_table`, `_heading_enabled`, `_table_enabled`, `_baseline_enabled`, `_plots_enabled`
+    - `_fig_factory`, `_live_plots`, `_live_grids`, `_live_scatters`, `_peak_stats`
+    - `_cleanup_motor_heuristic`, `_stream_names_seen`
+    - Public options: `overplot`, `noplot_streams`, `omit_single_point_plot`
+    - Data: `peaks` (instance of `PeakResults`)
+    - Internal buffer for rendering edge ( `_buffer` )
+
+## Public API
+
+- `enable_heading() / disable_heading()`
+  - Enable or disable printing of the run header (timestamp and IDs) at the start.
+- `enable_table() / disable_table()`
+  - Enable or disable printing hinted readings from the 'primary' stream in the LiveTable.
+- `enable_baseline() / disable_baseline()`
+  - Enable or disable printing hinted fields from the 'baseline' stream.
+- `enable_plots() / disable_plots()`
+  - Enable or disable plotting for all streams except those in `noplot_streams`.
+- `__call__(self, name, doc, *args, **kwargs)`
+  - Entry point invoked by the RunEngine for each document.
+  - Short-circuits if all output is disabled.
+- `start(self, doc)`
+  - Called at the start of a run.
+  - Initializes internal state, determines dimensionality, and prints the header if enabled.
+  - Determines dimensions (from hints or motor information) and prepares field lists for plotting.
+  - Prints a run header including time, scan ID, and UID when enabled.
+- `descriptor(self, doc)`
+  - Called for each descriptor document.
+  - Manages per-stream information, determines columns to plot, and handles legacy/document compatibility logic.
+  - Decides whether a given descriptor should generate plots, based on stream, columns, and run configuration.
+  - Tracks per-descriptor state and streams to print “New stream” messages when a new stream appears.
+
+## Important Parameters and Return Values
+
+- `__init__(*, fig_factory=None, table_enabled=True, **kwargs)`
+  - `fig_factory`: Optional factory for creating figures/axes. If `None`, a default factory is used.
+  - `table_enabled`: Whether the LiveTable should be enabled by default.
+  - Returns: None. Initializes internal state.
+- `start(self, doc)`
+  - `doc`: Start document from the RunEngine.
+  - Returns: None. Sets up run context, dimensions, and heading.
+- `descriptor(self, doc)`
+  - `doc`: Descriptor document from the RunEngine.
+  - Returns: None. Registers descriptor, computes plotting decisions, and handles legacy hints.
+- `__call__(self, name, doc, *args, **kwargs)`
+  - `name`: Document name (e.g., 'start', 'descriptor', 'event', 'stop').
+  - `doc`: The document payload.
+  - Returns: None. Delegates to superclass unless output is disabled.
+
+## Usage Examples
+
+Minimal usage with a RunEngine:
+
+```python
+from bluesky.run_engine import RunEngine
+from your_module.callbacks import BestEffortCallback  # adjust import as needed
+
+# Instantiate callback with default behavior
+cb = BestEffortCallback()
+
+# Create a RunEngine instance (example; adapt to your environment)
+RE = RunEngine({})  # or provide a registry of plans
+
+# Subscribe the callback to the RunEngine
+RE.subscribe(cb)
+
+# Run a plan (example)
+RE(plan)
+```
+
+More explicit configuration:
+
+```python
+cb = BestEffortCallback(
+    fig_factory=None,          # or supply a custom figure factory
+    table_enabled=True,        # show the LiveTable
+)
+
+cb.disable_plots()               # if you want to suppress plotting entirely
+cb.disable_heading()             # do not print run header
+```
+
+Notes:
+- The callback relies on the run’s documents having certain fields (e.g., time, uid, scan_id, hints, dimensions). If they are missing or non-standard, behavior may be affected.
+- The dimension extraction uses hints when available; otherwise, it makes a best-effort guess using motor names or time as the primary axis.
+
+## Important Considerations and Edge Cases
+
+- Dimension handling
+  - If hints specify multiple streams with different independent variables, a best-effort fallback is used and a warning is emitted.
+  - When `_cleanup_motor_heuristic` is set, the code attempts to map abstract dimension names to concrete fields using the descriptor’s hints or `object_keys`.
+- Plot decision logic
+  - Plotting is suppressed if:
+    - `self._plots_enabled` is False
+    - The stream is in `noplot_streams`
+    - There are no columns to plot
+    - The run has only 1 point and `omit_single_point_plot` is True
+- Heading and stream messages
+  - A new stream triggers a “New stream: ..." message if the table is enabled.
+  - A run header is printed at the start if headings are enabled.
+- Robustness
+  - The class is designed to be thread-safe via `make_class_safe`.
+  - It is intended for interactive/simulated environments (e.g., tests in `tests/interactive/best_effort_cb.py`).
+
+## Reference Notes
+
+- The module leverages several components from the plotting and data-display stack (LiveTable, LivePlot, LiveGrid, LiveScatter, PeakStats) to assemble a lightweight, real-time dashboard.
+- The exact plotting behavior and table rendering depend on the provided `fig_factory` and the hints/fields discovered in descriptors.
+
+## See Also
+
+- tests/interactive/best_effort_cb.py (for testing guidance and usage in a simulated environment)
+- Bluesky RunEngine callback ecosystem (descriptors, events, and start/stop documents)
+- Peak statistics utilities (`PeakStats`, `PeakResults`) for post-processing and reporting of peak information during runs
+
+End of documentation.

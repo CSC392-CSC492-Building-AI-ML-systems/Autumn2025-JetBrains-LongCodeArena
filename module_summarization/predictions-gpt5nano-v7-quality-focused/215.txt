@@ -1,0 +1,91 @@
+queues.rst
+
+Overview
+--------
+This module provides asynchronous queues for coordinating producers and consumers of coroutines. The implementations are designed for use within a Tornado IOLoop and are not thread-safe; if you must interact from other threads, transfer control to the IOLoop thread first via IOLoop.add_callback.
+
+Key ideas
+- maxsize controls capacity. A value of 0 means the queue is unbounded.
+- Producers call put(...) to enqueue items; if the queue is full, put blocks (via a Future) until space becomes available or a timeout occurs.
+- Consumers pull items with get(...); if the queue is empty, get blocks until an item appears or a timeout occurs.
+- The queue supports asynchronous iteration so you can use an async for loop to process items as they arrive.
+- Task-tracking helpers allow you to coordinate work completion (see task_done and join).
+- There are dedicated exceptions for queue capacity and emptiness: QueueFull and QueueEmpty.
+
+Quickstart: a simple producer / consumer pattern
+Code demonstrates a typical producer/consumer setup using an asynchronous for loop and task tracking.
+.. code-block:: python
+
+    import asyncio
+    from tornado.ioloop import IOLoop
+    from tornado.queues import Queue
+
+    q = Queue(maxsize=2)
+
+    async def consumer():
+        async for item in q:
+            try:
+                print('Doing work on %s' % item)
+                await asyncio.sleep(0.01)
+            finally:
+                q.task_done()
+
+    async def producer():
+        for item in range(5):
+            await q.put(item)
+            print('Put %s' % item)
+
+    async def main():
+        # Start consumer without waiting (since it never finishes on its own).
+        IOLoop.current().spawn_callback(consumer)
+        await producer()     # Wait for producer to put all tasks.
+        await q.join()       # Wait for consumer to finish all tasks.
+        print('Done')
+
+    asyncio.run(main())
+
+How it works
+- The queue uses two internal deques:
+  - _getters: awaiting consumers (Futures) waiting to receive an item.
+  - _putters: (item, Future) pairs waiting to enqueue an item when space becomes available.
+- When you call put and the queue is full, a Future is created and appended to _putters; a timeout can be specified.
+- When you call get and the queue is empty, a Future is returned that completes when a new item arrives.
+- The async for interface is provided by _QueueIterator, which repeatedly yields items via get().
+
+API and core concepts
+- QueueEmpty: Raised by get_nowait-style paths when the queue has no items.
+- QueueFull: Raised by put_nowait when the queue is at capacity.
+- Queue(maxsize=0): Creates an unbounded queue by default. A positive maxsize caps the number of enqueued items.
+- Queue.maxsize: Property returning the maximum size allowed for the queue.
+- Queue.qsize(): Returns the current number of items in the queue.
+- Queue.empty(): Returns True if the queue has no items.
+- Queue.full(): Returns True if the queue has reached its maxsize (or always False if maxsize is 0).
+- Queue.put(item, timeout=None): Enqueues an item, possibly waiting until space is available. Returns a Future that resolves when the item is enqueued, or raises TimeoutError if the timeout elapses.
+- Queue.put_nowait(item): Enqueues an item without blocking. Raises QueueFull if there is no room.
+- Queue.get(timeout=None): Returns an awaitable that resolves to the next item, waiting if the queue is empty. May raise TimeoutError on timeout.
+- Async iteration: You can use async for item in q to consume items as they arrive.
+- Task tracking:
+  - q.task_done(): Signals that a previously enqueued task is complete.
+  - await q.join(): Waits until all enqueued tasks have been marked as done.
+- Timeouts:
+  - The timeout for put and get can be a number (seconds) or a datetime.timedelta. When the timeout fires, the returned Future gets a TimeoutError.
+- Thread-safety note:
+  - The queue is not thread-safe. To call queue methods from another thread, transfer control to the IOLoop thread via IOLoop.add_callback before calling queue methods.
+
+Advanced usage patterns
+- Multiple producers and consumers
+  - Create one or more producers that put items into the queue and several consumers that take items from the queue. Use q.task_done() in the consumer after finishing work on an item, and await q.join() to wait for all items to be processed.
+- Graceful shutdown with a sentinel
+  - To stop a consumer cleanly, enqueue a sentinel value (e.g., None) and have the consumer break when it receives the sentinel. This pattern is common when you want to terminate workers after all work is done.
+- Timeouts and cancellation
+  - Use timeouts with put/get to avoid indefinite blocking. Combine with cancellation to gracefully shut down long-running tasks if needed.
+
+Notes
+- The included implementation also provides PriorityQueue and LifoQueue variants for specialized scheduling strategies (not shown in this excerpt). The basic Queue supports the standard producer/consumer pattern described here.
+
+Reference
+- QueueEmpty, QueueFull exceptions
+- Queue class and its core methods
+- _QueueIterator enabling async for support
+
+This documentation presents a practical, coroutine-oriented approach to producer/consumer patterns using Tornado’s asynchronous queues.

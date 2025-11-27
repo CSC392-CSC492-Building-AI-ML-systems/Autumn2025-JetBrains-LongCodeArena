@@ -1,0 +1,110 @@
+# query.rst – How to use QuerySet to build your queries
+
+Overview
+- QuerySet provides a fluent, asynchronous interface for building SQL queries against your models.
+- You compose queries by chaining methods that apply filters, relations, annotations, projections, and ordering.
+- Execution is asynchronous: await the configured QuerySet to fetch results (single or multiple depending on the operation).
+
+Core concepts
+- Filtering: Build predicates using Q objects and standard field lookups. Supports traversing relations with double underscores.
+- Prefetching: Eager-load related data to avoid N+1 queries via prefetch_related (and Prefetch for fine-grained control).
+- Joins and relations: Navigate related models by field name, including nested relations.
+- Projections: Use values() to return dictionaries or values_list() to return tuples (or a single field with flat=True).
+- Ordering and grouping: Apply orderings and, when needed, group by the base table for aggregates.
+- Annotations and aggregations: Attach calculated fields via annotate() using Function-based aggregations (e.g., Count, Sum).
+- Field selection: Use only() to limit loaded fields for performance.
+
+Typical workflow
+- Start from a Model
+- Apply filters (including related-field lookups)
+- Optionally prefetch related data
+- Optionally annotate with aggregations
+- Optionally project specific fields or return as dictionaries
+- Optionally apply ordering
+- Execute by awaiting the queryset
+
+Examples
+1) Basic filtering and projection
+- Fetch id, name, and age for all active users aged 18 or older
+
+from tortoise.query_utils import Q
+results = await User.filter(Q(age__gte=18) & Q(is_active=True)) \
+                    .order_by("-age") \
+                    .values("id", "name", "age")
+
+2) Filtering by related fields and ordering by a related field
+- Get users whose profile.city is "New York", order by the city name ascending
+
+results = await User.filter(profile__city="New York") \
+                    .order_by("profile__city") \
+                    .values("id", "name", "profile__city")
+
+3) Prefetching related data
+- Prefetch related orders data for users to avoid N+1 queries
+
+from tortoise.query_utils import Prefetch
+orders_prefetch = Prefetch("orders", queryset=Order.filter(status="completed"))
+
+results = await User.filter(is_active=True) \
+                    .prefetch_related(orders_prefetch) \
+                    .values("id", "name", "orders__id", "orders__total")
+
+4) Annotating with aggregations
+- Annotate each user with the number of orders and sort by that count
+
+from tortoise.functions import Count
+
+results = await User.annotate(order_count=Count("orders")) \
+                    .order_by("-order_count") \
+                    .values("id", "name", "order_count")
+
+5) Using values_list for tuples and flat lists
+- Get a list of user IDs
+ids = await User.all().values_list("id", flat=True)
+
+- Get a list of (id, name) tuples
+id_name_pairs = await User.all().values_list("id", "name")
+
+6) Limiting loaded fields
+- Load only id and email for a lightweight lookup
+emails = await User.filter(is_active=True).only("id", "email").values_list("email", flat=True)
+
+7) Complex nested lookups and multi-step queries
+- Filter by a nested field, annotate, then order by the annotation
+from tortoise.functions import Count
+
+results = await User.filter(location__country="US") \
+                    .annotate(num_orders=Count("orders")) \
+                    .order_by("-num_orders") \
+                    .values("id", "name", "location__country", "num_orders")
+
+8) Handling errors
+- Common exceptions you may encounter:
+  - DoesNotExist: No object found for a get-like query
+  - MultipleObjectsReturned: Query expected to return a single object but returned multiple
+  - FieldError: Unknown or invalid field lookup
+  - ParamsError: Malformed query parameters
+  - IntegrityError: DB integrity constraint violated
+
+Best practices
+- Use prefetch_related for related data when you know you’ll access related objects, to avoid N+1 queries.
+- Use values() or values_list() for read-heavy paths where you don’t need full model instances.
+- Combine annotations with filtering to perform efficient aggregates at the database level.
+- When traversing relations, prefer explicit Prefetch objects for complex related queries.
+- Keep an eye on the number of joined tables; use only() to limit loaded fields if you don’t need all columns.
+
+Common patterns (reference)
+- Filter by a mix of direct and related fields
+  results = await User.filter(age__gte=18, profile__active=True).values("id", "name", "profile__city")
+
+- Order by multiple fields (example: first by last name, then by creation date)
+  results = await User.order_by("last_name", "created_at")
+
+- Count related items after a filter
+  results = await User.annotate(post_count=Count("posts")).filter(post_count__gt=0).values("id", "name", "post_count")
+
+Notes
+- QuerySet construction is performed via an internal QueryBuilder (PyPika-based). The public API focuses on chaining readable operations (filter, prefetch_related, annotate, only, values_list, values, order_by) and asynchronously executing the query.
+- The system supports complex lookups via the double-underscore syntax to traverse relations and apply filters on nested fields.
+
+If you need more targeted examples (e.g., specific model schemas or relation graphs), share your models and typical queries and I’ll tailor the docs with concrete snippets.

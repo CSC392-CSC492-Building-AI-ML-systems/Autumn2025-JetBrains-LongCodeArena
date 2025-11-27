@@ -1,0 +1,104 @@
+# Probability calibration
+
+## Overview
+Probability calibration adjusts the predicted probabilities of a classifier to better reflect true outcome frequencies. This is achieved by fitting a calibrator (either Platt scaling via a sigmoid function or isotonic regression) on top of an existing estimator. CalibratedClassifierCV performs cross-validated calibration to produce reliable probability estimates, with options for ensemble averaging across folds or using cross_val_predict to obtain unbiased calibration data.
+
+Key ideas:
+- Calibration uses the estimator’s decision scores (decision_function) when available, otherwise the predicted probabilities (predict_proba).
+- Calibration is performed via either sigmoid (Platt scaling) or isotonic regression.
+- Cross-validation is used to generate calibration data; predictions can be ensembled across folds or computed on full-data predictions for calibration.
+- The estimator used for final prediction can be trained on all data, while calibration uses cross-validated data (unless cv="prefit").
+
+## Key Components
+
+- CalibratedClassifierCV
+  - Purpose: Calibrate the predicted probabilities of a base estimator using cross-validation.
+  - Calibrators:
+    - method='sigmoid': Platt’s logistic regression calibration.
+    - method='isotonic': Isotonic regression calibration (non-parametric).
+  - Cross-validation (cv):
+    - Controls how calibration is performed. If cv is not "prefit", a copy of the base estimator is trained on training folds and calibrated on test folds.
+    - If cv="prefit", the provided estimator is assumed to be pre-fitted and all data is used for calibration. The user must ensure train/calibration data are disjoint.
+  - ensemble:
+    - If True (default), the final prediction averages predicted probabilities across the calibrated classifiers from each CV fold.
+    - If False, cross_val_predict is used to obtain unbiased predictions for calibration, and the final estimator uses the model trained on all data.
+  - estimator vs. base_estimator:
+    - estimator is the classifier to calibrate. base_estimator is deprecated; use estimator.
+  - n_jobs:
+    - Parallelism for fitting across CV folds.
+  - Attributes:
+    - classes_: Class labels.
+    - n_features_in_: Number of features seen during fit (if supported by the base estimator).
+    - feature_names_in_: Feature names seen during fit (if supported by the base estimator).
+    - calibrated_classifiers_: List of tuned classifiers (one per CV fold, or a single item if cv="prefit" or ensemble=False).
+
+- Supporting behavior
+  - The calibration step relies on:
+    - decision_function if present, else predict_proba.
+  - Default cv value (None) uses 5-fold cross-validation (previously 3-fold).
+
+## Usage
+
+- Basic example with sigmoid calibration (Platt scaling) on a LinearSVC:
+  ```python
+  from sklearn.svm import LinearSVC
+  from sklearn.calibration import CalibratedClassifierCV
+
+  # X, y: training data
+  clf = LinearSVC()
+  calibrated_clf = CalibratedClassifierCV(clf, method='sigmoid', cv=5)
+  calibrated_clf.fit(X, y)
+
+  # Predict probabilities for new samples
+  proba = calibrated_clf.predict_proba(X_new)
+  ```
+
+- Isotonic calibration example:
+  ```python
+  calibrated_clf = CalibratedClassifierCV(clf, method='isotonic', cv=5)
+  calibrated_clf.fit(X, y)
+  proba = calibrated_clf.predict_proba(X_new)
+  ```
+
+- Using a pre-fitted estimator (cv="prefit"):
+  ```python
+  # est is already fitted on some data (X_train, y_train)
+  est = LinearSVC().fit(X_train, y_train)
+
+  # Calibrate using all provided data (no CV)
+  calibrated = CalibratedClassifierCV(estimator=est, cv='prefit', method='sigmoid')
+  calibrated.fit(X_cal, y_cal)  # Yields calibration on (X_cal, y_cal)
+
+  proba = calibrated.predict_proba(X_cal)
+  ```
+  Note: When cv="prefit", data used for calibration must be disjoint from data used to fit the base estimator.
+
+- Accessing the calibrated classifiers:
+  ```python
+  calibrated_classifiers = calibrated.calibrated_classifiers_
+  # Length depends on the CV setup (one per fold, or 1 for prefitted)
+  ```
+
+## Details
+
+- Calibration methods
+  - Sigmoid ('sigmoid'): Fits a logistic regression model to map raw scores to calibrated probabilities. Suitable for well-behaved score distributions.
+  - Isotonic ('isotonic'): Fits a non-parametric isotonic regression model to map scores/probabilities to calibrated probabilities. More flexible but can overfit on small calibration sets (avoid with very small datasets, typically << 1000 samples).
+
+- Cross-validation behavior
+  - When cv is not 'prefit', CalibratedClassifierCV creates multiple calibrated classifiers (one per CV fold) and, by default, averages their probabilities for final predictions.
+  - When cv='prefit', calibration uses the data provided to fit the calibrator without splitting, so all data are used for calibration. The user must ensure the training data for the base estimator and the calibration data do not overlap.
+
+- Deprecations and compatibility
+  - base_estimator is deprecated in favor of estimator.
+  - The default cross-validation strategy and its effect on bias/variance trade-offs are described in the user guide.
+
+- Practical considerations
+  - Isotonic regression may overfit with limited calibration data; prefer sigmoid when calibration data are scarce.
+  - Ensure that the base estimator exposes a suitable score, either via decision_function (preferred) or predict_proba.
+
+- Interfaces referenced
+  - Checks and utilities for cross-validation, prediction, and validation are used under the hood (e.g., check_cv, cross_val_predict, LabelEncoder, and related validation helpers).
+
+- Documentation references
+  - For a broader understanding and advanced usage, see the calibration section of the user guide.

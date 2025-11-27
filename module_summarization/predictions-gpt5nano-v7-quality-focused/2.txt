@@ -1,0 +1,194 @@
+Encoding media
+==============
+
+This guide explains how to trigger server-side media encoding using the ftrack API. Encoding tasks are performed by the ftrack server; you authenticate via API key and user, and you submit encoding requests that run asynchronously.
+
+Prerequisites
+-------------
+- Access to an ftrack server (server_url).
+- API credentials: api_key and api_user.
+- Optional: environment variable defaults
+  - FTRACK_SERVER for server URL
+  - FTRACK_API_KEY for API key
+  - FTRACK_API_USER for API user
+
+Key concepts
+------------
+- SessionAuthentication: attaches ftrack credentials to HTTP requests via custom headers.
+- Session: central object for interacting with the ftrack server and for configuring how requests are made and cached.
+- Encoding jobs: submitted to the server to produce encoded media in requested formats. Jobs run asynchronously and can be monitored via server responses or event notifications.
+
+Creating a session for encoding
+------------------------------
+Use a Session to configure how you communicate with the server. Provide server_url, api_key, and api_user. If not supplied, the values are read from environment variables (see prerequisites).
+
+Example
+-------
+- Python snippet to create a session (values must be supplied by you):
+
+.. code-block:: python
+
+   from ftrack_api import Session
+
+   session = Session(
+       server_url='https://ftrack.example.com',
+       api_key='YOUR_API_KEY',
+       api_user='YOUR_USERNAME',
+       auto_populate=True,            # optional
+       auto_connect_event_hub=True,   # optional
+       schema_cache_path=None           # optional
+   )
+
+Authenticating requests for encoding
+------------------------------------
+Encoding requests require authentication headers. The SessionAuthentication class adds the necessary headers to each HTTP request:
+
+- Headers added:
+  - ftrack-api-key: your API key
+  - ftrack-user: your API user
+
+Example using the requests library
+----------------------------------
+.. code-block:: python
+
+   import requests
+   from ftrack_api.session import SessionAuthentication
+
+   # Create the authentication object
+   auth = SessionAuthentication('YOUR_API_KEY', 'YOUR_USERNAME')
+
+   # Payload describing the encoding job
+   payload = {
+       'media_id': 'media-12345',
+       'target_formats': ['mp4', 'webm'],
+       'parameters': {
+           'codec': 'h264',
+           'bitrate': '800k'
+       }
+   }
+
+   # Note: replace <ENCODE_ENDPOINT> with your server's encoding endpoint
+   url = 'https://ftrack.example.com/api/encode_media'  # endpoint may vary by server
+
+   response = requests.post(url, json=payload, auth=auth)
+   response.raise_for_status()
+   job = response.json()
+
+Starting an encoding job
+------------------------
+- Submit a request describing the media to encode and the target formats.
+- The server returns a job identifier and status to monitor progress.
+
+Example response (typical)
+- job_id: a unique identifier
+- status: "queued" or similar
+
+Example snippet to initiate encoding
+------------------------------------
+.. code-block:: python
+
+   import requests
+   from ftrack_api.session import SessionAuthentication
+
+   auth = SessionAuthentication('YOUR_API_KEY', 'YOUR_USERNAME')
+
+   payload = {
+       'media_id': 'media-12345',
+       'target_formats': ['mp4', 'webm'],
+       'parameters': {
+           'codec': 'h264',
+           'width': 1920,
+           'height': 1080
+       }
+   }
+
+   url = 'https://ftrack.example.com/api/encode_media'
+   resp = requests.post(url, json=payload, auth=auth)
+   resp.raise_for_status()
+   job = resp.json()
+   print('Encoding job submitted:', job.get('job_id'))
+
+Tracking progress and results
+-----------------------------
+- Encoding jobs execute asynchronously. Use the server’s response to track progress.
+- Client code can poll the job status endpoint or subscribe to event hub notifications if your setup enables event publishing.
+
+Polling example (pseudo)
+------------------------
+.. code-block:: python
+
+   import time
+   job_id = job.get('job_id')
+   status = 'queued'
+   while status not in ('completed', 'failed'):
+       r = requests.get(f'{url}/{job_id}', auth=auth)
+       r.raise_for_status()
+       info = r.json()
+       status = info.get('status')
+       time.sleep(5)
+
+Advanced usage
+--------------
+- Event hub integration: If you enable auto_connect_event_hub in the Session, the system may publish encoding progress and results to the event hub, allowing real-time updates to subscribers.
+- Caching: The session configures a layered cache with a MemoryCache at the top level by default; this helps avoid repeated lookups when interacting with encoding-related metadata.
+
+End-to-end example
+------------------
+- Create a session
+- Submit an encoding job for a given media item
+- Poll or listen for progress
+- Retrieve results or encoded asset references when done
+
+.. code-block:: python
+
+   from ftrack_api import Session
+   import requests
+   from ftrack_api.session import SessionAuthentication
+
+   # 1) Create a session (using environment defaults is also possible)
+   session = Session(
+       server_url='https://ftrack.example.com',
+       api_key='YOUR_API_KEY',
+       api_user='YOUR_USERNAME',
+       auto_populate=True,
+       auto_connect_event_hub=False
+   )
+
+   # 2) Prepare and submit an encoding job
+   auth = SessionAuthentication('YOUR_API_KEY', 'YOUR_USERNAME')
+   payload = {
+       'media_id': 'media-12345',
+       'target_formats': ['mp4', 'webm'],
+       'parameters': {'codec': 'h264', 'bitrate': '800k'}
+   }
+   url = 'https://ftrack.example.com/api/encode_media'
+   r = requests.post(url, json=payload, auth=auth)
+   r.raise_for_status()
+   job = r.json()
+
+   # 3) Track progress (example polling)
+   job_id = job.get('job_id')
+   while True:
+       r = requests.get(f'https://ftrack.example.com/api/encode_media/{job_id}', auth=auth)
+       r.raise_for_status()
+       info = r.json()
+       if info.get('status') in ('completed', 'failed'):
+           break
+       time.sleep(5)
+
+   # 4) Access results when completed
+   if info.get('status') == 'completed':
+       encoded_asset = info.get('encoded_asset')
+       print('Encoded asset available at:', encoded_asset)
+
+Notes
+-----
+- The exact encoding endpoint path is server-dependent. Check your server's API documentation for the correct URL.
+- Ensure your API user has permissions to initiate encoding jobs.
+- If you require real-time updates, enable the event hub in the Session and subscribe to the encoding-related events.
+
+See also
+--------
+- ftrack_api.session.Session
+- ftrack_api.session.SessionAuthentication
+- ftrack_api.event.hub.EventHub (for real-time updates)

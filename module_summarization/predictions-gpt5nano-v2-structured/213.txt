@@ -1,0 +1,180 @@
+Nonparametric Methods
+=====================
+
+This section documents the nonparametric tools implemented in the univariate kernel density estimation (KDE) module. The primary focus is the KDEUnivariate class, which provides fast univariate density estimation using kernel methods.
+
+Univariate Kernel Density Estimation
+------------------------------------
+
+Overview
+~~~~~~~~
+Kernel Density Estimation (KDE) is a nonparametric method to estimate the probability density function of a random variable. The KDEUnivariate class in this module implements a fast, FFT-based univariate KDE. It is designed for continuous, univariate data and is significantly faster than multivariate KDE in part due to its FFT-based approach.
+
+Notes
+~~~~~
+- If cdf, sf, cumhazard, or entropy are computed, they use the kernel’s definition rather than any FFT approximation, even when FFT is used for the density estimate.
+- KDEUnivariate is optimized for speed in the univariate case. KDEMultivariate is provided for mixed data and higher dimensions.
+- See Also: KDEMultivariate, kdensity, kdensityfft for related functionality.
+
+API Reference
+--------------
+
+KDEUnivariate
+~~~~~~~~~~~~~~
+
+Class: KDEUnivariate(endog)
+
+- endog : array_like
+  The univariate data for which the density estimate is desired.
+- Initialization stores the input as a 1-D, contiguous array.
+
+Methods
+^^^^^^^
+
+fit(...)
+    Attach the density estimate to the KDEUnivariate instance.
+
+    Parameters
+    ----------
+    kernel : str, optional
+        Kernel to be used. Choices (short names map to classes):
+        - "gau"  Gaussian
+        - "epa"  Epanechnikov
+        - "uni"  Uniform
+        - "tri"  Triangular
+        - "biw"  Biweight
+        - "triw" Triweight
+        - "cos"  Cosine
+        - "cos2" Cosine2
+
+        Default: "gau"
+
+    bw : str, float, or callable, optional
+        Bandwidth selection method or value:
+        - "scott": 1.059 * A * nobs ** (-1/5), where A = min(std(x), IQR/1.34)
+        - "silverman": 0.9 * A * nobs ** (-1/5), same A
+        - "normal_reference": C * A * nobs ** (-1/5), with kernel-dependent C
+        - float: a user-specified bandwidth
+        - callable: a function returning a bandwidth given (x, kern)
+          The callable should accept exactly two parameters and return a float.
+        Notes:
+        - If bw is a string, self.bw_method stores the chosen method.
+        - If bw is numeric or callable, bandwidth is computed accordingly.
+
+    fft : bool, optional
+        Use the FFT-based implementation. Only Gaussian kernel is supported with FFT.
+        If FFT is True, weights must be None. The FFT approach is faster but limited
+        to the Gaussian kernel.
+
+    weights : array_like, optional
+        Weights for weighted KDE. If provided, the weights are normalized internally
+        to sum to one. Weights are not implemented for the FFT-based estimator.
+
+    gridsize : int, optional
+        Number of grid points in the support. If None, it defaults to max(len(endog), 50).
+
+    adjust : float, optional
+        An adjustment factor for the bandwidth. The effective bandwidth becomes bw * adjust.
+
+    cut : float, optional
+        Extent of the grid beyond the observed data range. The grid extends to
+        +/- cut * (bw * span), where span is determined by the data range.
+
+    clip : tuple of float, optional
+        Data clipping bounds for kernel evaluation. By default, no clipping is performed
+        (clip = (-inf, inf)).
+
+    Returns
+    -------
+    KDEUnivariate
+        The instance with the density estimate attached.
+
+Attributes set by fit
+~~~~~~~~~~~~~~~~~~~~~
+- density : ndarray
+    Estimated density values on the evaluation grid.
+- support : ndarray
+    The grid (evaluation points) on which density is evaluated.
+- bw : float
+    The bandwidth used for the estimate.
+- kernel : kernel instance
+    The kernel object (with bandwidth) used for density calculation.
+- _cache : dict
+    Internal cache for computed results; reset on re-fit.
+
+Cache and validation
+~~~~~~~~~~~~~~~~~~~~
+- Callers should use dens = KDEUnivariate(endog).fit(...) to obtain a usable instance.
+- A subsequent call to dens.cdf (see below) requires that fit has been called; otherwise a ValueError is raised.
+
+Important properties
+~~~~~~~~~~~~~~~~~~~~
+cdf
+    Cumulative distribution function evaluated at the support grid.
+
+    Notes
+    -----
+    - Requires that fit has been called.
+    - Uses the kernel’s density to compute the cumulative probability up to each grid point.
+
+    Example
+    ~~~~~~~
+    >>> import numpy as np
+    >>> import statsmodels.api as sm
+    >>> data = np.random.normal(size=300)
+    >>> kde = sm.nonparametric.KDEUnivariate(data).fit()
+    >>> # CDF values on the support
+    >>> cdf_vals = kde.cdf
+
+Usage Examples
+--------------
+
+Simple KDE (Gaussian kernel, default bandwidth)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+>>> import numpy as np
+>>> import statsmodels.api as sm
+>>> np.random.seed(1234)
+>>> data = np.random.normal(size=300)
+>>> kde = sm.nonparametric.KDEUnivariate(data).fit()
+>>> # Access density on the computed grid
+>>> density = kde.density
+>>> grid = kde.support
+
+Custom bandwidth and kernel
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+>>> kde = sm.nonparametric.KDEUnivariate(data).fit(kernel="epa", bw="silverman")
+>>> density = kde.density
+>>> grid = kde.support
+>>> bw_used = kde.bw
+>>> kernel_obj = kde.kernel  # kernel instance with bandwidth
+
+FFT-based KDE (Gaussian kernel only)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+>>> kde_fft = sm.nonparametric.KDEUnivariate(data).fit(fft=True, kernel="gau", bw="normal_reference")
+>>> density_fft = kde_fft.density
+>>> grid_fft = kde_fft.support
+
+Notes on bandwidth selection
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+- scott: 1.059 * A * nobs ** (-1/5)
+- silverman: 0.9 * A * nobs ** (-1/5)
+- normal_reference: kernel-dependent constant C times A and nobs ** (-1/5)
+- A = min(std(x), IQR/1.34)
+- These options can be combined with the various kernels, with the exception of FFT (which requires Gaussian).
+
+References
+----------
+
+- Racine, Jeff. (2008). Nonparametric Econometrics: A Primer. Foundation and Trends in Econometrics: Vol 3: No 1, pp1-88.
+  http://dx.doi.org/10.1561/0800000009
+- Wikipedia: Kernel (statistics)
+- Silverman, B.W. Density Estimation for Statistics and Data Analysis
+
+Code Anatomy (High-Level)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+- Kernel selection: A kernel_switch mapping connects short names to kernel classes (Gaussian, Epanechnikov, Uniform, Triangular, Biweight, Triweight, Cosine, Cosine2).
+- The KDEUnivariate.fit method computes the density and stores it on the instance as density and the grid as support.
+- The class supports both FFT-based and non-FFT-based estimation paths. FFT path is constrained to Gaussian kernel and no weights.
+- The cdf property uses the kernel’s density function to compute the CDF on the evaluation grid.
+
+This documentation reflects the current capabilities of nonparametric KDE in the univariate context and provides practical guidance for usage, parameter choices, and common workflows.

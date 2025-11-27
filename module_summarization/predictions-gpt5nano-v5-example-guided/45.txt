@@ -1,0 +1,158 @@
+Logging Module
+==============
+
+Overview
+--------
+This module sets up the application's logging system. It provides a custom log level (NOTICE), a mapping from string level names to numeric levels, and a Logging class that configures console, file, and syslog logging based on the application's configuration. It supports rotating file logs and various syslog transports/formats.
+
+Key Components
+-------------
+- LOG_NOTICE and custom log level
+  - Defines a non-standard log level NOTICE (value 25) and registers it with the logger.
+  - Intended for informational notices visible in non-verbose modes, not for warnings or errors.
+
+  Example:
+  .. code-block:: python
+
+     LOG_NOTICE = 25
+     """
+     Info log level that is visible in non-verbose mode. It should not be used for warnings and errors.
+     """
+     logging.addLevelName(LOG_NOTICE, "NOTICE")
+
+- _NAME_TO_LEVEL mapping
+  - Maps string level names (e.g., "DEBUG", "INFO", "NOTICE") to the corresponding numeric logging levels.
+  - Supports common aliases (e.g., "NOT SET", "NOT SET", "NOT_SET", "LOG_NOTICE").
+
+- Logging class
+  - Class: Logging
+  - Purpose: Initialize and configure logging for the application.
+  - Key responsibilities:
+    - Acquire the root logger and conditionally add console, file, and syslog handlers.
+    - Console logging: enabled when stdout is a TTY or when ASABFORCECONSOLE is set.
+    - File logging: optional rotating file handler configured via Config["logging:file"].
+    - Rotation: supports rotation intervals via the "rotate_every" configuration and a timer-based scheduler.
+    - Syslog logging: optional, supports multiple transports (UNIX socket, TCP/UDP, UNIX domain sockets) and multiple formats (RFC5424, RFC3164, macOS style).
+
+- Configuration-driven behavior
+  - Reads settings from Config (e.g., logging:file:path, logging:file:backup_count, logging:file:backup_max_bytes, logging:file:rotate_every, logging:syslog:enabled, logging:syslog:address, logging:syslog:format, logging:sd_id).
+  - Uses a StructuredDataFormatter for file logging and various formatters for syslog.
+
+- External dependencies (referenced in code)
+  - StructuredDataFormatter: used for file logging formatting.
+  - MacOSXSyslogFormatter, SyslogRFC5424Formatter, SyslogRFC5424microFormatter, SyslogRFC3164Formatter: syslog formatters.
+  - AsyncIOHandler: asynchronous transport for syslog.
+  - Timer: used to schedule log rotation checks.
+  - Config: configuration interface used to read settings.
+
+Usage
+-----
+- Typical usage: instantiate the Logging class with the application object (which provides an event loop and other app context).
+
+  Example:
+  .. code-block:: python
+
+     # Assuming `app` is your application object with required attributes (e.g., Loop)
+     from log import Logging
+     log = Logging(app)
+
+- Console logging
+  - Console logging is enabled if stdout is a TTY or ASABFORCECONSOLE environment variable is set.
+
+- File logging
+  - Path is taken from Config["logging:file"]["path"].
+  - Creates the directory if needed.
+  - Uses a rotating file handler with backup_count and backup_max_bytes from config.
+  - Formats using StructuredDataFormatter with fmt, datefmt, and sd_id.
+
+  Example snippet (config-driven behavior):
+  .. code-block:: python
+
+     self.FileHandler = logging.handlers.RotatingFileHandler(
+         file_path,
+         backupCount=Config.getint("logging:file", "backup_count"),
+         maxBytes=Config.getint("logging:file", "backup_max_bytes"),
+     )
+     self.FileHandler.setLevel(logging.DEBUG)
+     self.FileHandler.setFormatter(StructuredDataFormatter(
+         fmt=Config["logging:file"]["format"],
+         datefmt=Config["logging:file"]["datefmt"],
+         sd_id=Config["logging"]["sd_id"],
+     ))
+     self.RootLogger.addHandler(self.FileHandler)
+
+- Syslog logging
+  - If enabled via Config["logging:syslog"].getboolean("enabled"), the module configures an AsyncIOHandler with appropriate transport based on the address scheme.
+  - Address schemes supported:
+    - /path: UNIX domain socket (file-based)
+    - tcp://host:port or udp://host:port
+    - unix-connect://path or unix-sendto://path
+  - Configured formatters:
+    - 'm' -> MacOSXSyslogFormatter
+    - '5' -> SyslogRFC5424Formatter
+    - '5micro' -> SyslogRFC5424microFormatter
+    - any other value -> SyslogRFC3164Formatter
+  - The syslog handler is attached to the root logger and uses DEBUG level.
+
+Details
+-------
+- The Logging class only configures handlers if the root logger currently has no handlers, preventing duplicate sinks during reinitialization.
+- The code supports both console-oriented deployments and production setups with file and/or remote syslog sinks.
+- Rotation timing is configurable via rotate_every, parsed as a value like "10d", "5H", "30M", or "60s", and converted to seconds for the timer.
+- The implementation is designed to work within an asyncio-based application (uses app.Loop and AsyncIOHandler for syslog).
+
+Notes
+-----
+- The module integrates with the app’s configuration system (Config) and its event loop (via Timer and AsyncIOHandler).
+- Some components (e.g., StructuredDataFormatter, AsyncIOHandler, and various Syslog formatters) are part of the broader logging framework and are referenced here to enable structured, flexible logging.
+
+Code excerpt references
+-----------------------
+- Custom log level and mapping:
+  .. code-block:: python
+
+     LOG_NOTICE = 25
+     """
+     Info log level that is visible in non-verbose mode. It should not be used for warnings and errors.
+     """
+     logging.addLevelName(LOG_NOTICE, "NOTICE")
+
+     _NAME_TO_LEVEL = {
+         "NOTSET": logging.NOTSET,
+         "NOT SET": logging.NOTSET,
+         "NOT_SET": logging.NOTSET,
+         "DEBUG": logging.DEBUG,
+         "INFO": logging.INFO,
+         "NOTICE": LOG_NOTICE,
+         "LOG_NOTICE": LOG_NOTICE,
+         "LOG NOTICE": LOG_NOTICE,
+         "WARNING": logging.WARNING,
+         "WARN": logging.WARNING,
+         "ERROR": logging.ERROR,
+         "FATAL": logging.CRITICAL,
+         "CRITICAL": logging.CRITICAL,
+     }
+
+- Class outline (constructor only, abbreviated):
+  .. code-block:: python
+
+     class Logging(object):
+
+         def __init__(self, app):
+             self.RootLogger = logging.getLogger()
+
+             self.ConsoleHandler = None
+             self.FileHandler = None
+             self.SyslogHandler = None
+
+             if not self.RootLogger.hasHandlers():
+                 # Console, File, and Syslog setup as described above
+                 ...
+
+How to extend or customize
+--------------------------
+- To adjust where logs go, modify the Config keys under logging:file or logging:syslog.
+- To add new syslog formats, implement a new formatter and extend the mapping in the Logging class accordingly.
+- To change the custom NOTICE level, adjust LOG_NOTICE and register its name with logging.addLevelName.
+
+---

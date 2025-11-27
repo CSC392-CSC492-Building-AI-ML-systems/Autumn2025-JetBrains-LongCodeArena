@@ -1,0 +1,172 @@
+Decision Trees
+================
+
+Overview
+--------
+
+This portion of the codebase defines the impurity criterion interface used by decision-tree learners to evaluate and compare potential splits. The core idea is to abstract the calculation and management of impurity, node values, and the statistics required to move from a parent node to its left and right children during split evaluation. Implementations of this interface (e.g., classification and regression criteria) provide concrete impurity measures (e.g., Gini/Entropy for classification, MSE for regression) and the logic to update statistics efficiently as a split is scanned.
+
+Key concepts
+------------
+
+- Node and splits
+  - A node corresponds to a subset of samples (defined by a contiguous range in sample_indices: start to end).
+  - A split at a position partitions the samples into left and right children.
+  - Weighted sampling is supported via sample_weight and weighted_n_samples.
+
+- Impurity
+  - Impurity measures quantify the heterogeneity of the target variable(s) within a node.
+  - The goal of the tree algorithm is to find splits that maximize impurity reduction (i.e., produce purer children).
+
+- Sample management
+  - sample_indices defines which samples are considered at the current node.
+  - When evaluating splits, statistics are updated as samples move from the right child to the left child.
+  - Missing values handling is supported via a dedicated mechanism (init_missing) and an assumption about where missing values are placed in the sample indices.
+
+- Performance optimizations
+  - proxy_impurity_improvement provides a fast, monotone surrogate for impurity improvement to speed the search for the best split.
+  - The actual impurity improvement can be computed once the best split is found (impurity_improvement).
+
+The Criterion interface
+-------------------------
+
+The abstract Criterion class encapsulates all responsibilities related to impurity calculation and the split evaluation workflow. Subclasses provide concrete implementations for specific impurity metrics (e.g., classification vs. regression). The primary responsibilities exposed by the interface are:
+
+- Initialization and setup
+  - init(y, sample_weight, weighted_n_samples, sample_indices, start, end)
+    - Initialize the criterion for the current node.
+    - y: buffer to store target values for samples in the current node (n_outputs support).
+    - sample_weight: weights of samples.
+    - weighted_n_samples: total weight of samples considered in this node.
+    - sample_indices[start:end]: mask/indices of samples in the node.
+    - start, end: bounds in the sample_indices array for the node.
+
+  - init_missing(n_missing)
+    - Allocate and initialize structures needed when there are missing values for a feature being considered.
+    - Assumes missing samples are placed at the end of the node’s sample_indices.
+
+- Split evaluation lifecycle
+  - reset()
+    - Reset the criterion at the left boundary (start) for evaluating a potential split.
+    - Must be implemented by the subclass.
+
+  - reverse_reset()
+    - Reset the criterion at the right boundary (end) for evaluating a potential split.
+    - Must be implemented by the subclass.
+
+  - update(new_pos)
+    - Move statistics as the split boundary shifts from the current position to new_pos.
+    - This effectively moves samples from the right child to the left child in the ongoing scan for the best split.
+    - Must be implemented by the subclass.
+
+- Impurity computation
+  - node_impurity()
+    - Compute the impurity of the current node (samples in [start, end)).
+
+  - children_impurity(impurity_left, impurity_right)
+    - Compute the impurities for the left and right children given the current split position.
+    - Writes results to the provided memory locations.
+
+  - node_value(dest)
+    - Compute and store the node’s value (e.g., predicted value for the node) into dest.
+
+  - clip_node_value(dest, lower_bound, upper_bound)
+    - Clip the node value to given bounds, writing the result to dest.
+    - Useful to enforce value constraints (e.g., monotonicity or domain-specific bounds).
+
+- Monotonicity and auxiliary helpers
+  - middle_value()
+    - Compute the middle value of a split for monotonicity constraints.
+    - Implemented by specialized Criterion subclasses (e.g., ClassificationCriterion, RegressionCriterion).
+
+  - proxy_impurity_improvement()
+    - Compute a fast proxy for impurity improvement to expedite the search for the best split.
+    - Uses children_impurity internally and returns a quantity that preserves the ordering of the true impurity decrease.
+
+  - impurity_improvement(impurity_parent, impurity_left, impurity_right)
+    - Compute the actual impurity improvement for a potential split given:
+      - impurity_parent: impurity of the current node before splitting
+      - impurity_left: impurity of the left child
+      - impurity_right: impurity of the right child
+    - Formula (conceptual): 
+      N_t / N * (impurity_parent - (N_t_R / N_t) * impurity_right - (N_t_L / N_t) * impurity_left)
+      where N is the total sample count, N_t is the number of samples in the node, N_t_L and N_t_R are the numbers in the left and right children, respectively. The implementation uses weighted counts in place of simple counts.
+
+Usage pattern (how the pieces fit together)
+-------------------------------------------
+
+1. Initialize the node
+   - Call init(...) with the node’s samples (via sample_indices[start:end]) and target values y, along with sample weights.
+
+2. Compute parent impurity
+   - Use node_impurity() to determine the impurity of the current node before splitting.
+
+3. Scan potential splits
+   - For each candidate split position between start and end:
+     - Call reset() to position the criterion at the left boundary.
+     - Iteratively call update(pos) as the split boundary moves, updating statistics to reflect moving samples from the right to the left child.
+     - After each position, query impurity_left and impurity_right via children_impurity(), and compute impurity_improvement(impurity_parent, impurity_left, impurity_right).
+     - Optionally use proxy_impurity_improvement() to speed up the search and only compute the exact impurity_improvement for the best candidate.
+
+4. Select the best split
+   - Choose the split position that yields the maximum impurity_improvement (or proxy value, if speed-scoped).
+
+5. Compute node values
+   - After selecting a split, compute the node’s value with node_value(dest) and enforce any required clipping with clip_node_value(...) if applicable.
+
+6. Handle missing values
+   - If the considered feature has missing values, use init_missing(n_missing) to prepare internal structures, and ensure missing samples are placed at the end of sample_indices as assumed by the implementation.
+
+7. Recurse for children
+   - The left and right child nodes inherit their respective subsets of samples and repeat the process.
+
+Practical notes
+--------------
+
+- Weighting
+  - The implementation emphasizes sample weights, allowing non-uniform sample importance. All impurity and split calculations operate on weighted counts where applicable.
+
+- Missing values
+  - The Criterion interface provides a dedicated pathway to initialize and handle missing values without breaking the continuous split evaluation loop.
+
+- Monotonicity constraints
+  - middle_value and the related machinery support monotonicity constraints in splits (useful for ordinal targets or domain-specific monotone relationships). Concrete Criterion subclasses implement the exact behavior.
+
+- Efficiency considerations
+  - The proxy_impurity_improvement method offers a fast heuristic for prioritizing split candidates, reducing the number of expensive impurity computations. The exact impurity_improvement is computed only for the best candidate identified by the proxy.
+
+Example (high-level)
+---------------------
+
+- Suppose you have a dataset with features X and target y. To grow a tree node:
+
+  - Prepare the node with the samples in the current region.
+  - Compute the node’s impurity (e.g., Gini/Entropy for classification, MSE for regression).
+  - For each candidate split position p in (start+1, end):
+    - Move samples from right to left up to p, updating statistics with update(p).
+    - Retrieve impurity_left and impurity_right via the children_impurity call.
+    - Compute impurity_improvement(parent, impurity_left, impurity_right).
+    - Track the best p achieving the maximal improvement (or proxy improvement).
+  - Use node_value to set the predicted value for the node if needed (e.g., regression mean).
+  - Create left and right child nodes with their corresponding sample subsets and repeat.
+
+Notes for implementers
+----------------------
+
+- The Criterion interface is designed to be subclassed for different impurity measures. Subclasses must provide concrete logic for:
+  - init, reset, reverse_reset, update
+  - node_impurity, children_impurity, node_value
+  - middle_value (for monotonicity constraints)
+  - Any feature-specific handling of missing values (via init_missing)
+- The interface intentionally uses memory views (Cython) and explicit start/end indices to enable efficient, in-place updates during split evaluation.
+
+References in code
+------------------
+
+- Decision-tree core algorithms rely on:
+  - Impurity calculation and its changes under split (impurity_improvement)
+  - Efficient scan over potential split points (update, reset, reverse_reset)
+  - Handling of sample weights and missing values
+  - Optional speedups via proxy_impurity_improvement
+
+This design enables a clear separation between the general tree-building workflow and the specifics of impurity metrics, while allowing concrete implementations to optimize for performance and domain-specific constraints.

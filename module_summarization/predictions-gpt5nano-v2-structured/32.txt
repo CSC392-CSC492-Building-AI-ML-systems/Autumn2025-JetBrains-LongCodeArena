@@ -1,0 +1,152 @@
+w_run.rst
+
+w_run — Start or Continue a WEST simulation
+
+Overview
+--------
+w_run is the command-line entry point used to start or continue a WEST simulation. It initializes the simulation environment by loading the configured work manager, simulation manager, system driver, data manager, propagator, and WE driver, wires them together, and then executes the run. It supports multi-process/hierarchical execution through WestPA’s work managers and provides a small debugging mode to propagate a single segment.
+
+Synopsis
+--------
+w_run [OPTIONS]
+
+Options
+-------
+- --oneseg
+  - dest: only_one_segment
+  - type: boolean
+  - Description: Propagate only a single segment. Useful for debugging propagators.
+
+- Other options
+  - Additional arguments are provided by:
+    - westpa.rc.add_args(parser): global WestPA runtime configuration
+    - work_managers.environment.add_wm_args(parser): work-manager specific arguments
+  - See w_run --help for a complete list of arguments available in your configured environment.
+
+Note: The exact set of options depends on your WestPA configuration (rc files) and the selected work manager environment. Use w_run --help to inspect the options applicable to your setup.
+
+How it works
+------------
+1. Create and configure the work manager:
+   - The code calls make_work_manager() and binds it to the WestPA runtime (westpa.rc.work_manager).
+
+2. Load drivers and managers:
+   - Simulation manager (sim_manager)
+   - System driver (system)
+   - Data manager (data_manager)
+   - WE driver (we_driver)
+   - Propagator (propagator)
+
+3. Wire components together:
+   - propagator.system = system
+   - data_manager.system = system
+   - we_driver.system = system
+   - sim_manager.data_manager = data_manager
+   - sim_manager.system = system
+   - sim_manager.propagator = propagator
+   - sim_manager.we_driver = we_driver
+
+4. Execute within the work manager context:
+   - If the current process is the master:
+     - Install a SIGINT handler and load plugins
+     - Prepare the run (sim_manager.prepare_run)
+     - Run the simulation (sim_manager.run)
+     - Finalize the run (sim_manager.finalize_run)
+     - Handle KeyboardInterrupt and general exceptions, reporting status and logging errors
+   - If the process is a worker:
+     - Run the work manager loop (work_manager.run)
+
+5. Entry point:
+   - The script uses a conventional __main__ guard to call entry_point() when invoked directly.
+
+Usage examples
+--------------
+- Start a new simulation (default configuration):
+  - w_run
+
+- Continue a previously configured run (same environment and configuration):
+  - w_run
+
+- Debug a propagator by propagating only a single segment:
+  - w_run --oneseg
+
+- Run with the configured work-manager environment (e.g., MPI or a cluster backend):
+  - mpirun -n 4 w_run
+  - (The exact MPI/cluster invocation depends on your environment and WM configuration.)
+
+Code reference (main flow)
+--------------------------
+The following excerpt shows the core flow of w_run as implemented:
+
+.. code-block:: python
+
+    def entry_point():
+        parser = argparse.ArgumentParser('w_run','start/continue a WEST simulation')
+        westpa.rc.add_args(parser)
+        parser.add_argument(
+            '--oneseg',
+            dest='only_one_segment',
+            action='store_true',
+            help='only propagate one segment (useful for debugging propagators)',
+        )
+
+        work_managers.environment.add_wm_args(parser)
+
+        args = parser.parse_args()
+        westpa.rc.process_args(args)
+        work_managers.environment.process_wm_args(args)
+
+        run_simulation()
+
+    def run_simulation():
+        work_manager = westpa.rc.work_manager = make_work_manager()
+
+        sim_manager = westpa.rc.get_sim_manager()
+        system = westpa.rc.get_system_driver()
+        data_manager = westpa.rc.get_data_manager()
+        we_driver = westpa.rc.get_we_driver()
+        propagator = westpa.rc.get_propagator()
+
+        propagator.system = system
+        data_manager.system = system
+        we_driver.system = system
+
+        sim_manager.data_manager = data_manager
+        sim_manager.system = system
+        sim_manager.propagator = propagator
+        sim_manager.we_driver = we_driver
+
+        with work_manager:
+            if work_manager.is_master:
+                work_manager.install_sigint_handler()
+                sim_manager.load_plugins()
+
+                log.debug('preparing run')
+                sim_manager.prepare_run()
+
+                try:
+                    log.debug('beginning run')
+                    sim_manager.run()
+
+                    log.debug('finalizing run')
+                    sim_manager.finalize_run()
+                except KeyboardInterrupt:
+                    westpa.rc.pstatus('interrupted; shutting down')
+                except Exception as e:
+                    westpa.rc.pstatus('exception caught; shutting down')
+                    if str(e)!= '':
+                        log.error(f'error message: {e}')
+                    log.error(traceback.format_exc())
+            else:
+                work_manager.run()
+
+See Also
+--------
+- westpa.rc: run-time configuration and accessors for the WestPA runtime
+- westpa.work_managers: World of work-manager implementations and helpers
+- sim_manager: Simulation manager responsible for preparing, running, and finalizing simulations
+- propagator, data_manager, we_driver, system: Core drivers used by WEST simulations
+
+Notes
+-----
+- The w_run command delegates most of the heavy lifting to configured drivers and the selected work manager. The behavior adapts to single-process (debug) or multi-process (production) execution modes via the work manager.

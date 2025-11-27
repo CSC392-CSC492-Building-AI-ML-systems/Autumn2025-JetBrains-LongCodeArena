@@ -1,0 +1,314 @@
+# Config usage (config.rst)
+
+This document describes how to use the ConfigParser-based configuration class in this project. It covers the default configuration, structure, include mechanisms, environment-driven behavior, and examples of common usage patterns.
+
+---
+
+## Overview
+
+- The project provides a ConfigParser subclass with additional features:
+  - Default values for many sections and keys
+  - Inclusion of other config files (including nested includes)
+  - Support for reading configuration from ZooKeeper (via special include syntax)
+  - Environment-variable driven defaults (e.g., ASAB_CONFIG, ASAB_VERBOSE, ASAB_ZOOKEEPER_SERVERS)
+  - A dedicated passwords section to securely store passwords, with usage examples
+  - Automatic path/variable expansion for defaults
+
+- The configuration is designed to be extended at runtime via the `add_defaults()` method.
+
+---
+
+## Default configuration
+
+The class maintains a dictionary of default values in `_default_values`. These defaults are organized by INI-style sections and keys. Key aspects:
+
+- General defaults (e.g., config file path, tick period, working directory, etc.)
+- Metrics and monitoring defaults
+- Logging configuration (console, syslog, and file logging)
+- Library-related defaults
+- Password storage (empty by default; see usage below)
+- Housekeeping timing and behavior
+- Optional ZooKeeper defaults if the `ASAB_ZOOKEEPER_SERVERS` environment variable is present
+
+Important notes:
+- Some values are stored as strings in the config (e.g., booleans as `"true"/"false"` or actual Python booleans in the code). When reading, be mindful of type conversions that you perform.
+- The `config_file` value under the `general` section can be set via the `ASAB_CONFIG` environment variable.
+
+---
+
+## Configuration structure
+
+Key sections and representative keys (as defined by `_default_values`):
+
+- general
+  - config_file
+  - tick_period
+  - var_dir
+  - changelog
+  - manifest
+  - pidfile
+  - working_dir
+  - uid
+  - gid
+
+- asab:metrics
+  - native_metrics
+  - web_requests_metrics
+  - expiration
+
+- asab:doc
+  - default_route_tag
+
+- logging
+  - verbose
+  - app_name
+  - sd_id
+  - level
+  - levels
+
+- logging:console
+  - format
+  - datefmt
+
+- logging:syslog
+  - enabled
+  - address
+  - format
+
+- logging:file
+  - path
+  - format
+  - datefmt
+  - backup_count
+  - backup_max_bytes
+  - rotate_every
+
+- library
+  - azure_cache
+
+- passwords
+  - (section is empty by default; example usage shown below)
+
+- housekeepung
+  - at
+  - limit
+  - run_at_startup
+
+- zookeeper
+  - servers (set automatically if ASAB_ZOOKEEPER_SERVERS is present)
+
+---
+
+## How to use the configuration
+
+### Initialization and loading
+
+- Create a ConfigParser-derived object and load configuration files. The class provides methods to support includes and zookeeper-based loading.
+- The defaults are applied automatically where not overridden by user config.
+- Environment variables can influence defaults (e.g., `ASAB_CONFIG`, `ASAB_VERBOSE`, `ASAB_ZOOKEEPER_SERVERS`).
+
+Example (conceptual, depending on how your application wires this up):
+
+```python
+from your_module.config import ConfigParser
+
+# Initialize
+config = ConfigParser()
+
+# Load the main configuration (the _load method handles defaults and includes)
+# The actual loader is invoked by the class internals; explicit calls may vary.
+config.read('path/to/config.ini')
+
+# Access values (as strings; convert as needed)
+tick = int(config.get('general', 'tick_period', fallback='1'))
+log_level = config.get('logging', 'level', fallback='NOTICE')
+```
+
+> Note: The class is designed to be used as part of the module’s startup sequence; the internal `_load()` method is intended to be invoked once to initialize state, and the public API typically centers around `read()`/`get()`-style access inherited from `ConfigParser`.
+
+### Extending defaults
+
+Use `add_defaults()` to augment or override defaults programmatically at runtime.
+
+```python
+config.add_defaults({
+    'logging': {
+        'level': 'INFO',
+    },
+    'my_section': {
+        'my_key': 'my_value',
+    }
+})
+```
+
+- If a key already exists in the section, the default will not override it (i.e., existing values take precedence).
+
+---
+
+## Includes and nested includes
+
+The configuration supports including other files:
+
+- Simple include entries are interpreted as file globs (e.g., `include = conf.d/*.ini`).
+- Nested includes are supported by recursively loading included files.
+- If an included file has already been loaded, a warning is emitted to avoid infinite loops.
+- The include mechanism respects the `include` option under the `general` section:
+  - `self.set('general', 'include', '')` is used internally to track state.
+  - The loader branches for `zookeeper:`-prefixed includes (see ZooKeeper section below).
+
+Usage example:
+
+config.ini
+```
+[general]
+include = configs/common.ini configs/service.ini
+```
+
+configs/common.ini
+```
+[logging]
+level = INFO
+```
+
+Nested include can be used to compose large configurations from smaller pieces.
+
+---
+
+## ZooKeeper-based includes
+
+If `ASAB_ZOOKEEPER_SERVERS` is set, defaults include a `zookeeper` section with `servers` populated from that environment variable. Additionally, the configuration supports a special `zookeeper:` include syntax to fetch configuration data from ZooKeeper. This enables dynamic configuration delivery.
+
+Example environment:
+```
+export ASAB_ZOOKEEPER_SERVERS=zk1:2181,zk2:2181
+```
+
+Then you can reference ZooKeeper-based configuration as:
+```
+# Pseudo-example (actual usage depends on the ZooKeeper integration)
+zookeeper://path/to/config
+```
+
+Refer to the implementation for exact syntax and behavior of `_include_from_zookeeper()`.
+
+---
+
+## Password management
+
+A dedicated `passwords` section is provided to securely store secrets. The default is empty to avoid leaking secrets in code or examples.
+
+Usage pattern in configuration files:
+
+```
+[connection:KafkaConnection]
+password=${passwords:kafka_password}
+
+[passwords]
+kafka_password=<MY_SECRET_PASSWORD>
+```
+
+- Do not print or log password values.
+- The substitution uses `passwords:<name>` to fetch the secret.
+
+---
+
+## Environment-driven behavior
+
+- `ASAB_CONFIG` overrides the default config file path for the `general.config_file` key.
+- `ASAB_VERBOSE` toggles verbose output for the logging section (default is False).
+- `ASAB_ZOOKEEPER_SERVERS` provides default ZooKeeper servers if ZooKeeper is used.
+
+---
+
+## Examples
+
+### Example 1: Minimal config with defaults
+
+config.ini
+```
+[general]
+config_file = /path/to/config.ini
+tick_period = 2
+
+[logging]
+level = INFO
+```
+
+This relies on defaults for the rest of the options defined in `_default_values`.
+
+### Example 2: Include another file
+
+config.ini
+```
+[general]
+include = conf/common.ini conf/service.ini
+```
+
+conf/common.ini
+```
+[logging:console]
+format = "%(asctime)s %(levelname)s %(message)s"
+```
+
+### Example 3: Password usage
+
+config.ini
+```
+[passwords]
+db_password = s3cr3t
+
+[connection:DBConnection]
+password=${passwords:db_password}
+```
+
+### Example 4: ZooKeeper-backed configuration (outline)
+
+config.ini
+```
+[general]
+# Other settings...
+
+# ZooKeeper-based dynamic config
+# (actual usage depends on the ZooKeeper integration in your environment)
+include = zookeeper://path/to/config
+```
+
+---
+
+## API quick reference (Python)
+
+- Class: ConfigParser (subclass of configparser.ConfigParser)
+- Key methods:
+  - add_defaults(dictionary: dict) -> None
+    - Adds defaults for sections/keys that are not already present.
+  - _traverse_includes(includes: str, this_dir: str) -> None
+    - Internal: resolves and loads included files; supports newline or space-separated includes.
+  - _load() -> None
+    - Internal: initializes internal state, loads defaults, and processes the primary config file path.
+
+Notes:
+- The class uses internal structures such as `_load_dir_stack`, `config_contents_list`, and `config_name_list` to manage state during loading.
+- The `_default_values` dictionary defines the initial, platform-aware defaults (e.g., `logging:syslog` address depends on the OS).
+
+---
+
+## Developer notes and extension points
+
+- To customize behavior, subclass ConfigParser and override or extend:
+  - `_include_from_zookeeper()` (for ZooKeeper-based configuration)
+  - `_load()` (to customize loading behavior)
+- Keep in mind:
+  - The inclusion mechanism is designed to prevent cyclic loading.
+  - The `optionxform` is used to normalize option names (typically to lowercase).
+
+---
+
+## Troubleshooting tips
+
+- If a key is missing in a loaded configuration, ensure a default is provided in `_default_values` or that the file actually defines the key.
+- If you see a warning about a config file being included more than once, it’s due to repeated includes; restructure includes to avoid duplicates.
+- When using passwords, verify that secrets are not echoed in logs or error messages.
+
+---
+
+If you need more examples or a specific integration guide (e.g., how to plug this into a particular application lifecycle), let me know your use case and I can tailor the documentation further.

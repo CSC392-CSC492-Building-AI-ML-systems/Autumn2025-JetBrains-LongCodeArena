@@ -1,0 +1,130 @@
+w_red.rst
+
+w_red Command
+=============
+
+Overview
+--------
+w_red computes rate constants for a given state pair (istate -> fstate) from a direct WESTPA HDF5 kinetics file. It can optionally apply RED (Rate Estimation with Duration) correction using the observed distribution of event durations. The result is the raw rate or the RED-corrected rate, with optional access to the correction via a callback.
+
+Key concepts
+- istate, fstate: indices of initial and final states for the rate calculation.
+- n_iters, report_interval, n_steps_iter: control the number of iterations and the time discretization used to compute dtau and the correction.
+- red: if True, applies the RED correction using the durations dataset.
+- dtau: time bin width for RED, derived from report_interval and n_steps_iter when not explicitly provided.
+
+API reference
+-------------
+
+DurationCorrector
+~~~~~~~~~~~~~~~~~
+Utility class used to compute the RED correction factor from a kinetics file.
+
+- from_kinetics_file(directh5, istate, fstate, dtau, n_iters=None)
+  - Builds a DurationCorrector from the provided HDF5 file, selecting durations for the given istate and fstate with positive weight.
+  - If dtau is None, it derives dtau from the duration grid.
+  - Returns a DurationCorrector instance.
+
+- correction(iters, freqs=None)
+  - Computes the RED correction factor for the specified iterations.
+  - Iterates over the duration histogram, normalizes to form f_tilde, and integrates to obtain a scalar correction.
+  - Returns a single float (the correction factor). If the integral is zero, returns 0.0.
+
+- Properties
+  - event_duration_histogram
+  - cumulative_event_duration_histogram
+
+get_raw_rates(directh5, istate, fstate, n_iters=None)
+- Returns the raw (un-corrected) rate for the given state pair from directh5.
+- Accesses the rate_evolution dataset and reads the 'expected' value.
+
+calc_avg_rate(directh5_path, istate, fstate, **kwargs)
+- Return the raw or RED-corrected rate constant with optional confidence handling.
+- Keyword arguments:
+  - n_iters: number of iterations to consider (default uses all available)
+  - report_interval: tau units per iteration (ntpr in code)
+  - n_steps_iter: steps per iteration (nstiter in code)
+  - red: if True, applies RED correction
+  - callback: optional function invoked with correction object when RED is used
+- If red is True, a DurationCorrector is created and provided to the callback (via a dict with key "correction").
+
+- Returns
+  - The (possibly RED-corrected) rate constant as a float.
+
+calc_rates(directh5_path, istate, fstate, **kwargs)
+- Return the raw and RED-corrected rate constants as a function of iterations.
+- The docstring indicates it provides the rates vs. iterations (faster than calling calc_avg_rate repeatedly). The exact return type is a pair of sequences (raw, corrected) representing the per-iteration rates.
+
+Usage
+-----
+
+Basic usage (raw rate)
+- Compute the raw rate constant for a given state pair.
+
+  import numpy as np
+  from westpa.tools.w_red import calc_avg_rate
+
+  rate_raw = calc_avg_rate('path/to/kinetics_direct.h5', istate=0, fstate=1)
+
+Red-corrected rate
+- Compute the RED-corrected rate with default iteration settings.
+
+  rate_red = calc_avg_rate(
+      'path/to/kinetics_direct.h5',
+      istate=0,
+      fstate=1,
+      n_iters=100,
+      report_interval=20,
+      n_steps_iter=1000,
+      red=True
+  )
+
+Callback example (access correction)
+- Retrieve the correction factor via a callback when RED is requested.
+
+  def cb(**kw):
+      corr = kw.get('correction')
+      print("RED correction factor:", corr)
+
+  rate_with_cb = calc_avg_rate(
+      'path/to/kinetics_direct.h5',
+      istate=0,
+      fstate=1,
+      n_iters=100,
+      report_interval=20,
+      n_steps_iter=1000,
+      red=True,
+      callback=cb
+  )
+
+Full rate history
+- Get raw and RED-corrected rates across iterations (using calc_rates).
+
+  raw_history, red_history = calc_rates(
+      'path/to/kinetics_direct.h5',
+      istate=0,
+      fstate=1,
+      n_iters=100,
+      report_interval=20,
+      n_steps_iter=1000,
+      red=True
+  )
+
+Notes and details
+- dtau is the time discretization used for RED. If not provided explicitly, it is derived from ntpr and nstiter as dtau = ntpr / nstiter.
+- The RED correction is defined by a histogram over durations and a normalization that ensures a unit-integral of the protection function, then integrated to yield a scalar factor to multiply the rate by.
+- The correction factor is only defined if the integral is non-zero; otherwise, the function returns 0.0 for safety.
+- The correction logic masks off irrelevant flux by zeroing weights for durations that do not match the specified istate -> fstate transition.
+
+Example workflow
+1. Inspect raw rate for a given state pair.
+2. Compute RED correction using a few iterations and a suitable time discretization.
+3. Apply the correction to obtain the RED-corrected rate.
+4. Optionally, supply a callback to monitor the correction factor during computation.
+
+References
+----------
+- DurationCorrector: internal helper for building the RED correction from the durations dataset.
+- The rate evolution data structure is expected to contain an 'expected' field with the rate value.
+
+This documentation covers the w_red command’s purpose, usage, key functionality, and representative examples based on the provided implementation.

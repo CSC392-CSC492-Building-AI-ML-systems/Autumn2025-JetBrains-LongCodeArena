@@ -1,0 +1,134 @@
+# w_assign
+
+## Overview
+The w_assign command assigns walkers to bins for a WESTPA simulation and writes an output file (default: assign.h5) containing per-iteration, per-segment, and per-timepoint bin assignments along with labeled populations. This ensures that analyses relying on the origin of each trajectory can trace trajectories back to their originating bin, even when using only a subset of data.
+
+Key internal logic includes labeling each timepoint with the most recently visited macrostate, computing per-bin populations for each macrostate, and organizing outputs in a structured WEST HDF5 format.
+
+Important internal helpers (from the implementation) include:
+- WAssign class: the command entry point
+- _assign_label_pop: computes assignments and labeled populations for a given iteration segment
+- parse_pcoord_value: utility for parsing textual progress-coordinate specifications
+
+Example internal usage (excerpt):
+```python
+class WAssign(WESTParallelTool):
+    prog = 'w_assign'
+    description = '''\
+Assign walkers to bins, producing a file (by default named "assign.h5")
+which can be used in subsequent analysis.
+
+For consistency in subsequent analysis operations, the entire dataset
+must be assigned, even if only a subset of the data will be used. This
+ensures that analyses that rely on tracing trajectories always know the
+originating bin of each trajectory.
+'''
+```
+
+## Key Components
+- WAssign (class): The main command implementation that wires together data sources, macrostates, and output formatting.
+  - prog: 'w_assign'
+  - description: Detailed explanation of purpose and data integrity guarantees.
+
+- Data extraction helpers:
+  - parse_pcoord_value(pc_str): Parses a textual progress-coordinate specification into a NumPy array with appropriate shape, supporting scalars and 1D arrays, with error handling for unsupported dimensions.
+  - _assign_label_pop(n_iter, lb, ub, mapper, nstates, state_map, last_labels, parent_id_dsspec, weight_dsspec, pcoord_dsspec, subsample): Core per-iteration operation that:
+    - Retrieves parent IDs, weights, and progress coordinates for the current slice [lb:ub]
+    - Calls assign_and_label to obtain assignments, trajectory labels, and state labels
+    - Accumulates labeled populations with accumulate_labeled_populations
+    - Returns a tuple containing assignments, trajlabels, pops, and related indices
+
+Code excerpts:
+```python
+def parse_pcoord_value(pc_str):
+    namespace = {'math': math, 'numpy': np, 'np': np, 'inf': float('inf')}
+    arr = np.array(eval(pc_str, namespace))
+    if arr.ndim == 0:
+        arr.shape = (1, 1)
+    elif arr.ndim == 1:
+        arr.shape = (1,) + arr.shape
+    else:
+        raise ValueError('too many dimensions')
+    return arr
+```
+
+```python
+def _assign_label_pop(
+    n_iter, lb, ub, mapper, nstates, state_map, last_labels, parent_id_dsspec, weight_dsspec, pcoord_dsspec, subsample
+):
+    nbins = len(state_map) - 1
+    parent_ids = parent_id_dsspec.get_iter_data(n_iter, index_exp[lb:ub])
+    weights = weight_dsspec.get_iter_data(n_iter, index_exp[lb:ub])
+    pcoords = pcoord_dsspec.get_iter_data(n_iter, index_exp[lb:ub])
+
+    assignments, trajlabels, statelabels = assign_and_label(
+        lb, ub, parent_ids, mapper.assign, nstates, state_map, last_labels, pcoords, subsample
+    )
+    pops = np.zeros((nstates + 1, nbins + 1), weight_dtype)
+    accumulate_labeled_populations(weights, assignments, trajlabels, pops)
+    return (assignments, trajlabels, pops, lb, ub, statelabels)
+```
+
+- Core data flow: The command uses a bin mapper and state map to translate raw trajectory data into per-timepoint bin assignments and macrostate labels, then records these into the output file with the appropriate datasets and attributes (described below).
+
+## Usage
+The w_assign command reads source data either from:
+- A user-specified function via --construct-dataset, which should be a Python MODULE.FUNCTION returning data shaped as [segment][timepoint][dimension].
+- A list of data set specifications via --dsspecs, where each spec is NAME[,file=FILENAME,slice=SLICE] referencing datasets in an HDF5 file.
+- If neither is provided, the progress-coordinate dataset named pcoord is used by default.
+
+Specifying macrostates:
+- You can define macrostates in three ways:
+  1) Single-bin states via --states, providing coordinate tuples (optionally with labels) for each state.
+  2) States from a YAML file via --states-from-file, listing states with a name and coords.
+  3) Arbitrary states via a user function via --states-from-function=MODULE.FUNCTION, which should return a list of state dictionaries with keys like "coords" and optional "label".
+
+Output:
+- The resulting HDF5 file (default assign.h5) contains:
+  - Attributes:
+    - nbins: Integer, number of valid bins (0..nbins-1)
+    - nstates: Integer, number of defined macrostates
+  - Datasets:
+    - /assignments [iteration][segment][timepoint]  (Integer)
+    - /npts [iteration]  (Integer)
+    - /nsegs [iteration]  (Integer)
+    - /labeled_populations [iterations][state][bin]  (Floating-point)
+    - /bin_labels [bin]  (as applicable)
+
+Example command usage (illustrative):
+- Default usage with no extra sources:
+  w_assign -o assign.h5
+- With progress-coordinate data specified via dsspecs:
+  w_assign -o assign.h5 --dsspecs pcoord
+- Using a YAML-defined set of macrostates:
+  w_assign -o assign.h5 --states-from-file macrostates.yml
+- Using a custom dataset constructor:
+  w_assign -o assign.h5 --construct-dataset mymodule.get_pcoords
+
+Notes:
+- For consistency in downstream analyses, westpa requires that the entire dataset be assigned, even if only a subset will be used later. This ensures that analyses that trace trajectories can determine their originating bin.
+
+---
+
+## Details
+- Output format and datasets
+  - nbins attribute: Number of valid bins. Assigned indices range from 0 to nbins-1.
+  - nstates attribute: Number of defined macrostates. Trajectory ensemble assignments range from 0 to nstates-1 when states are defined.
+  - /assignments: Per-iteration, per-segment, per-timepoint bin assignment indices.
+  - /npts: Number of timepoints in each iteration.
+  - /nsegs: Number of segments in each iteration.
+  - /labeled_populations: Per-iteration, per-state, per-bin floating-point values representing populations labeled by the most recently visited macrostate. The last state entry corresponds to trajectories initiated outside a defined macrostate.
+  - /bin_labels: Array of bin labels (as applicable for the current mapping).
+
+- Implementation notes
+  - The command relies on WESTProtobuf-like data accessors (e.g., get_iter_data) to retrieve per-iteration data slices.
+  - The assignment and labeling process is performed by assign_and_label, which uses the mapper’s assign function, along with the state map and last known labels to produce consistent macrostate labeling over time.
+  - Labeled populations are accumulated with accumulate_labeled_populations, producing a per-state, per-bin population matrix for each iteration.
+
+- Helpers and internal behavior
+  - parse_pcoord_value supports parsing strings into 2D arrays suitable for multi-dimensional progress coordinates.
+  - _assign_label_pop processes a slice of data for an iteration, generating the needed outputs for that portion of data.
+
+---
+
+*This documentation summarizes the behavior and usage of the w_assign command as implemented in the provided source.*

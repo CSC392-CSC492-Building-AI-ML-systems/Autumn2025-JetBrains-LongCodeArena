@@ -1,0 +1,154 @@
+# Image Extraction
+
+## Overview
+
+This module provides a collection of charge extraction algorithms to reduce camera waveforms into one value per pixel. The implemented strategies operate on per-pixel waveforms (shape: n_pix × n_samples) and produce a single charge per pixel, often together with a timing estimate. The core functionality includes several window-based summing techniques as well as lower-level utilities for time estimation and baseline handling.
+
+Key components are exposed via the public API, including a base extractor and several concrete implementations, as well as low-level numpy/numba routines for per-pixel processing.
+
+## Key Components
+
+- ImageExtractor
+  - Base class for image extraction algorithms. Defines common interfaces and integration with ctapipe components.
+
+- FlashCamExtractor
+  - A specialized extractor tailored for FlashCam-style camera data (per-pixel waveform processing).
+
+- FullWaveformSum
+  - Sums the entire waveform for each pixel to obtain the extracted charge.
+
+- FixedWindowSum
+  - Sums samples within a fixed-size window around a defined center (or peak) per pixel.
+
+- GlobalPeakWindowSum
+  - Uses a window anchored to a global peak to determine the charge per pixel.
+
+- LocalPeakWindowSum
+  - Uses a window anchored to a local peak per pixel for charge extraction.
+
+- SlidingWindowMaxSum
+  - Scans all possible windows of a given width and selects the window with the maximum sum.
+
+- NeighborPeakWindowSum
+  - Incorporates neighboring pixel information to estimate per-pixel charge using a peak-centered window.
+
+- BaselineSubtractedNeighborPeakWindowSum
+  - Similar to NeighborPeakWindowSum but applies baseline subtraction before computing the windowed sum.
+
+- TwoPassWindowSum
+  - Applies a two-pass windowing strategy to refine the extracted charge per pixel.
+
+- extract_around_peak
+  - Numba-guvectorized function that, for each pixel, sums samples within a window defined by peak_index, width, and shift, and computes a pulse time as a weighted average. The peak time is returned in nanoseconds after converting from sample indices using the sampling_rate_ghz.
+  - Signature (per pixel): waveforms (s samples), peak_index (scalar), width (scalar), shift (scalar), sampling_rate_ghz (scalar), sum_ (output scalar), peak_time (output scalar).
+
+  - Highlights from the implementation:
+    - Start and end of the integration window are derived as start = peak_index - shift and end = start + width.
+    - Only samples within [start, end) contribute to the sum.
+    - Pulse time is the weighted average of sample indices, using sample values as weights; if no positive samples exist, peak_time defaults to peak_index.
+    - peak_time is converted to nanoseconds by dividing by sampling_rate_ghz.
+
+  - Relevant snippet:
+    - The function uses a vectorized loop over samples with prange for parallelism.
+    - peak_time[0] = time_num / time_den if time_den > 0 else peak_index
+    - peak_time[0] /= sampling_rate_ghz
+    - sum_[0] = i_sum
+
+- extract_sliding_window
+  - Numba-guvectorized function that finds the largest sum of a width-sized sliding window within the waveform and computes a timing estimate as a weighted average within the chosen window.
+  - Signature (per pixel): waveforms (s samples), width (scalar), sampling_rate_ghz (scalar), sum_ (output scalar), peak_time (output scalar).
+
+  - Highlights from the implementation:
+    - Builds a cumulative waveform to efficiently compute window sums for all possible window positions.
+    - Identifies maxpos as the start of the window with the largest sum and returns that sum.
+    - Timing is computed as the weighted average of non-negative samples inside the chosen window.
+    - peak_time is converted to nanoseconds by dividing by sampling_rate_ghz.
+
+- neighbor_average
+- subtract_baseline
+- integration_correction
+
+Note: The above lower-level utilities are designed to be used by the higher-level ImageExtractor implementations and are implemented as fast, vectorized kernels (e.g., via guvectorize and njit).
+
+## Usage
+
+Typical usage involves applying the extraction kernels to a batch of per-pixel waveforms. The core inputs and outputs follow the patterns shown in the function definitions.
+
+- Basic usage of extract_around_peak
+
+  Example:
+  - waveforms: 2D array of shape (n_pix, n_samples)
+  - peak_index: 1D array of length n_pix
+  - width: 1D array of length n_pix
+  - shift: 1D array of length n_pix
+  - sampling_rate_ghz: scalar (GHz)
+  - sum_: pre-allocated 1D array of length n_pix (float32)
+  - peak_time: pre-allocated 1D array of length n_pix (float32)
+
+  Example code:
+  ```python
+  import numpy as np
+  from ctapipe.image.extractor import extract_around_peak
+
+  # Example inputs
+  waveforms = np.random.normal(size=(n_pix, n_samples)).astype(np.float64)
+  peak_index = np.zeros(n_pix, dtype=np.int64)
+  width = np.ones(n_pix, dtype=np.int64) * 5
+  shift = np.zeros(n_pix, dtype=np.int64)
+  sampling_rate_ghz = 0.2  # example value
+
+  sum_ = np.zeros(n_pix, dtype=np.float32)
+  peak_time = np.zeros(n_pix, dtype=np.float32)
+
+  extract_around_peak(waveforms, peak_index, width, shift, sampling_rate_ghz, sum_, peak_time)
+  # sum_ now contains the extracted charges per pixel
+  # peak_time contains the per-pixel pulse times in ns
+  ```
+
+- Basic usage of extract_sliding_window
+
+  Example:
+  - waveforms: 2D array of shape (n_pix, n_samples)
+  - width: 1D array of length n_pix
+  - sampling_rate_ghz: scalar (GHz)
+  - sum_: pre-allocated 1D array of length n_pix
+  - peak_time: pre-allocated 1D array of length n_pix
+
+  Example code:
+  ```python
+  from ctapipe.image.extractor import extract_sliding_window
+
+  waveforms = np.random.normal(size=(n_pix, n_samples)).astype(np.float64)
+  width = np.ones(n_pix, dtype=np.int64) * 10
+  sampling_rate_ghz = 0.2
+
+  sum_ = np.zeros(n_pix, dtype=np.float32)
+  peak_time = np.zeros(n_pix, dtype=np.float32)
+
+  extract_sliding_window(waveforms, width, sampling_rate_ghz, sum_, peak_time)
+  ```
+
+- Using higher-level extractors (conceptual)
+
+  While the low-level kernels perform per-pixel arithmetic, the higher-level ImageExtractor implementations orchestrate per-pixel processing, configure window parameters, and integrate with ctapipe’s data containers. Typical usage involves selecting an extractor (e.g., FullWaveformSum, FixedWindowSum, GlobalPeakWindowSum) and applying it to a DL1-like camera container to obtain per-pixel charges and times.
+
+## Details
+
+- Data shapes and types
+  - waveforms: ndarray with shape (n_pix, n_samples)
+  - peak_index, width, shift: per-pixel parameters; in the extract_around_peak kernel, peak_index, width, and shift are treated as per-pixel scalar inputs.
+  - sampling_rate_ghz: float describing the camera sampling rate in GHz
+  - sum_: per-pixel output charge, typically float32
+  - peak_time: per-pixel output time, returned in nanoseconds (ns)
+
+- Time units
+  - The timing results (peak_time) are expressed in nanoseconds. This is achieved by dividing the sample index-based time by the sampling_rate_ghz.
+
+- Implementation notes
+  - The extract_around_peak and extract_sliding_window functions are implemented as numba guvectorized kernels to operate efficiently across all pixels.
+  - Both kernels return their results through the sum_ and peak_time output arguments; callers pass pre-allocated arrays for these outputs.
+
+- Dependencies
+  - numpy, numba (guvectorize, njit), astropy.units (u), scipy (for related utilities), and ctapipe components (for integration with camera descriptions and data containers).
+
+For more details, refer to the in-code docstrings of extract_around_peak and extract_sliding_window, which describe the exact behavior, inputs, and outputs.

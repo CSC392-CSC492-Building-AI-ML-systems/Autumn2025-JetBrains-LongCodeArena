@@ -1,0 +1,156 @@
+# Datasets: Dataset loading utilities
+
+This section documents the internal dataset loading utilities used to fetch, cache, and validate OpenML datasets. The utilities focus on robust network handling, local caching with atomic updates, and support for gzip-encoded payloads and ARFF data where applicable.
+
+Note: The helpers described here are intended for developers extending or debugging the OpenML dataset loading pathway (e.g., fetch_openml). They are primarily internal APIs (prefixed with underscores) but are valuable for understanding the end-to-end dataset loading flow.
+
+---
+
+## Overview
+
+- The OpenML dataset loading pipeline relies on a set of utilities that:
+  - Construct local cache paths for downloaded data.
+  - Download resources from OpenML.org with retry logic and error handling.
+  - Decompress gzip-encoded payloads transparently.
+  - Cache downloaded resources locally with atomic moves to avoid race conditions.
+  - Load JSON metadata from the OpenML API and expose structured types for features and qualities.
+
+- Core goals:
+  - Robustness in the presence of transient network failures.
+  - Efficient offline usage via caching (data_home).
+  - Safe concurrent access through atomic file operations.
+  - Clear separation of concerns between fetching, caching, and parsing.
+
+---
+
+## Core endpoints and data flow
+
+- OpenML API endpoints (constants):
+  - _OPENML_PREFIX: Base API URL (https://api.openml.org/)
+  - _SEARCH_NAME: api/v1/json/data/list/data_name/{name}/limit/2
+  - _DATA_INFO: api/v1/json/data/{data_id}
+  - _DATA_FEATURES: api/v1/json/data/features/{data_id}
+  - _DATA_QUALITIES: api/v1/json/data/qualities/{data_id}
+  - _DATA_FILE: data/v1/download/{data_id}
+
+- Local cache path:
+  - _get_local_path(openml_path, data_home) -> data_home/openml.org/{openml_path}.gz
+
+- Data structures:
+  - OpenmlQualitiesType = List[Dict[str, str]]
+  - OpenmlFeaturesType = List[Dict[str, str]]
+
+- Typical loading sequence (high-level):
+  1. Resolve a particular OpenML dataset identifier (data_id) and construct the relevant API endpoints.
+  2. Use _open_openml_url to fetch resources from OpenML:
+     - If data_home is provided, cache locally and serve from the cache when available.
+     - If data_home is None, fetch directly from the network.
+     - Automatically detect gzip-encoded responses and decompress as needed.
+  3. Parse JSON metadata via _get_json_content_from_openml_api to obtain data info, features, and qualities.
+  4. Retrieve the actual dataset file via the _DATA_FILE endpoint and decompress as necessary.
+  5. Load ARFF data if applicable (via load_arff_from_gzip_file).
+
+---
+
+## Key utilities
+
+### _get_local_path(openml_path, data_home)
+- Purpose: Compute the local cache path for a given OpenML resource under the specified data_home.
+- Behavior:
+  - Returns: data_home/openml.org/{openml_path}.gz
+- Usage pattern: Used by caching logic to determine where to store or read a downloaded resource.
+
+### _retry_with_clean_cache(openml_path, data_home, no_retry_exception=None)
+- Purpose: Decorator that retries a function after cleaning the local cache if the first run fails.
+- Behavior:
+  - If data_home is None: executes once (no caching).
+  - If the decorated function raises an exception (except those specified in no_retry_exception), the local cached file is removed (if present) and the function is retried.
+  - Raises the original exception if the retry still fails or if no_retry_exception is triggered.
+- Typical use: Wraps a function that downloads/reads a cached resource to ensure a corrupted cache triggers a clean retry.
+
+### _retry_on_network_error(n_retries=3, delay=1.0, url="")
+- Purpose: Decorator to retry a function on network-related errors.
+- Behavior:
+  - Retries up to n_retries with a delay between attempts on URLError/TimeoutError.
+  - If an HTTPError with status code 412 is raised, the error is propagated without retry (412 is treated as an OpenML-specific generic error).
+  - On success, returns the function’s result.
+- Typical use: Wraps network I/O functions that fetch data from OpenML.org to improve resilience against transient network problems.
+
+### _open_openml_url(openml_path, data_home, n_retries=3, delay=1.0)
+- Purpose: Retrieve a resource from OpenML.org, with optional caching to disk.
+- Behavior:
+  - Builds a full URL using _OPENML_PREFIX and the provided openml_path.
+  - Sends Accept-encoding: gzip header to request gzip-encoded payloads.
+  - If data_home is None:
+    - Uses _retry_on_network_error to fetch the resource.
+    - If the response is gzip-encoded, wraps it with gzip.GzipFile to provide a file-like, decompressed stream.
+  - If data_home is provided:
+    - Checks for a cached local file via _get_local_path.
+    - If the cache does not exist, downloads the resource using a temporary directory (TemporaryDirectory) and performs an atomic move to the final cache path (to avoid partial writes under concurrent access).
+    - Decompresses on the fly by returning a file-like object:
+      - If the source is gzip-encoded, uses gzip.GzipFile on the local cached file.
+      - Otherwise, uses the standard open (or a corresponding decompression wrapper if needed).
+- Returns: A file-like object (stream) to the resource content, decompressed if necessary.
+- Notes:
+  - The atomic cache move ensures concurrency safety for multiple processes requesting the same dataset.
+  - Exceptions during download trigger cleanup of any partial cache file.
+
+### OpenMLError
+- Custom exception type indicating OpenML-related HTTP 412 semantic errors.
+- Purpose: Distinguish OpenML generic errors from other HTTP/network issues.
+
+### _get_json_content_from_openml_api(url, error_message, data_home, n_retries=3, delay=1.0)
+- Purpose: Load JSON data from an OpenML API endpoint.
+- Parameters:
+  - url: The endpoint URL (relative to _OPENML_PREFIX) to fetch JSON data from.
+  - error_message: Optional message to present in case of failure.
+  - data_home: Optional cache directory; if provided, responses may be cached using the caching mechanism described above.
+  - n_retries, delay: Retry policy for network errors.
+- Returns: Parsed JSON as a Python dict.
+- Notes:
+  - The function leverages the URL opening and caching utilities to fetch and parse API responses that describe dataset metadata, features, and qualities.
+
+---
+
+## Data structures
+
+- OpenmlQualitiesType: List of dictionaries with string keys/values describing dataset qualities (e.g., number of instances, missing values, etc.).
+- OpenmlFeaturesType: List of dictionaries with string keys/values describing dataset features (e.g., feature names, types, domains, etc.).
+
+These structures are used to model the OpenML dataset metadata and feature information returned by the JSON endpoints:
+- _DATA_FEATURES: api/v1/json/data/features/{data_id}
+- _DATA_QUALITIES: api/v1/json/data/qualities/{data_id}
+- _DATA_INFO: api/v1/json/data/{data_id}
+
+---
+
+## Practical examples
+
+- Fetching a resource with caching (data_home provided):
+  - Call _open_openml_url("data/v1/download/12345", data_home="/path/to/cache")
+  - If the file is not cached, it downloads to a temporary directory and atomically moves to:
+    - /path/to/cache/openml.org/data/v1/download/12345.gz
+  - Returns a gzip.GzipFile-like stream for downstream consumption.
+
+- Fetching JSON metadata with retry:
+  - Call _get_json_content_from_openml_api(url="api/v1/json/data/12345", error_message="Failed to fetch data info", data_home="/path/to/cache")
+  - Returns a Python dict with the dataset information, features, and qualities parsed from the API.
+
+- Handling cache corruption:
+  - Wrap a cache-dependent function with _retry_with_clean_cache(openml_path="data/v1/download/12345", data_home="/path/to/cache")
+  - If the first attempt fails due to a transient issue, the corrupted cache is removed and the function is retried.
+
+---
+
+## Best practices for contributors
+
+- When adding or extending dataset loading capabilities, prefer using the caching and retry abstractions:
+  - Use _open_openml_url for network IO to ensure consistent gzip handling and atomic caching.
+  - Use _retry_on_network_error to wrap network calls that may experience intermittent failures.
+  - Use _retry_with_clean_cache to guard cache-dependent reads/writes and recover from corrupted cache entries.
+- Maintain the clear separation between API-level JSON retrieval (_get_json_content_from_openml_api) and binary data download (_open_openml_url).
+- Ensure local paths are deterministic and safe for concurrent access by using the atomic move pattern when populating the cache.
+
+---
+
+This documentation covers the dataset loading utilities implemented for OpenML integration. It highlights how caching, retry logic, and gzip handling work together to provide robust and reusable dataset loading capabilities for developers integrating with OpenML data.

@@ -1,0 +1,155 @@
+w_fork
+======
+
+Overview
+--------
+w_fork creates a new, independent WestPA weighted-ensemble simulation forked from an existing run at a specified iteration. The command produces a new HDF5 file containing:
+
+- The same target states as the original run for the chosen iteration.
+- The same basis (initial) states for the new simulation.
+- A one-to-one mapping from each old segment to a corresponding new initial state and a new segment for the forked run.
+- An ISTATE map text file that records how old segments map to new initial states.
+
+This enables the forked simulation to begin propagation from the same point (or from a controlled point) as the original, while allowing the new simulation to proceed independently.
+
+Command synopsis
+-----------------
+w_fork [-i INPUT_H5FILE] [-I N_ITER] [-o OUTPUT_H5FILE]
+       [--istate-map ISTATE_MAP] [--no-headers]
+
+Default values
+- OUTPUT_H5FILE: forked.h5
+- ISTATE_MAP: istate_map.txt
+- --no-headers: disabled by default (headers written)
+
+Arguments
+---------
+
+- -i, --input
+  - Destination: input_h5file
+  - Description: Path to the INPUT_H5FILE to fork from. If omitted, the command will read the input file path from the configuration.
+
+- -I, --iteration
+  - Destination: n_iter
+  - Type: int
+  - Description: Take the initial distribution for the new simulation from iteration N_ITER. If omitted, the last complete iteration of the old simulation is used.
+
+- -o, --output
+  - Destination: output_h5file
+  - Default: forked.h5
+  - Description: Save the new (forked) simulation HDF5 file as this path.
+
+- --istate-map
+  - Destination: istate_map
+  - Default: istate_map.txt
+  - Description: Write a text file describing the mapping of existing segments to new initial states.
+
+- --no-headers
+  - Description: Do not write header lines to the ISTATE_MAP file.
+
+What w_fork does (high level)
+------------------------------
+1. Parse arguments and resolve configuration.
+2. Open the old HDF5 file in read mode and determine the source iteration (n_iter).
+3. Create and open a new HDF5 file for the forked simulation and copy:
+   - Target states for the chosen iteration.
+   - Basis (initial) states for the new simulation (iteration 1 in the fork).
+4. Transform every old segment into:
+   - A corresponding new initial state (one per old segment) in iteration 0.
+   - A corresponding new segment (one per old segment) in iteration 1.
+   - The new segment’s pcoord is initialized to the final pcoord of the old segment.
+   - The segment’s parent linkage is configured to reference the new initial state.
+5. Write the ISTATE map that records the mapping from each old segment to its new initial state.
+6. Close both HDF5 files and finish.
+
+Key data structures and workflow details
+----------------------------------------
+- Data managers
+  - Old data: dm_old = westpa.rc.new_data_manager(), opened in read mode.
+  - New data: dm_new = westpa.rc.new_data_manager(), prepared and opened for writing.
+- Target and basis states
+  - Target states are copied from the old iteration via dm_old.get_target_states(n_iter) and saved to the new file via dm_new.save_target_states(target_states, n_iter).
+  - Basis states are copied via dm_old.get_basis_states(n_iter) and created in the new file via dm_new.create_ibstate_group(basis_states, n_iter=1).
+- Iteration and segments
+  - Old iteration group: old_iter_group = dm_old.get_iter_group(n_iter)
+  - Old segment data: old_index = old_iter_group['seg_index'][...], old_pcoord_ds = old_iter_group['pcoord']
+  - Number of segments and pcoord dimensions derived from old_pcoord_ds
+  - For each old segment, compute the final pcoord (last step along the chain) to initialize the new initial state.
+- Initial states and segments in the fork
+  - New initial states: istates = dm_new.create_initial_states(n_segments, n_iter=1)
+  - For each old segment, create a corresponding new istate with:
+    - iter_created = 0
+    - iter_used = 1
+    - istate_type = InitialState.ISTATE_TYPE_RESTART
+    - istate_status = InitialState.ISTATE_STATUS_PREPARED
+    - pcoord set to the old segment’s final pcoord
+  - New segments: one per old segment with:
+    - n_iter = 1
+    - seg_id = index
+    - weight = from old segment’s index row
+    - parent_id = -(istate.state_id + 1)
+    - wtg_parent_ids = [-(istate.state_id + 1)]
+    - status = Segment.SEG_STATUS_PREPARED
+    - pcoord initialized to zeros with shape (pcoord_len, pcoord_ndim) and the first entry set to the final pcoord from the old segment
+- State mapping
+  - A structured NumPy array state_map with fields:
+    - old_n_iter (n_iter_dtype)
+    - old_seg_id (seg_id_dtype)
+    - new_istate_id (seg_id_dtype)
+  - Each row maps an old segment (old_iter, old_seg_id) to its new initial state (new_istate_id)
+- Post-processing
+  - Update initial states for the new fork: dm_new.update_initial_states(istates, n_iter=0)
+  - Prepare the first iteration (n_iter=1) with the constructed segments: dm_new.prepare_iteration(n_iter=1, segments=segments)
+  - Set the new current iteration to 1 and close both files
+  - Write istate_map.txt with mapping data (optionally including a header)
+
+Files produced
+--------------
+- OUTPUT_H5FILE (default: forked.h5)
+  - Contains:
+    - Copied target states for the chosen input iteration
+    - Copied basis states for the new simulation
+    - n_segments initial states (one per old segment) in iteration 0
+    - n_segments new segments in iteration 1 referencing their corresponding initial states
+- ISTATE_MAP (default: istate_map.txt)
+  - A flat text file describing the mapping of existing segments to new initial states
+  - Columns: old_n_iter, old_seg_id, new_istate_id
+  - Header lines are included by default unless --no-headers is set
+
+Practical example
+---------------
+- Fork from the last complete iteration of old.h5 into forked.h5 and generate a mapping file:
+  w_fork -i old.h5 -o forked.h5 --istate-map istate_map.txt
+
+- Fork with no header in the mapping file:
+  w_fork -i old.h5 -o forked.h5 --istate-map map.txt --no-headers
+
+Notes and considerations
+------------------------
+- Default behavior uses the last complete iteration from the old simulation unless -I is specified.
+- The forked simulation starts propagation from iteration 1, with initial states derived from the old iteration’s final coordinates.
+- The ISTATE_MAP file provides a clear trace from each old segment to its corresponding new initial state, aiding in debugging and reproducibility.
+- If you rely on executable propagation, ensure the old simulation’s restart data for the chosen iteration is accessible to establish the new initial-state data correctly.
+- The command copies both target states and basis states to ensure the forked simulation begins with the same configuration as the source.
+- The new segments’ parent relationships are encoded so that the newly created segments reference their corresponding initial states, enabling consistent propagation paths.
+
+Implementation notes
+--------------------
+- The command relies on WestPA’s data manager abstractions:
+  - new_data_manager(), open_backing(), prepare_backing(), etc.
+  - Methods used include get_target_states, save_target_states, get_basis_states, create_ibstate_group, get_iter_group, create_initial_states, update_initial_states, and prepare_iteration.
+- Data structures involved:
+  - Segment (fields used: seg_id, weight, parent_id, wtg_parent_ids, status, pcoord)
+  - InitialState (fields used: iter_created, iter_used, istate_type, istate_status, pcoord, state_id)
+- Pcoord shape semantics:
+  - old_pcoord_ds has shape (n_segments, pcoord_len, pcoord_ndim)
+  - final pcoords are taken as pcoord_ds[:, pcoord_len - 1, :]
+  - new segments’ pcoord arrays are initialized to zeros and filled with the final old pcoord as the first row
+
+See Also
+--------
+- w_start: starting/wrapping a new simulation
+- w_binning: segment-to-state mapping utilities
+- WestPA data management API (westpa.rc, westpa.core.data_manager)
+
+This documentation covers the w_fork command’s purpose, workflow, data interactions, and practical usage with representative examples and caveats.

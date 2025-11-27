@@ -1,0 +1,77 @@
+Storage driver
+==============
+
+This document describes the storage driver layer and the dynamic Storage Interface Directory/Variable (SIDV) class that powers on-disk storage for NetCDF (and other) options.
+
+Overview
+--------
+
+- The storage system stores arbitrary options and describes how to handle them on disk.
+- It is designed to work with a StorageInterface that delegates actual IO to a storage driver (for example, NetCDFIODriver).
+- The StorageInterfaceDirVar (SIDV) class provides a dynamic, directory-like and variable-like surface. New variables or folders are created on first access by using them as attributes.
+- Data is not kept in memory by the SIDV; reads and writes are mediated by the writer/reader components of the storage system.
+- The API exposed by SIDV is intentionally close to the storage surface, and SIDV is not meant to be instantiated directly as a standalone object. It is typically used through the StorageInterface.
+
+Key concepts and components
+---------------------------
+
+- StorageInterface: The top-level interface that coordinates IO operations. It exposes storage_driver and provides the entry points for interacting with stored data.
+- storage_driver: The underlying driver that handles actual on-disk operations (e.g., NetCDF variable creation, retrieval, and writes). The SIDV delegates to this driver for all disk operations.
+- SIDV (StorageInterfaceDirVar): Represents either a directory or a variable on disk. It holds:
+  - _name: The name of the storage item.
+  - _storage_interface: The parent StorageInterface instance.
+  - _storage_driver: Reference to the storage driver used for IO.
+  - _predecessor: Optional parent SIDV, forming a path/structure.
+  - _variable: The on-disk storage variable object (created or retrieved from the driver).
+  - _directory: Flag indicating whether this SIDV represents a directory.
+  - _metadata_buffer: Temporary metadata storage to be dumped when needed.
+- Binding: SIDV objects must be bound to a target before performing operations. Binding ensures the SIDV knows how to map to an on-disk location.
+
+Public API (methods)
+--------------------
+
+- write(data, at_index=None)
+  - Binds to a target if not already bound.
+  - If there is no on-disk variable yet, determines the path and attempts to fetch the variable. If it does not exist, creates a new storage variable with type(data).
+  - Marks the item as a non-directory and dumps any buffered metadata before writing.
+  - Writes the provided data to the on-disk variable. If at_index is provided, the write targets the specified index (for appendable variables).
+
+- append(data)
+  - Binds if necessary.
+  - Creates or retrieves the on-disk variable, with a dynamic first dimension for appending.
+  - Marks as non-directory and dumps any buffered metadata before appending.
+  - Appends the data to the on-disk variable.
+
+- read()
+  - Binds to a target if needed.
+  - Retrieves the on-disk variable if it exists; otherwise, attempts to fetch it from the storage driver and raises an appropriate error if missing.
+
+Behavior notes
+--------------
+
+- The SIDV uses the path derived from its position in the directory/variable tree to locate or create on-disk representations via the storage driver.
+- Metadata handling is performed through a metadata buffer, which can be dumped to disk as needed (for example, before write/append operations that change the target state).
+- Direct writes to a SIDV that represents a directory (not a variable) are not supported by the public API; such usage should raise an error (as noted in the API documentation/comments).
+
+Example usage (conceptual)
+--------------------------
+
+- Create a driver and store interface:
+  - my_driver = NetCDFIODriver('my_store.nc')
+  - my_store = StorageInterface(my_driver)
+
+- Write into a variable:
+  - x = some_numpy_array
+  - my_store.some_variable.write(x)
+
+- Append to a dynamic variable:
+  - my_store.dynamic_list.append(new_item)
+
+- Read a stored value:
+  - data = my_store.some_variable.read()
+
+Notes
+-----
+
+- The SIDV class is designed to be used through the StorageInterface rather than instantiated directly.
+- The actual path resolution, binding mechanics, and detailed error handling are implemented in the surrounding storage framework and the storage driver.

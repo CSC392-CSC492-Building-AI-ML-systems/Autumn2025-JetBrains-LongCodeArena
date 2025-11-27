@@ -1,0 +1,151 @@
+# Encoding media
+
+This document describes how media can be encoded for transport and storage when working with the ftrack API. Encoding is commonly used to safely transmit binary data (such as images, video, or audio) within text-based formats (e.g. JSON) or to prepare data for storage in systems that expect encoded content.
+
+## Overview
+
+- Encoding converts binary media into a textual representation (most often Base64) suitable for embedding in JSON payloads or HTTP bodies.
+- Optional compression (e.g., gzip) can be applied before encoding to reduce payload size.
+- A cryptographic digest (e.g., SHA-256) can be computed to verify data integrity after transfer or storage.
+
+## When to encode
+
+- When uploading or attaching large binary assets to ftrack via REST/HTTP endpoints that expect JSON payloads.
+- When transmitting media through channels that are not binary-safe.
+- When a server-side workflow requires a normalized, text-based representation of media data.
+
+## Supported encoding methods
+
+- Base64 (Base64-encoded binary data)
+- Base64 with gzip compression (Base64-encoded gzip-compressed data)
+
+Notes:
+- Base64 is widely supported and safe for JSON payloads.
+- Compression reduces payload size but adds the cost of compression/decompression.
+
+## Encoding workflow
+
+1. Read the media as binary data.
+2. Optionally compress the data (e.g., gzip) to reduce size.
+3. Encode the resulting bytes as Base64.
+4. Compute a digest (e.g., SHA-256) of the original binary data for integrity verification.
+5. Construct a payload containing:
+   - encoding method (e.g., "base64" or "base64+gzip")
+   - encoded data (as a string)
+   - metadata such as filename and digest
+6. Transmit the payload to the ftrack server via the appropriate API endpoint.
+7. On the server, decode and store the media, verifying integrity using the provided digest.
+
+## Example: Base64 encoding of a media file
+
+This example demonstrates encoding a media file to Base64, computing a SHA-256 digest, and building a payload suitable for transmission.
+
+```python
+import base64
+import hashlib
+
+def encode_media_file(path, encoding='base64'):
+    with open(path, 'rb') as f:
+        data = f.read()
+
+    if encoding == 'base64':
+        encoded = base64.b64encode(data).decode('ascii')
+        digest = hashlib.sha256(data).hexdigest()
+        return {
+            'filename': path.split('/')[-1],
+            'encoding': 'base64',
+            'data': encoded,
+            'sha256': digest,
+        }
+
+    elif encoding == 'base64+gzip':
+        import gzip
+        import io
+
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode='wb') as gz:
+            gz.write(data)
+        compressed = buf.getvalue()
+        encoded = base64.b64encode(compressed).decode('ascii')
+        digest = hashlib.sha256(data).hexdigest()
+        return {
+            'filename': path.split('/')[-1],
+            'encoding': 'base64+gzip',
+            'data': encoded,
+            'sha256': digest,
+        }
+
+    else:
+        raise ValueError('Unsupported encoding: {}'.format(encoding))
+
+# Example usage:
+# payload = encode_media_file('/path/to/media.mov', 'base64')
+# Pass `payload` to your API endpoint that accepts encoded media.
+```
+
+## Example: Transmitting encoded media via REST
+
+The following illustrates sending an encoded media payload using a session that authenticates with ftrack-style headers.
+
+```python
+import requests
+from requests.auth import AuthBase
+
+class SessionAuthentication(AuthBase):
+    def __init__(self, api_key, api_user):
+        self.api_key = api_key
+        self.api_user = api_user
+
+    def __call__(self, r):
+        r.headers.update({
+            'ftrack-api-key': self.api_key,
+            'ftrack-user': self.api_user
+        })
+        return r
+
+# Prepare payload (e.g., produced by encode_media_file)
+payload = {
+    'filename': 'video.mov',
+    'encoding': 'base64',
+    'data': '...',  # base64-encoded data
+    'sha256': '...',
+}
+
+server_url = 'https://your-ftrack-server'
+endpoint = server_url.rstrip('/') + '/media/encode'
+
+auth = SessionAuthentication(api_key='YOUR_API_KEY', api_user='YOUR_USER')
+headers = {'Content-Type': 'application/json'}
+
+response = requests.post(endpoint, json=payload, auth=auth, headers=headers)
+
+print(response.status_code)
+print(response.text)
+```
+
+If you are using the ftrack Python API session object, prefer using the API’s facilities for uploading assets or interacting with the specific media endpoints provided by your deployment. The exact endpoint and method may vary between installations.
+
+## Security and integrity considerations
+
+- Use HTTPS for all transmission of encoded media to protect against eavesdropping.
+- Include a digest (e.g., SHA-256) of the original data to verify integrity after transfer.
+- Consider server-side validation to ensure the decoded data matches the expected metadata (filename, size, and digest).
+
+## Performance and resource considerations
+
+- Encoding and decoding are CPU-bound operations; larger media will require more CPU time and memory.
+- Compression (gzip) can significantly reduce payload size for text-like or already compressible media, but may add overhead for small files or already compressed formats.
+- For very large assets, consider streaming approaches or server-supported chunked uploads if available.
+
+## Related concepts
+
+- REST endpoints exposed by the ftrack server for media encoding and storage
+- ftrack_session and authentication mechanisms (e.g., SessionAuthentication)
+- Data integrity checks via SHA-256 digests
+
+## See also
+
+- ftrack API reference for media handling
+- Networking and authentication section in the ftrack API documentation
+- Security considerations for transmitting binary data in JSON payloads
+

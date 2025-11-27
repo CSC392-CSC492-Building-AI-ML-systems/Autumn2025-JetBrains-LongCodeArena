@@ -1,0 +1,167 @@
+Introduction
+
+This module provides kernels for Gaussian process regression and classification. It supports kernel-based kernel-engineering, allowing kernels to be combined with addition, multiplication, and exponentiation to form complex kernels. Hyperparameters of kernels can be optimized analytically or with gradient-based methods, using user-specified bounds or fixed values.
+
+Overview
+
+- Kernels can be composed using:
+  - Addition: K = K1 + K2
+  - Product: K = K1 * K2
+  - Exponentiation: K = K1 ** scalar
+  - Scalars are automatically converted to constant kernels when used in expressions.
+- Hyperparameters define the search space for optimization. Each hyperparameter has:
+  - A name
+  - A value type (currently numeric)
+  - Bounds or a "fixed" flag
+  - Optional vector-valued dimensions (n_elements)
+- Hyperparameters are accessible via kernel.hyperparameters. They can be inspected, and kernels can be optimized by adjusting these hyperparameters within the specified bounds.
+- The module validates anisotropic length scales for kernels that depend on feature dimensions.
+
+Key Concepts
+
+- Hyperparameter
+  - A lightweight, memory-efficient specification for a kernel parameter.
+  - Fields: name, value_type, bounds, n_elements, fixed.
+  - Bounds can be numeric (lower, upper) or the string "fixed" to indicate the parameter is not optimized.
+  - For vector-valued parameters (n_elements > 1), bounds must be 2D and either replicated to match n_elements or provided per element.
+  - Example: Hyperparameter(name='constant_value', value_type='numeric', bounds=[[0.0, 10.0]], n_elements=1, fixed=False)
+- Kernel (abstract base class)
+  - Base class for all kernels used in Gaussian processes.
+  - Provides get_params(deep=True) to extract kernel parameters by inspecting the constructor signature.
+  - Kernels support composition with +, *, and **, enabling flexible kernel design.
+- _check_length_scale(X, length_scale)
+  - Validation helper that ensures length_scale is 1D and compatible with data dimensionality.
+  - Anisotropic length scales must match the number of features in X.
+  - Errors if length_scale has incorrect dimensionality or mismatched size.
+
+API Reference (Classes and Functions)
+
+- Hyperparameter
+  - Represents a kernel hyperparameter.
+  - Attributes:
+    - name: str
+    - value_type: str (e.g., "numeric")
+    - bounds: array-like or "fixed"
+    - n_elements: int
+    - fixed: bool
+  - Behavior:
+    - If bounds is not "fixed", it is coerced to a 2D array. For n_elements > 1, bounds must have appropriate shape.
+    - If fixed is None, it is inferred from bounds (fixed if bounds == "fixed").
+  - Equality: Two hyperparameters are equal if all fields match.
+  - Example:
+    - Hyperparameter(name='constant_value', value_type='numeric', bounds=array([[0., 10.]]), n_elements=1, fixed=False)
+
+- Kernel (abstract base class)
+  - Methods:
+    - get_params(self, deep=True): Return a dictionary of parameters for this kernel (and subobjects if deep is True).
+      - The implementation introspects the constructor signature to identify parameters that define the kernel.
+      - If the kernel constructor uses varargs, a RuntimeError is raised, enforcing a no-varargs convention.
+  - Composition:
+    - Kernels support addition, multiplication, and exponentiation to form complex kernels. Scalars in expressions are treated as constant kernels.
+
+- _check_length_scale(X, length_scale)
+  - Helper function to validate and normalize length_scale.
+  - Steps:
+    - Squeeze and convert to float.
+    - Reject length_scale with more than 1 dimension.
+    - If 1D, ensure length_scale length matches X.shape[1] for anisotropic kernels.
+  - Returns: The validated 1D length_scale array.
+
+Usage Examples
+
+1) Inspecting a simple kernel and its hyperparameters
+
+```python
+from sklearn.gaussian_process.kernels import ConstantKernel
+from sklearn.datasets import make_friedman2
+
+# Example kernel with hyperparameter bounds
+kernel = ConstantKernel(constant_value=1.0, constant_value_bounds=(0.0, 10.0))
+
+# Access hyperparameters
+for hyperparameter in kernel.hyperparameters:
+    print(hyperparameter)
+
+# Inspect parameters via get_params
+params = kernel.get_params()
+for key in sorted(params):
+    print(f"{key} : {params[key]}")
+```
+
+2) Kernel composition
+
+```python
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel
+
+rbf = RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2))
+white = WhiteKernel(noise_level=1.0, noise_level_bounds=(1e-5, 1e1))
+
+# Composite kernel
+kernel = (rbf + white) * 0.5 ** 2  # example of sum, product, and exponentiation
+```
+
+3) Anisotropic length-scales validation
+
+```python
+import numpy as np
+from your_module.gaussian_process import _check_length_scale
+
+X = np.random.randn(20, 3)  # 20 samples, 3 features
+length_scale = np.array([1.0, 2.0, 0.5])  # anisotropic
+
+# Valid
+ls = _check_length_scale(X, length_scale)
+
+# Invalid (mismatch in dimensionality)
+try:
+    bad_ls = _check_length_scale(X, np.array([1.0, 2.0]))
+except ValueError as e:
+    print("Error:", e)
+```
+
+4) Hyperparameter bounds and fixing
+
+```python
+from sklearn.gaussian_process.kernels import Matern
+
+# Create a Matern kernel with a fixed nu parameter (example)
+kernel = Matern(length_scale=1.0, length_scale_bounds=(1e-5, 1e5), nu='fixed')
+# The hyperparameter `nu` would be treated as fixed and not optimized.
+```
+
+Important Considerations and Edge Cases
+
+- Hyperparameters:
+  - Bounds can be a scalar, a 1D array for per-parameter bounds, or the string "fixed".
+  - For vector-valued hyperparameters (n_elements > 1), bounds must be shaped to match the number of elements.
+  - If fixed is not provided, it is derived from whether bounds is "fixed".
+- Length scales:
+  - Anisotropic length scales require length_scale to be 1D and to have length equal to X.shape[1].
+  - Dimension mismatch raises a ValueError with a message indicating the required relationship.
+- Kernel composition:
+  - Only valid operators are +, *, and **. Scalars in expressions are converted to constant kernels.
+  - The resulting kernel can itself be parameterized and optimized using the hyperparameters of the constituent kernels.
+- get_params:
+  - The method relies on inspecting the kernel’s __init__ signature. If an exotic constructor with variadic arguments is used, an error is raised to enforce a consistent parameter-handling approach.
+- Dependencies:
+  - The module relies on numpy, scipy (for distance computations and special functions), and internal utilities for parameter handling and validation.
+- Gradient-based optimization:
+  - All kernels expose differentiable hyperparameters to enable gradient-based optimization within the defined bounds.
+
+Edge Cases
+
+- If n_elements > 1 and bounds shape is incompatible (not matching n_elements), a ValueError is raised during Hyperparameter construction.
+- If length_scale is provided with more than one dimension, a ValueError is raised to prevent ambiguous anisotropy specifications.
+- When using scalar values in kernel expressions, they are automatically interpreted as a constant kernel to preserve mathematical consistency.
+
+Notes
+
+- This module draws design inspiration from the kernel module in the george package and mirrors patterns used in scikit-learn-compatible kernel interfaces.
+- The Hyperparameter class is designed to be memory-efficient and explicit about the optimization status of each parameter.
+
+See Also
+
+- Typical Gaussian Process implementations in sci-kit learn for usage patterns of kernels, hyperparameters, and optimization workflows.
+- pairwise_kernels utility for evaluating kernel matrices on data.
+
+End of documentation.

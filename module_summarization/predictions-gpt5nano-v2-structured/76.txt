@@ -1,0 +1,182 @@
+Feature Extraction (feature_extraction.rst)
+=============================================
+
+Overview
+--------
+
+This module provides utilities to build feature extractors for PyTorch models
+using Torch FX. It enables tracing a model to identify the nodes that correspond
+to intermediate operations and leaf modules, and it exposes a high‑level API
+to obtain intermediate feature maps for specified graph nodes.
+
+Key ideas
+- LeafModuleAwareTracer: Tracer that treats a user-specified set of modules as leaf
+  modules (i.e., not traced through). This yields single nodes that call the leaf
+  module’s forward methods.
+- NodePathTracer: An FX tracer that records, for every operation, the qualified
+  name (node path) of the node from which the operation originated. Node names are
+  composed as dot-separated paths from the top-level module down to the leaf operation.
+  It also handles de-duplicating repeated node names by appending numeric suffixes
+  (e.g., foo, foo_1, foo_2, …) in a local scope.
+- The public API (create_feature_extractor and get_graph_node_names) uses these
+  tracing capabilities to identify and expose the requested intermediate feature maps.
+
+API Reference
+-------------
+
+Classes
+-------
+
+LeafModuleAwareTracer
+- Purpose: FX tracer that allows specifying a set of leaf modules which should not be traced through.
+- Behavior: If a module is listed as a leaf, its forward is not traced; instead, a proxy call to the leaf’s forward is recorded.
+- Key details:
+  - Accepts a leaf_modules argument (tuple of module types) to determine leaf modules.
+  - Overrides is_leaf_module to respect the user-provided leaf set.
+
+NodePathTracer
+- Purpose: An FX tracer that records the origin node name for each operation.
+- Key features:
+  - Tracks current_module_qualname during tracing.
+  - Maintains node_to_qualname: an ordered mapping from FX Node to its computed node name.
+  - call_module: records the module qualname, respects leaf modules, and creates proxies for leaf calls.
+  - create_proxy: intercepts operation recording and stores the node’s qualname.
+  - _get_node_qualname: computes a per-node name, appending leaf information and de-duplicating repeated names.
+- Notes:
+  - Node names are qualified by their path through the module hierarchy.
+  - Duplicate node names get a local _{index} suffix, starting from 1.
+  - The mapping is ordered by execution to aid deterministic analysis.
+
+Internal utilities
+------------------
+
+_is_subseq(x, y)
+- Utility to check whether y is a subsequence of x. Used to compare train/eval traces.
+
+_warn_graph_differences(train_tracer, eval_tracer)
+- Warns the user if there are differences between the training and evaluation graphs.
+- If graphs align (same length and same names in order), it returns silently.
+- Otherwise, it suggests that you may need to specify separate output nodes for train and eval modes.
+
+Functions
+---------
+
+get_graph_node_names(model, input_size)
+- Purpose: Return the list of node names as discovered by tracing the model with a default NodePathTracer.
+- Usage: Useful for discovering which intermediate nodes you can select as feature outputs.
+- Example: get_graph_node_names(model, input_size=(3, 224, 224))
+
+create_feature_extractor(model, return_nodes, ...) 
+- Purpose: Create a feature extractor wrapped model that, when called, returns the intermediate feature maps for the requested graph nodes.
+- return_nodes: Mapping that selects which graph nodes to expose and optionally renames them in the output.
+  - Keys are the graph node names to expose.
+  - Values are the names of the corresponding outputs in the returned dict.
+- Output: A module (often a GraphModule) that returns a dict of feature maps keyed by the values provided in return_nodes.
+- Example usage is shown below.
+
+Usage Examples
+--------------
+
+Example 1: Inspect graph node names for a model
+-----------------------------------------------
+
+- Objective: Discover which intermediate nodes can be used as features.
+- Code:
+
+.. code-block:: python
+
+   from torchvision.models import resnet18
+   from torchvision.models.feature_extraction import get_graph_node_names
+
+   model = resnet18(pretrained=False)
+   node_names = get_graph_node_names(model, input_size=(3, 224, 224))
+   print(node_names)
+
+Example 2: Create a feature extractor for selected nodes
+--------------------------------------------------------
+
+- Objective: Create a model wrapper that returns intermediate feature maps for specified nodes.
+- Notes:
+  - return_nodes maps the original graph node names to desired output keys.
+  - The names in the output dict are the keys you’ll access after a forward pass.
+- Code:
+
+.. code-block:: python
+
+   import torch
+   from torchvision.models import resnet18
+   from torchvision.models.feature_extraction import create_feature_extractor
+
+   model = resnet18(pretrained=False)
+
+   # Choose the nodes you want to expose as features
+   # For example: layer4 and avgpool are common intermediate representations
+   return_nodes = {
+       "layer4": "feat_layer4",
+       "avgpool": "feat_avgpool",
+   }
+
+   feature_extractor = create_feature_extractor(model, return_nodes=return_nodes)
+
+   x = torch.randn(1, 3, 224, 224)
+   features = feature_extractor(x)
+   # features is a dict: {'feat_layer4': tensor, 'feat_avgpool': tensor}
+
+Example 3: Tracing and node name mapping (advanced)
+----------------------------------------------------
+
+- Objective: Understand how NodePathTracer maps executed nodes to names.
+- Code:
+
+.. code-block:: python
+
+   from torchvision.models import resnet18
+   from torchvision.models.feature_extraction import NodePathTracer
+
+   model = resnet18(pretrained=False)
+   tracer = NodePathTracer()
+   graph = tracer.trace(model)
+   # The mapping from FX nodes to their node names
+   node_names = tracer.node_to_qualname
+   for node, name in node_names.items():
+       print(node, "=>", name)
+
+Notes
+-----
+
+- The NodePathTracer stores a per-call mapping node_to_qualname that captures the full path to each operation or leaf node. This mapping is essential for selecting precise outputs when building a feature extractor.
+- When multiple operations yield the same logical name, a suffix _{i} is added to keep names unique within the local scope of the parent.
+- The _warn_graph_differences function can help you diagnose mismatches between train-time and eval-time graphs, which may require specifying separate output node sets for each mode.
+
+Related APIs
+------------
+
+- get_graph_node_names(model, input_size): Discover valid graph node names for feature extraction.
+- create_feature_extractor(model, return_nodes): Build a wrapper model that returns selected intermediate feature maps.
+
+Example: Quickstart snippet
+---------------------------
+
+- Minimal end-to-end example showing how to get features from a ResNet model:
+
+.. code-block:: python
+
+   import torch
+   from torchvision.models import resnet18
+   from torchvision.models.feature_extraction import create_feature_extractor
+
+   model = resnet18(pretrained=False)
+
+   return_nodes = {
+       "layer4": "feat_layer4",
+       "avgpool": "feat_avgpool",
+   }
+
+   feature_extractor = create_feature_extractor(model, return_nodes=return_nodes)
+
+   x = torch.randn(1, 3, 224, 224)
+   features = feature_extractor(x)
+
+   print(features.keys())  # dict_keys(['feat_layer4', 'feat_avgpool'])
+
+This documentation provides a concise guide to the module’s purpose, core concepts, and practical usage with representative code examples. It is designed to help users understand how to generate feature extractors and how to discover and select graph nodes for extraction.

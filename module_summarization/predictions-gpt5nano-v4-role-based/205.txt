@@ -1,0 +1,127 @@
+# sgd.rst — Stochastic Gradient Descent (SGD) with SAG/SAGA
+
+This document describes the Stochastic Gradient Descent (SGD) approach implemented in the SAG/SAGA family within the project, including how the code organizes losses, stabilizes computations, and enables fast, memory-efficient optimization for multiclass problems.
+
+## Overview
+
+- SGD is a core optimization technique used to minimize empirical risk by updating model parameters with gradients computed from random or small batches of the training data.
+- SAG (Stochastic Average Gradient) and SAGA are variance-reduced variants of SGD. They maintain gradient information to reduce the variance of updates, often leading to faster convergence on large datasets.
+- The implementation focuses on multiclass logistic loss (also known as multinomial logistic loss) for efficient gradient computation in high-dimensional, multiclass settings.
+
+## Core Concepts
+
+- Multiclass Logistic Loss
+  - For a single sample, the loss is:
+    loss = logsumexp(prediction) - prediction[y]  (times a sample weight)
+  - prediction is the dot product of features with class weights plus an intercept term.
+  - y is the true class index for the sample.
+
+- Gradient of the Multiclass Loss
+  - The per-class gradient for a single sample can be computed as:
+    gradient[c] = exp(prediction[c] - logsumexp(prediction))  for all classes c
+    if c == y, subtract 1.0
+    then scale by the sample weight
+  - This yields a vector of class-wise gradients that can be used to update the weight matrix.
+
+- Numerical stability
+  - The implementation uses a log-sum-exp technique to prevent overflow/underflow when computing the softmax-like terms.
+
+- Data types
+  - The code is templated to support both 32-bit and 64-bit floating point types:
+    - 32-bit: float (np.float32)
+    - 64-bit: double (np.float64)
+  - This provides a balanced choice between memory usage and numerical precision.
+
+- Proximal operations
+  - A soft-thresholding operator is available for L1-type regularization, enabling proximal gradient approaches.
+
+## Key Components in the Code
+
+- MultinomialLogLoss (per-sample loss and gradient)
+  - _loss(prediction, y, n_classes, sample_weight) -> loss
+    - Computes the per-sample multinomial logistic loss with a given sample weight.
+  - dloss(prediction, y, n_classes, sample_weight, gradient_ptr)
+    - Fills gradient_ptr with the per-class gradient for the given sample.
+  - Used by SGD variants to obtain the necessary gradient information for updates.
+
+- _logsumexp
+  - Computes log(sum(exp(arr))) in a numerically stable way.
+  - Used to compute logsumexp(prediction) efficiently for stability in softmax-like terms.
+
+- _soft_thresholding
+  - Proximal operator used for L1 regularization:
+    x -> max(x - shrinkage, 0) - max(-x - shrinkage, 0)
+
+- LossFunction interface (imported from _sgd_fast)
+  - Abstracts common SGD loss behavior, enabling interchangeable loss implementations.
+
+- Sequence/dataset helpers
+  - SequentialDataset32, SequentialDataset64 are used to manage per-sample operations and indexing for different data types.
+
+- Finite-value checks
+  - skl_isfinite{{name_suffix}} ensures numerical values remain finite during computations, aiding stability and debuggability.
+
+## How SAG/SAGA Fit into SGD
+
+- SGD updates parameters using the gradient of the loss with respect to the model weights, computed per sample (or small batch).
+- SAG/SAGA enhance vanilla SGD by keeping a memory of past gradients and using an averaged or corrected gradient to reduce the variance of updates.
+  - SAG maintains the average gradient over all samples.
+  - SAGA maintains a per-sample gradient memory and uses a correction term based on the current gradient minus the remembered gradient.
+
+- In practice, you:
+  - Compute the per-sample loss with _loss.
+  - Compute the per-sample gradient with dloss.
+  - Update the model weights using the chosen SGD variant (SGD, SAG, or SAGA) and the learning rate.
+  - Optionally apply L2/L1 regularization or proximal steps via the soft-thresholding operator.
+
+## Practical Usage Notes
+
+- Type Safety and Performance
+  - The code uses fused types to generate optimized variants for both 32-bit and 64-bit floating point data, enabling high performance across common numeric precisions.
+
+- Loss Function Extensibility
+  - The MultinomialLogLoss class provides a clear, self-contained implementation of per-sample loss and gradient for multinomial logistic regression.
+  - New loss functions can be added by implementing similar interfaces (loss and gradient) and integrating with the LossFunction infrastructure.
+
+- Numerical Stability
+  - Log-sum-exp and careful maximum-tracking are used to minimize numerical errors when computing softmax-like terms, especially for large numbers of classes.
+
+- Regularization
+  - The presence of a soft-thresholding operator enables easy integration of L1 regularization via proximal updates.
+
+## Example Workflow (Pseudocode)
+
+- Given a dataset of features X, labels y, number of classes n_classes, and per-sample weights w_i:
+
+  initialize weights W (shape: n_features x n_classes)
+
+  for each epoch:
+    for each sample i in shuffled order:
+      prediction = X[i] dot W + intercept
+      loss_i = MultinomialLogLoss{{name_suffix}}._loss(prediction, y[i], n_classes, w_i)
+      gradient_i = allocate gradient vector of length n_classes
+      MultinomialLogLoss{{name_suffix}}.dloss(prediction, y[i], n_classes, w_i, gradient_i)
+
+      update rule depends on SGD variant:
+        - SGD: W := W - eta * gradient_i (plus any regularization term)
+        - SAG: W := W - eta * (gradient_i - memory[i] + average_all_gradients)
+        - SAGA: W := W - eta * (gradient_i - memory[i] + gradient_memory_average)
+
+      optionally apply proximal step with _soft_thresholding for L1
+
+- Notes:
+  - The actual update logic for SAG/SAGA requires maintaining gradient memories per sample and the average gradient, which is facilitated by the surrounding SGD framework that interacts with the provided loss implementation.
+
+## When to Use
+
+- Large-scale multiclass classification problems where data size makes full-batch gradient computation impractical.
+- Scenarios where variance reduction (SAG/SAGA) can significantly speed up convergence.
+- Applications requiring numerical stability for many classes and high dynamic ranges.
+
+## References
+
+- Bishop, C. M. (2006). Pattern Recognition and Machine Learning. Springer. (Ch. 4.3.4 for softmax/logistic loss)
+- LogSumExp trick for stable softmax computations
+- Standard SGD, SAG, and SAGA formulations in literature
+
+If you need a concrete, minimal example tailored to your exact Python-facing API (how to instantiate the loss, how to plug into your SGD loop, or how to switch between SAG/SAGA at runtime), provide the specific exposure of the Cython extension to Python (def/cpdef wrappers, module names), and I can tailor the examples accordingly.

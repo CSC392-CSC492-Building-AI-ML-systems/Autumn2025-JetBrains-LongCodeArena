@@ -1,0 +1,176 @@
+Sync LDAP Users
+================
+
+Introduction
+------------
+This module provides functionality to synchronize users from an LDAP directory with an ftrack server. It creates, updates, or deactivates ftrack user accounts to reflect the current state of LDAP, while preserving existing permissions and mappings as configured. The synchronization supports mapping LDAP attributes to ftrack user fields and optionally aligning LDAP groups with ftrack groups or roles.
+
+Overview
+--------
+- LDAPSource: Connects to the LDAP directory, authenticates, and fetches user entries based on base DN, scope, and filters.
+- TargetStore (ftrack): Represents the ftrack server where users are created or updated using the ftrack API.
+- UserMapping: Defines how LDAP attributes map to ftrack user fields (e.g., uid to username, mail to email).
+- Synchronization Rules: Controls create/update/deactivate behavior, attribute synchronization, and handling of LDAP group memberships.
+- Operational Modes: Dry-run (no changes applied), incremental vs full sync, and optional deprovisioning of LDAP-missing users.
+
+Key concepts and relationships
+------------------------------
+- Each LDAP user may map to exactly one ftrack user based on a unique identifier (e.g., username or uid).
+- LDAP groups can be mapped to corresponding ftrack groups/roles to reflect permissions.
+- The sync process is designed to be idempotent on repeated runs for the same LDAP state.
+- Logging and error handling are integral to diagnose mismatches between LDAP and ftrack.
+
+Configuration and options
+-------------------------
+LDAP configuration
+- uri: LDAP server URI (e.g., ldaps://ldap.example.com:636)
+- bind_dn: Distinguished name used to bind to LDAP
+- bind_password: Password for the bind DN (prefer using a secure vault or environment variable)
+- base_dn: Base distinguished name for user searches (e.g., ou=people,dc=example,dc=com)
+- user_filter: LDAP filter to select user entries (e.g., "(objectClass=inetOrgPerson)")
+- attributes:
+  - username: LDAP attribute to map to ftrack username (e.g., uid)
+  - full_name: LDAP attribute for the user’s full name (e.g., cn)
+  - email: LDAP attribute for the user email (e.g., mail)
+  - ... any additional attributes required for your mapping
+
+Ftrack configuration
+- server_url: FTrack server URL
+- api_key: API key for authentication
+- api_user: User to perform operations against FTrack
+- default_role or default_group: Optional default assignment for new users
+
+User mapping
+- A mapping from LDAP attributes to ftrack user fields, e.g.:
+  - username <- uid
+  - full_name <- cn
+  - email <- mail
+- Optional: mappings for groups, status, or other metadata
+
+Synchronization options
+- dry_run: If true, perform all steps but do not apply changes
+- remove_missing: Remove or deactivate ftrack users that are no longer present in LDAP
+- preserve_external_ids: Preserve existing ftrack external IDs unless the LDAP source mandates changes
+- batch_size: Size of LDAP fetch windows to manage memory and performance
+- retry_on_error: Retry policy for transient LDAP or API errors
+- log_level: Logging verbosity
+
+Usage patterns
+--------------
+- One-off sync: Run a single synchronization to align ftrack with LDAP.
+- Periodic sync: Schedule with a cron job or CI pipeline to keep LDAP and ftrack in sync.
+- Dry-run validation: Run with dry_run to validate changes before applying them.
+
+CLI usage
+---------
+- Typical invocation:
+  - sync_ldap_users --config ldap_sync.yml
+  - sync_ldap_users --config ldap_sync.yml --dry-run
+- Example configuration file path:
+  - ldap_sync.yml
+
+Configuration example (YAML)
+--------------------------------
+```yaml
+ldap:
+  uri: "ldaps://ldap.example.com:636"
+  bind_dn: "cn=ldap-reader,dc=example,dc=com"
+  bind_password: "change-me"
+  base_dn: "ou=people,dc=example,dc=com"
+  user_filter: "(objectClass=inetOrgPerson)"
+  attributes:
+    username: "uid"
+    full_name: "cn"
+    email: "mail"
+
+ftrack:
+  server_url: "https://ftrack.example.com"
+  api_key: "ftrack-api-key"
+  api_user: "ldap-sync-bot"
+
+mapping:
+  username: "uid"
+  full_name: "cn"
+  email: "mail"
+
+options:
+  dry_run: true
+  remove_missing: false
+  preserve_external_ids: true
+  batch_size: 100
+  retry_on_error: 3
+  log_level: "INFO"
+```
+
+Python usage (illustrative)
+---------------------------
+Note: The exact API may vary; adapt to the actual implementation provided by your project.
+
+```python
+# Example: start a dry-run LDAP sync using a configuration file
+from ldap_sync import LdapSyncEngine
+engine = LdapSyncEngine(config_path="ldap_sync.yml")
+summary = engine.sync()  # returns a dictionary with counts like {'created': 0, 'updated': 3, 'deactivated': 0}
+print("Sync summary:", summary)
+```
+
+Or a more explicit approach using a hypothetical API surface:
+
+```python
+from ldap_sync import LdapSyncConfig, LdapSyncEngine
+
+config = LdapSyncConfig.from_yaml("ldap_sync.yml")
+engine = LdapSyncEngine(config)
+
+engine.connect()  # establish LDAP and FTrack connections
+summary = engine.run(dry_run=True)  # dry_run to validate changes
+engine.disconnect()
+
+print(summary)
+```
+
+Important considerations and edge cases
+--------------------------------------
+- Attribute presence: LDAP entries may lack required attributes (e.g., email or username). Define fallbacks or skip with proper logging.
+- Duplicates: Ensure LDAP contains unique identifiers for users. Handle duplicates gracefully, with explicit error reporting.
+- Group mappings: If LDAP groups are used for authorization, ensure membership changes are reflected in FTrack without bypassing existing permissions unintentionally.
+- Deprovisioning: Decide whether to deactivate or delete FTrack users who are removed from LDAP, and ensure this aligns with organizational policies.
+- Password handling: Do not propagate LDAP passwords to FTrack; use LDAP purely for identity and attribute synchronization.
+- Schema changes: LDAP schemas may evolve; tests should cover common variations (e.g., different attribute names).
+- Performance: For large directories, consider paging results and parallelizing updates, with proper rate limiting to avoid API throttling.
+- Security: Store credentials securely (prefer environment variables or a secret manager). Use TLS (ldaps/STARTTLS) for LDAP and HTTPS for FTrack.
+- Idempotency: Re-running the sync should not create duplicate users or inconsistent states.
+
+Testing and validation
+----------------------
+- Use a staging LDAP directory and a staging FTrack instance for integration tests.
+- Validate dry-run outputs against a known LDAP state before enabling write operations.
+- Include unit tests for attribute mappings and a separate integration test for the end-to-end flow.
+
+Edge-case scenarios to test
+- LDAP user entry missing email: verify skip or fallback behavior.
+- LDAP entry with multiple matches for username: verify resolution strategy or fail-fast.
+- FTrack user present but LDAP value changed (e.g., username or email): ensure updates occur correctly.
+- Removal of LDAP user when remove_missing is true: confirm deactivation or removal policy is enforced.
+
+Troubleshooting
+---------------
+- Inspect logs for LDAP connection errors, schema mismatches, or API rate limiting.
+- Verify that environment variables or configuration files provide correct credentials and endpoints.
+- Check that the LDAP user_filter and base_dn scopes return the intended result set.
+
+Extensibility
+-----------
+- The module should allow adding custom mappings (e.g., phone, department) without changing core logic.
+- Introduce plug-ins for additional external identity providers or grouping strategies if required.
+
+End-to-end example
+------------------
+1. Prepare ldap_sync.yml with LDAP, FTrack, and mapping configurations.
+2. Run a dry-run to validate the changes.
+3. If satisfied, run without dry_run to apply the changes.
+4. Schedule periodic runs to keep LDAP and FTrack in sync.
+
+Notes
+-----
+- This documentation describes a typical LDAP-to-FTrack user synchronization workflow. The actual implementation may differ; refer to the module’s API docs for precise classes and function signatures.

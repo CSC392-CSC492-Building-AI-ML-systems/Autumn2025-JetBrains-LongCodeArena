@@ -1,0 +1,191 @@
+How Mitogen Works
+==================
+
+This document explains the core architecture, message protocol, and execution model used by Mitogen. It is written for developers who contribute to or extend Mitogen, or who need a deep understanding of how remote execution and module loading are implemented.
+
+Overview
+--------
+
+Mitogen is a Python library that enables fast, low-overhead remote execution by using a small bootstrap in a remote (slave) context and a brokered, message-based protocol between the local (master) and remote processes. The bootstrap is intentionally compact so it can be sent to every new slave context. A lightweight routing layer (Router) forwards messages between contexts, and a dynamic module system allows code to be loaded and executed remotely on demand.
+
+Key concepts
+------------
+
+- Master/Broker: The controlling process that issues commands to remote contexts, routes messages, and aggregates results.
+- Slave context: The remote Python process that runs on the target host. It receives bootstrap code, constructs a minimal runtime, and executes requests from the master.
+- Router: A component that maintains routes (how to reach a remote context) and dispatches incoming messages to the appropriate handlers.
+- Side / Channel: Abstractions representing a bi-directional communication endpoint. A channel carries a stream of messages between master and slave.
+- Module loading: Remote modules can be loaded on demand, using a small protocol that minimizes transfer and initialization overhead.
+- Message protocol: A compact, opcode-based protocol with a defined set of message types used to perform remote actions (module loading, function calls, logging, routing changes, etc).
+- IS_DEAD sentinel: A special value used to signal disconnection or the inability to route a message; receiving this value typically raises a channel/connection error.
+- Performance knobs: Buffer sizes and IO strategies are tuned to balance CPU usage, memory, and latency.
+
+Architecture and components
+---------------------------
+
+- Bootstrap mechanism
+  - Each slave context runs a minimal bootstrap payload to reconstruct the necessary runtime and to establish communication with the master.
+  - The bootstrap strives to be small to minimize initial transmission size and startup latency.
+- Protocol and message types
+  - The protocol is opcode-driven. Each message begins with an opcode that identifies the operation, followed by a payload containing the operation’s arguments.
+  - Core opcodes (examples):
+    - GET_MODULE: Request information about a module present in the remote environment.
+    - CALL_FUNCTION: Invoke a Python function on the remote context.
+    - FORWARD_LOG: Forward log messages from the remote side to the master.
+    - ADD_ROUTE / DEL_ROUTE: Update the routing table to reach a new or removed endpoint.
+    - ALLOCATE_ID: Allocate a unique identifier for an entity (module, function, context) within the routing/domain.
+    - SHUTDOWN: Gracefully shut down a remote context.
+    - LOAD_MODULE / FORWARD_MODULE: Load a module on the remote side or forward module data to another endpoint.
+    - DETACHING: Signal detachment from a context or operation, allowing cleanup callbacks.
+    - CALL_SERVICE / STUB_CALL_SERVICE: Execute a service-like operation, possibly via a stub for indirect calls.
+  - IS_DEAD is used as a sentinel value in reply_to fields to indicate a dead/disconnected peer or inability to route a message.
+- Module loading and execution flow
+  - On demand, the master may request a module from the remote context.
+  - If the module is not present remotely, the master initiates a LOAD_MODULE operation to transfer and initialize the module there.
+  - Once loaded, CALL_FUNCTION can be used to invoke exported functions within that module.
+- Routing and addressing
+  - Routes are managed by the Router. ADD_ROUTE and DEL_ROUTE mutate the routing table to determine how messages are delivered to a given remote context.
+  - A route maps a logical destination to a communication channel (Side) that delivers messages to the corresponding slave.
+- I/O and buffering
+  - A default buffer size (128 KiB) is used for both internal Channel IO and socket buffers, with significant implications for throughput and memory usage.
+  - The size choice reflects a balance between efficient large-message throughput and the practical limits of kernel buffers and user-space memory.
+- Error handling
+  - If a remote receiver cannot handle a message, or the route is broken, the system propagates a channel error to the caller.
+  - The IS_DEAD sentinel is used to signal that a route is no longer valid, prompting cleanup on the master side.
+
+Message protocol in detail
+--------------------------
+
+- Format
+  - Messages are encoded with a numeric opcode followed by a payload. The payload is typically serialized data (often using pickle) and may contain function names, arguments, or module data.
+  - The reply path is established so the master can correlate results with requests.
+- Dispatch
+  - Incoming messages are decoded by the Router and dispatched to the appropriate handler based on the opcode.
+  - Handlers implement the logic for loading modules, calling functions, forwarding logs, and managing routes.
+- Serialization
+  - Pickle is used for payloads, with care taken to handle cross-version compatibility and security implications.
+  - The library includes specific handling for text/binary data (Latin-1 encoding) to avoid import-lock issues when encoding text during IO operations.
+
+Bootstrap and startup flow
+---------------------------
+
+- When a new slave context is created, the master ships a minimal bootstrap payload.
+- The bootstrap reconstructs a functional Python environment on the remote host and wires up the core messaging loop.
+- After bootstrap, the remote side can:
+  - Accept GET_MODULE / LOAD_MODULE requests from the master.
+  - Execute CALL_FUNCTION requests with provided arguments.
+  - Forward logs back to the master via FORWARD_LOG.
+  - Respond to ADD_ROUTE / DEL_ROUTE to update routing state.
+
+Performance considerations
+--------------------------
+
+- Buffer sizing
+  - Default size for Side.read/Side.write and initial socketpair buffers is 128 KiB.
+  - Pros: Higher throughput for large messages; fewer system calls on busy channels.
+  - Cons: Higher memory usage per remote context; larger zeroing work when messages are sparse.
+- IO strategy
+  - Mitogen uses asynchronous IO loops to overlap computation and communication, minimizing idle wait time.
+  - Routing decisions and module loading are designed to be non-blocking where possible to avoid stalling the event loop.
+- Module loading latency
+  - Lazy loading of modules minimizes initial bootstrap cost.
+  - Forwarding modules between endpoints can reduce duplication when multiple masters share a remote environment.
+
+Usage patterns and recommended practices
+----------------------------------------
+
+- Remote function execution
+  - Load the required module on the remote side (if not already present) using LOAD_MODULE.
+  - Use CALL_FUNCTION to execute a function with positional and keyword arguments.
+  - Retrieve results or exceptions in the master as the operation completes.
+- Managing routes
+  - Use ADD_ROUTE to reach a new remote endpoint when the router is aware of a new slave.
+  - Use DEL_ROUTE to cleanly remove routes when a slave disconnects or is decommissioned.
+- Cleanup
+  - Use SHUTDOWN to gracefully shut down a remote context when it is no longer needed.
+  - Detach operations via DETACHING to ensure proper cleanup callbacks are invoked on both sides.
+
+Illustrative examples
+---------------------
+
+Example 1: Remote module load and function call (pseudocode)
+-----------------------------------------------------------
+
+This example demonstrates the high-level sequence of operations to load a remote module and call a function.
+
+.. code-block:: python
+
+    # Pseudocode; actual API names may vary by Mitogen version
+    master = mitogen.Master(host="remote.example.org")  # establish broker/connection
+    slave = master.spawn_slave()                       # create a slave context
+
+    # Ensure the module is present on the remote side
+    if not master.has_module_on_remote("mymodule"):
+        master.load_module_on_remote("mymodule", source=local_path_to_module)
+
+    # Call a function remotely
+    result = master.call_remote_function(
+        destination=slave,
+        module="mymodule",
+        function="compute",
+        args=(42, "hello"),
+        kwargs={"limit": 100}
+    )
+
+    print("Remote result:", result)
+
+Notes:
+- The exact API names (has_module_on_remote, load_module_on_remote, call_remote_function) are representative; consult the current Mitogen API for exact method names.
+- The protocol will ensure the remote side loads the module (if not already loaded) and executes the function, returning either a result or an exception.
+
+Example 2: Routing management
+-----------------------------
+
+.. code-block:: python
+
+    master = mitogen.Master()
+    slave = master.create_slave("remote-host")
+
+    # Add a route to reach the slave
+    master.router.add_route(destination=slave, route_info=slaves_route_info)
+
+    # Later, remove the route when the slave goes away
+    master.router.del_route(destination=slave)
+
+Example 3: Detach and shutdown
+--------------------------------
+
+.. code-block:: python
+
+    master = mitogen.Master()
+    slave = master.create_slave("remote-host")
+
+    # Do work...
+    master.shutdown_remote(slave)  # sends SHUTDOWN to the remote context
+    master.router.cleanup(slave)  # ensure local routing state is cleaned
+
+Appendix: Opcode summary
+------------------------
+
+- GET_MODULE: Query information about a module on the remote side.
+- CALL_FUNCTION: Invoke a Python function on the remote side.
+- FORWARD_LOG: Forward log messages from remote to master.
+- ADD_ROUTE: Add a routing entry to reach a remote endpoint.
+- DEL_ROUTE: Remove a routing entry.
+- ALLOCATE_ID: Allocate a unique identifier within the routing/domain.
+- SHUTDOWN: Request graceful shutdown of a remote context.
+- LOAD_MODULE: Load a module on the remote side.
+- FORWARD_MODULE: Forward module data to another endpoint or context.
+- DETACHING: Signal detachment for cleanup.
+- CALL_SERVICE: Execute a service-like operation (remote query/execution).
+- STUB_CALL_SERVICE: Use a stub for a service-like call (indirect path).
+- IS_DEAD: Sentinel value indicating a dead or unreachable destination.
+
+Notes for contributors
+----------------------
+
+- The bootstrap code is intentionally small to minimize network transfer and startup time. When extending Mitogen, consider how changes affect the bootstrap size and the initial handshake.
+- Be mindful of encoding and import-lock semantics when performing IO and serialization. The code uses Latin-1 encoding as a practical bridge for binary data in certain paths.
+- Logging categories (mitogen, mitogen.io) help isolate core execution traces from I/O-related logging. Use these wisely to aid debugging in complex deployments.
+
+This documentation provides a compact but thorough view of how Mitogen works under the hood, along with concrete patterns for common operational scenarios. For API specifics, consult the latest public API reference and the source code for the exact class and method names used by your Mitogen version.

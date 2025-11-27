@@ -1,0 +1,146 @@
+Quick Start
+===========
+
+This quickstart shows how to generate a suitable discretization of a geometric path using toppra’s gridpoint proposal utilities and how to integrate OpenRAVE trajectories if available. It focuses on the core functionality exposed by the path interface and the propose_gridpoints helper.
+
+Prerequisites
+-------------
+- Python 3.x
+- NumPy and SciPy
+- toppra (this repository)
+- Optional: OpenRAVE (for RaveTrajectoryWrapper), see FOUND_OPENRAVE flag in the code
+
+What you can do
+---------------
+- Create a geometric path object that implements the required interface (evaluate position, velocity, acceleration; expose path interval and degrees of freedom).
+- Use propose_gridpoints to adaptively refine a path discretization based on curvature and a specified error threshold.
+- If you have an OpenRAVE trajectory, wrap it with RaveTrajectoryWrapper and feed it to propose_gridpoints for the same refinement workflow.
+
+Key concepts
+------------
+- propose_gridpoints(path, max_err_threshold=1e-4, max_iteration=100, max_seg_length=0.05)
+  - Automatically discretizes a given geometric path by inserting points until the estimated interpolation error falls below max_err_threshold or the maximum segment length constraint is satisfied.
+  - Uses the second derivative of the path to estimate curvature-driven error.
+  - Returns a 1D NumPy array of gridpoints along the path’s parameter (path interval).
+
+- AbstractGeometricPath
+  - An abstract interface that path objects should implement. Key methods/properties:
+    - __call__(path_positions, order=0): evaluate the path (order=0: position, order=1: velocity, order=2: acceleration)
+    - dof: degrees of freedom of the path
+    - path_interval: numpy array of shape (2,) with start and end positions along the path
+    - waypoints: optional; tuple of arrays or None
+
+- RaveTrajectoryWrapper
+  - Optional adapter for OpenRAVE trajectories.
+  - Wraps a GenericTrajectory and exposes a geometric path interface compatible with the rest of toppra.
+  - Only quadratic or cubic interpolation trajectories are supported.
+
+Minimal working example
+-----------------------
+The following example demonstrates how to create a simple geometric path object and use propose_gridpoints to generate a refined grid along the path.
+
+Code: simple 2D straight-line path
+```python
+import numpy as np
+from typing import Sequence
+
+# Simple path that satisfies the basic interface expected by propose_gridpoints
+class SimplePath:
+    def __init__(self):
+        self._dof = 2
+        self._interval = np.array([0.0, 1.0])  # parameter t in [0, 1]
+
+    @property
+    def dof(self) -> int:
+        return self._dof
+
+    @property
+    def path_interval(self) -> np.ndarray:
+        return self._interval
+
+    @property
+    def waypoints(self):
+        return None
+
+    def __call__(self, path_positions: Sequence[float], order: int = 0) -> np.ndarray:
+        t = np.asarray(path_positions, dtype=float)
+
+        # 2D straight line from (0,0) to (1,1) along the parameter t
+        if order == 0:
+            # position
+            pos = np.stack([t, t], axis=-1)
+            return pos
+        elif order == 1:
+            # velocity (constant)
+            vel = np.stack([np.ones_like(t), np.ones_like(t)], axis=-1)
+            return vel
+        elif order == 2:
+            # acceleration (zero)
+            acc = np.zeros((t.shape[0], 2))
+            return acc
+        else:
+            raise ValueError("Unsupported derivative order")
+
+# Instantiate the path
+path = SimplePath()
+
+# Generate proposed gridpoints along the path
+from toppra.quickstart import propose_gridpoints  # adjust import path as appropriate for your environment
+
+gridpoints = propose_gridpoints(path)
+print("Proposed gridpoints:", gridpoints)
+```
+
+Notes
+-----
+- The path object must provide path_interval and implement __call__(pos, order) such that:
+  - order=0 returns positions
+  - order=1 returns first derivatives (velocity)
+  - order=2 returns second derivatives (acceleration)
+- The example path above is intentionally simple and serves to demonstrate the API. For real problems, you would implement a path that reflects your robot’s geometry and constraints.
+
+Optional: OpenRAVE integration
+------------------------------
+If you have OpenRAVE installed, you can wrap an OpenRAVE trajectory and reuse the same gridpoint refinement workflow.
+
+Code: wrap an OpenRAVE trajectory (pseudocode)
+```python
+from toppra.constants import FOUND_OPENRAVE
+
+if FOUND_OPENRAVE:
+    import openravepy as orpy
+
+    # Assume you have a robot and a trajectory from OpenRAVE
+    # traj = orpy.RaveCreateTrajectory(...)
+    # traj.load(...)
+    # robot = ...  # OpenRAVE robot
+
+    wrapper = RaveTrajectoryWrapper(traj, robot)
+    gridpoints = propose_gridpoints(wrapper)
+```
+
+Where to go from here
+---------------------
+- Use the generated gridpoints to discretize your path before feeding it into toppra’s time-parameterization routines.
+- Consult the API references for AbstractGeometricPath, RaveTrajectoryWrapper, and propose_gridpoints to tailor behavior to your application.
+- For complex paths, adjust max_err_threshold and max_seg_length to balance accuracy and computation.
+
+API reference (high level)
+--------------------------
+- propose_gridpoints(path, max_err_threshold=1e-4, max_iteration=100, max_seg_length=0.05)
+  - Returns: numpy.ndarray with proposed gridpoints along path parameter.
+
+- AbstractGeometricPath
+  - __call__(path_positions, order=0) -> np.ndarray
+  - dof -> int
+  - path_interval -> np.ndarray(2,)
+  - waypoints -> Optional[Tuple[np.ndarray, ...]]
+
+- RaveTrajectoryWrapper
+  - Wraps OpenRAVE trajectories, exposing a geometric path interface for gridpoint refinement.
+  - Supports quadratic or cubic interpolation.
+
+Tips
+----
+- Start with a relatively loose max_err_threshold and small max_seg_length to get a quick sense of the grid, then tighten parameters for higher fidelity.
+- When OpenRAVE is available, leverage RaveTrajectoryWrapper to reuse existing trajectories without re-deriving the path representation.

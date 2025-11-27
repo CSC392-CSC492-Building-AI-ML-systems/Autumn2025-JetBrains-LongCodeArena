@@ -1,0 +1,226 @@
+mixed_linear.rst
+
+Linear Mixed Effects Models
+===========================
+
+Overview
+--------
+
+Linear mixed effects models (LMMs) extend ordinary regression by incorporating
+both fixed and random effects to account for dependence within grouped data.
+They are suitable for modeling relationships where observations are clustered
+into independent groups, and they may also handle crossed random effects under
+certain model specifications. The MixedLM class provides a group-based
+implementation that is efficient when data can be partitioned into independent
+groups and supports variance components and (optionally) variance-covariance
+structure among random effects.
+
+Key concepts
+------------
+
+- Endogenous response: Y, modeled as Y = X*beta + Z*gamma + epsilon.
+- Fixed effects: X contains design matrices for fixed effects; beta are the fixed
+  effects coefficients.
+- Random effects: Z contains design matrices for random effects; gamma is a random
+  vector with mean zero. The first k_re elements share a common covariance Psi
+  across groups; remaining elements represent variance components.
+- Residual variance: epsilon ~ N(0, sigma^2 I). The scalar sigma^2 is often
+  referred to as the scale.
+- Marginal mean: E[Y | X, Z] = X*beta. The random effects introduce group-specific
+  deviations around the mean structure.
+- Parameterizations:
+  - User parameterization: cov(endog) = scale*I + Z*cov_re*Z'.
+  - Profile parameterization: cov(endog) = I + Z*cov_re1*Z' (cov_re relates to the
+    profile parameterization via cov_re1 = cov_re / scale).
+  - Square-root parameterization: uses the Cholesky factor of cov_re1 for numerical
+    stability and optimization.
+- Optimization: GLS is used to profile out fixed effects and the scale; the Hessian
+  of the profiled likelihood is not computed, so Newton-Raphson-based methods
+  requiring the Hessian are not applicable.
+
+Model formulation
+-----------------
+
+For each group i with n_i observations:
+
+Y_i = X_i * beta + Z_i * gamma_i + epsilon_i
+
+where:
+
+- Y_i is the n_i-dimensional response vector (endog)
+- X_i is the n_i x k_fe matrix for fixed effects (exog)
+- Z_i is the n_i x k_re matrix for random effects (exog_re)
+- beta is the k_fe-dimensional fixed effects vector
+- gamma_i is a random vector (shared covariance across groups for the first k_re
+  components; remaining components are variance terms)
+- epsilon_i ~ N(0, sigma^2 I_{n_i})
+
+Groups are assumed independent. The data are supplied as long-form endpoints
+with a grouping variable, and the design matrices (endog, exog, exog_re) are
+constructed to reflect the desired fixed and random structures.
+
+Variance components and variance-covariance structures
+-------------------------------------------------------
+
+- Standard random effects (first k_re elements of gamma) are shared across groups
+  via a common covariance matrix cov_re.
+- Variance components are uncorrelated with each other and with the standard random
+  effects; each variance component has its own variance parameter.
+- The number of variance components per parameter depends on the exog_vc keys or
+  the vc_formula used when specifying variance components.
+
+Input specification
+-------------------
+
+- endog (Y): 1-D array-like of length N (N = total observations).
+- exog (X): 2-D array-like of shape (N, k_fe) for fixed effects.
+- groups: 1-D array-like of length N specifying the group for each observation.
+- exog_re (Z): 2-D array-like of shape (N, k_re) for random effects (optional).
+- exog_vc: dict mapping variance component names to design matrices (optional).
+- vc_formula (optional): formula-based specification of variance components (alternative to exog_vc).
+- reml: boolean flag to choose REML or ML estimation (default typically REML).
+- method: optimization method for fitting; gradient-based methods are used, with Hessian not required.
+
+Output and results
+------------------
+
+Fitting a Linear Mixed Effects Model yields a results object (e.g., MixedLMResults)
+that provides:
+
+- fe_params: estimated fixed effects coefficients (beta).
+- cov_re: estimated covariance matrix for the random effects (cov_re) or its Cholesky
+  factor depending on parameterization.
+- scale: estimated residual variance (sigma^2) or a scale parameter consistent with
+  the profiled likelihood.
+- Standard errors and z-values for fixed effects, as well as diagnostics for the fit.
+- Summary and diagnostic tools to inspect convergence, likelihood values, and model
+  fit statistics.
+
+Usage notes
+-----------
+
+- Data must be observed for endog (Y), exog (X), and exog_re (Z) where used.
+- The grouping vector must align with the rows of the design matrices.
+- Variance components can be specified via exog_vc or vc_formula; ensure the shapes
+  are compatible with the number of observations and groups.
+- Profiling out the fixed effects and scale can lead to faster convergence but means
+  that the Hessian of the profiled likelihood is not computed.
+- If the model is mis-specified (e.g., insufficient random effects for the data
+  structure), convergence can fail; inspect ConvergenceWarning and the log-likelihood
+  trajectory.
+
+API reference (developer-oriented)
+----------------------------------
+
+- MixedLM(endog, exog, groups, exog_re=None, exog_vc=None, vc_formula=None, ...)
+  - Primary class to specify and fit linear mixed effects models.
+  - endog: array-like of length N
+  - exog: array-like of shape (N, k_fe)
+  - groups: array-like of length N
+  - exog_re: array-like of shape (N, k_re) or None
+  - exog_vc: dict[str, array-like] or None; variance component design matrices
+  - vc_formula: Patsy formula (optional) to specify variance components
+  - reml: bool; whether to use REML or ML
+  - fit_kwds: keyword arguments passed to the optimizer
+
+- MixedLMResults
+  - fe_params: fixed effects estimates
+  - cov_re: estimated covariance of random effects
+  - scale: residual variance estimate
+  - bse_fe: standard errors for fixed effects (if available)
+  - aic, bic, loglike: likelihood-based criteria
+  - summary(): textual summary of model fits and statistics
+
+Examples
+--------
+
+Basic usage with a simple random intercept and slope structure
+
+.. code-block:: python
+
+    import numpy as np
+    from statsmodels.regression.mixed_linear_model import MixedLM
+
+    # Synthetic data
+    np.random.seed(123)
+    n_groups = 10
+    n_per_group = 20
+    groups = np.repeat(np.arange(n_groups), n_per_group)
+    X = np.column_stack((np.ones(n_groups * n_per_group),
+                         np.random.randn(n_groups * n_per_group)))
+    beta = np.array([1.0, 0.5])
+
+    # Random effects: per-group intercept and slope
+    k_re = 2
+    gamma = np.random.randn(n_groups, k_re) * 0.5
+
+    # Random effects contribution
+    Z = np.zeros((n_groups * n_per_group, k_re))
+    Z[:, 0] = 1.0  # random intercept
+    Z[:, 1] = np.random.randn(n_groups * n_per_group)
+
+    # Endogenous response
+    eps = np.random.randn(n_groups * n_per_group) * 0.5
+    Y = X.dot(beta) + (Z * gamma[groups]).sum(axis=1) + eps
+
+    model = MixedLM(endog=Y, exog=X, groups=groups, exog_re=Z)
+    result = model.fit()
+    print(result.summary())
+
+Variance components example (variance components via vc_formula/exog_vc)
+
+.. code-block:: python
+
+    import numpy as np
+    from statsmodels.regression.mixed_linear_model import MixedLM
+    import patsy
+
+    # Synthetic data with variance components
+    # Assume two variance components: group-specific random intercepts and slopes
+    # Build exog and exog_re as before, and specify vc_formula
+    # vc_formula could be something like " ~ 0 + C(group):Intercept + C(group):Slope" depending on API
+
+    # Example placeholders (adjust to exact API usage in your version):
+    # endog = ... (N x 1)
+    # exog = ... (N x k_fe)
+    # groups = ... (N, )
+
+    # model = MixedLM(endog, exog, groups, vc_formula="0 + C(group):Intercept + C(group):Slope")
+    # result = model.fit()
+    # print(result.summary())
+
+Notes and edge cases
+--------------------
+
+- If no random effects are desired, set exog_re=None; the model reduces to a fixed-effects model with residual variance.
+- When groups contain very few observations, random effects estimates may be unstable; consider simplifying the random effects structure or gathering more data per group.
+- Crossed random effects can be supported by a suitable model specification; the documentation and examples may require formula-based variance components (vc_formula) to express complex structures.
+- Convergence warnings (ConvergenceWarning) indicate that the optimizer did not converge within the allotted iterations; diagnostic plots or adjustments to starting values and bounds may be necessary.
+- The Hessian of the profiled log-likelihood is not implemented for MixedLM fitting, so methods requiring the Hessian (e.g., Newton-Raphson with Hessian) are not used.
+
+References
+----------
+
+- Lindstrom, M. J., & Bates, D. M. (1988). Newton Raphson and EM algorithms for linear mixed effects models for repeated measures data. Journal of the American Statistical Association, 83(404), 1014-1022.
+- See also:
+  - http://econ.ucsb.edu/~doug/245a/Papers/Mixed%20Effects%20Implement.pdf
+  - http://lme4.r-forge.r-project.org/lMMwR/lrgprt.pdf
+  - http://lme4.r-forge.r-project.org/slides/2009-07-07-Rennes/3Longitudinal-4.pdf
+
+Notes for developers
+--------------------
+
+- The core estimation relies on profiling the likelihood over the scale and fixed effects, with GLS-based steps for efficiency.
+- The module supports multiple parameterizations (user, profile, square-root) and includes score routines for different parameterizations.
+- The implementation emphasizes group-wise computations to exploit independence across groups; cross-group interactions require careful specification of Z and vc components.
+- Edge-case handling (e.g., missing data in endog, exog, or exog_re) should be performed prior to model fitting, as the MixedLM expects complete observations for the specified design matrices.
+
+References to API and usage
+---------------------------
+
+- MixedLM class documentation
+- MixedLMResults documentation
+- Reml vs ML estimation options
+- Variance components specifications via exog_vc and vc_formula
+
+This document provides a practical overview and usage guidance for Linear Mixed Effects Models using the MixedLM class, with emphasis on configurations, parameterizations, and important considerations for developers building or using linear mixed models in Python.

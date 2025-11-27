@@ -1,0 +1,94 @@
+# Generalized Linear Mixed Effects Models (GLMM)
+
+ Overview
+ Generalized Linear Mixed Models (GLMMs) extend generalized linear models by incorporating random effects to capture correlated or non-independent observations. The Bayesian implementation in this module supports two estimation approaches:
+ - Laplace approximation (MAP)
+ - Variational Bayes (mean-field posterior approximation)
+
+ The current implementation handles families without additional scale or shape parameters (e.g., binomial and Poisson). All realizations of random effects are modeled as independent.
+
+ Key components
+ - MixedGLM class: central interface for specifying a GLMM with Bayesian estimation.
+ - exog_vc: design matrix for the random effects. Each column represents an independent random effect realization.
+ - ident: integer labels grouping columns of exog_vc that share the same standard deviation.
+ - vcp_p: prior standard deviation for the log-standard deviations of random effects (vcp). The vcp priors imply log-normal distributions for standard deviations.
+ - fe_p: prior standard deviation for fixed effects parameters (fep).
+ - Family: GLM family (e.g., binomial, Poisson) from statsmodels.genmod.families.
+ - Random effects independence: all random effects realizations are assumed independent given the variance structure parameters.
+ - Sparse handling: exog_vc may be provided as a sparse matrix; dense inputs are converted internally. When formulas are used, a temporary dense version may be created for exog_vc.
+ - Formula support: When formulas are used, columns of exog_vc derived from a common formula are constrained to share the same standard deviation. If formulas are used, ident is constructed internally so that each distinct formula yields a different variance component.
+
+ Model and parameterization
+ The joint density factors as:
+ p(y | vc, fep) p(vc | vcp) p(vcp) p(fe)
+ - p(fe) and p(vcp) are Gaussian priors (the vcp parameters themselves are log standard deviations with log-normal distributions).
+ - p(vc | vcp) is an independent Gaussian distribution across random effects realizations, with dependence structured by ident.
+ - p(y | vc, fep) depends on the chosen GLM family.
+
+ The posterior comprises three categories of parameters:
+ - Fixed effects parameters (fep), corresponding to exog columns.
+ - Random effects realizations (vc), corresponding to exog_vc columns.
+ - Random effect standard deviation parameters (vcp), corresponding to distinct labels in ident.
+
+ Notes
+ - The finite prior structure and the independence assumptions enable tractable Bayesian inference under the chosen approximations.
+ - For Binomial or Poisson families, the posterior mode can be challenging to locate if vcp_p is too large; values around 0.5–1.0 tend to be stable in practice.
+ - The class supports both MAP via Laplace approximation and VB via mean-field variational Bayes.
+
+ Usage
+ Import and instantiate the GLMM, then fit using either MAP (fit_map) or VB (fit_vb). Priors are specified via vcp_p (prior on random effect SDs) and fe_p (prior on fixed effects).
+
+ Example (basic usage)
+ ```python
+ from mixed_glm import MixedGLM
+ from statsmodels.genmod import families
+ import numpy as np
+
+ # endog: n x 1, exog: n x p, exog_vc: n x q, ident: q-length
+ # The exact shapes depend on your data; exog_vc may be sparse.
+ endog = np.array(...)       # binary or count data
+ exog = np.array(...)         # fixed effects design
+ exog_vc = np.array(...)      # random effects design (columns are random terms)
+ ident = np.array(...)        # integers labeling variance components
+
+ # Create model (example uses Binomial family)
+ model = MixedGLM(endog, exog, exog_vc, ident,
+                  vcp_p=0.5, fe_p=0.5,
+                  family=families.Binomial())
+
+ # MAP (Laplace) estimation
+ res_map = model.fit_map()
+ print(res_map.summary())
+
+ # Variational Bayes estimation
+ res_vb = model.fit_vb()
+ print(res_vb.summary())
+ ```
+ 
+ Additional notes
+ - Exog_vc may be provided as a scipy.sparse matrix; it is converted to sparse internally if needed.
+ - If you prefer to use formulas to construct exog_vc, the implementation supports this, with ident constructed to reflect distinct variance components per formula-derived group.
+ - For formula-based usage, be aware that a temporary dense version of exog_vc may be created when formulas are involved.
+
+ Details and theoretical background
+ - Model formulation:
+   - The fixed-effects component is modeled through exog (fep).
+   - The random-effects component uses exog_vc with one random realization per column; these realizations are independent given the variance parameters.
+   - Variance component parameters (vcp) control the standard deviations of the random effects; priors on vcp are Gaussian on the log-standard deviations (log-normal SDs).
+ - Priors:
+   - p(fe) is Gaussian with mean 0 and standard deviation fe_p.
+   - p(vcp) involves Gaussian priors on the log-standard deviations; the SDs themselves have log-normal distributions.
+ - Inference methods:
+   - MAP (Laplace) approximation targets the posterior mode with a local Gaussian approximation.
+   - VB (mean-field) provides a tractable approximation to the posterior distribution.
+ - Likelihood and GLM family:
+   - The likelihood p(y | vc, fep) is determined by the chosen GLM family (currently limited to binomial and Poisson; no additional scale/shape parameters).
+ - Parameterization and ident:
+   - ident groups random effect columns into variance components that share a common SD.
+   - When formulas are used, columns derived from the same formula share the same variance parameter via ident.
+
+ References
+ - Introduction to generalized linear mixed models: https://stats.idre.ucla.edu/other/mult-pkg/introduction-to-generalized-linear-mixed-models
+ - SAS documentation on mixed models: https://support.sas.com/documentation/cdl/en/statug/63033/HTML/default/viewer.htm#statug_intromix_a0000000215.htm
+ - An assessment of estimation methods for generalized linear mixed models with binary outcomes: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3866838/
+

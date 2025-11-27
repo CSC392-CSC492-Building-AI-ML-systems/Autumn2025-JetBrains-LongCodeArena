@@ -1,0 +1,118 @@
+Verification scheme for FITS data
+=================================
+
+Overview
+--------
+
+This document describes the verification scheme used to check and optionally fix FITS data within the library. It defines the supported option syntax, how verification results are represented, and how results are reported or raised as errors.
+
+Key concepts
+------------
+
+- VerifyError and VerifyWarning: exception and warning types used by the verification system.
+- VERIFY_OPTIONS: allowed option strings for verification (and their combinations).
+- _Verify.verify(option): orchestrates the verification process for an object implementing the verification protocol. It validates the option, delegates to the object's _verify method, splits the option into fixing and reporting components, collects messages, and reports or raises as appropriate.
+- _ErrList: a nested list structure that stores verification messages. It provides iterative traversal via iter_lines for consistent, indented reporting.
+- The “fix vs report” model: verification results distinguish between issues that can be fixed automatically and those that cannot. Fixing may occur automatically, while reporting controls whether issues are warned, raised, or suppressed.
+
+Option semantics
+----------------
+
+- ignore
+  - Do nothing; no verification is performed or reported.
+- warn
+  - Issues raise warnings (VerifyWarning) but do not raise exceptions.
+- exception
+  - Issues raise a VerifyError.
+- fix
+  - Attempts to fix fixable issues and reports on unfixable issues as errors.
+- silentfix
+  - Fixes fixable issues silently and reports only unfixable ones (if any).
+- fix+ignore
+  - Fixes fixable issues and suppresses reporting entirely.
+- fix+warn
+  - Fixes fixable issues and warns about the overall results (if there are unfixable issues, those are reported as warnings as well if present).
+- fix+exception
+  - Fixes fixable issues; unfixable issues raise an exception.
+- silentfix+ignore
+  - Fixes fixable issues; reports nothing at all.
+- silentfix+warn
+  - Fixes fixable issues; reports only unfixable issues as warnings.
+- silentfix+exception
+  - Fixes fixable issues; unfixable issues raise an exception.
+
+How verification runs
+---------------------
+
+- The verification option is normalized to lower-case and validated against VERIFY_OPTIONS. An unknown option raises ValueError.
+- If opt == "ignore", verification returns immediately.
+- The object's _verify(opt) method is called to gather verification results as an _ErrList.
+- If "+" is present in the option, it is split into fix_opt and report_opt. Otherwise:
+  - For "fix" and "silentfix", fix_opt is set to opt and report_opt to "exception".
+  - Otherwise, fix_opt is None and report_opt is opt.
+- Special case: if fix_opt is "silentfix" and report_opt is "ignore", no output is produced.
+- Line filtering is determined:
+  - "silentfix": show only unfixable issues (fixable == False).
+  - "fix" with "ignore": show only issues that have fixable == True (the fixed ones).
+  - Otherwise, show all issues.
+- The verification messages are collected by iterating errs.iter_lines(filter=line_filter). Each item yields a tuple (fixable, message). If fixable is not None, the unfixable flag is updated accordingly.
+- If any messages exist, a header "Verification reported errors:" and a trailing note about zero-based indexing are added.
+- Reporting decision:
+  - If fix_opt == "silentfix" and there are no unfixable issues, return.
+  - If report_opt == "warn" or (fix_opt == "fix" and there are no unfixable issues), each message line is emitted as a VerifyWarning.
+  - Otherwise, a VerifyError is raised with the concatenated messages.
+- The verification process uses the internal mechanism to fix issues where possible, and to report only the appropriate subset of messages depending on the chosen options.
+
+Error representation
+--------------------
+
+- _ErrList is a subclass of list that stores verification messages in a nested structure.
+- Each non-list item in the top level is a tuple (fixable, message), where:
+  - fixable is a boolean indicating whether the issue is fixable.
+  - message is the human-readable description of the issue.
+- Nested _ErrList entries represent grouped messages. The unit attribute provides a header label (default "Element") for top-level groups.
+- String rendering
+  - str(_ErrList) renders a flat, joined view of messages.
+  - iter_lines(filter=None, shift=0) traverses the nested structure and yields (fixable, indented_message) with indentation corresponding to hierarchy levels. This is used by the verification engine to assemble the final report.
+
+Practical guidance
+------------------
+
+- Use verify("warn") in tests to detect problems without failing the test run.
+- Use verify("fix") or verify("silentfix") when you want the verifier to attempt to correct issues and report only remaining (unfixable) problems.
+- Use verify("ignore") to bypass verification when you know the data is acceptable for a particular context.
+- The option syntax also allows combinations like "fix+warn" to automatically fix issues and emit warnings about the results, or "silentfix+exception" to fix issues and raise an exception only if unfixable problems remain.
+- Note: The verification scheme reports are designed to be human-readable and to reflect the hierarchical structure of the data being verified. The note reminds users that astropy.io.fits uses zero-based indexing when reporting positions.
+
+Code references
+---------------
+
+- Verification classes and options:
+  - VerifyError, VerifyWarning
+  - VERIFY_OPTIONS
+  - _Verify.run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+  - _Verify.verify(option="warn")
+- Error representation:
+  - _ErrList(unit="Element") with iter_lines(filter=None, shift=0)
+
+Usage example
+-------------
+
+- Basic verification that warns on issues:
+  obj.verify("warn")
+
+- Automatic fixing with warnings on results:
+  obj.verify("fix+warn")
+
+- Silent fixing with no reporting (unless unfixable issues exist):
+  obj.verify("silentfix")
+
+- Ignore all verification:
+  obj.verify("ignore")
+
+Notes
+-----
+
+- When issues are reported, the message stream ends with a note: "Note: astropy.io.fits uses zero-based indexing." to remind users about indexing conventions.
+
+This scheme provides a consistent, flexible approach to verifying FITS data, enabling different workflows (debugging, auto-fixing, strict validation) while keeping error reporting clear and actionable.

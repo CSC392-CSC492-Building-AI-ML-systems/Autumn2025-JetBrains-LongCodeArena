@@ -1,0 +1,197 @@
+discretemod.rst
+
+Discrete Count Models with Zero-Inflation
+=======================================
+
+This module provides zero-inflated count models for discrete data. The public API exposes three concrete families, as indicated by the module’s exported symbols:
+
+- ZeroInflatedPoisson
+- ZeroInflatedGeneralizedPoisson
+- ZeroInflatedNegativeBinomialP
+
+In addition, a generic base class implements the shared zero-inflation machinery used by the concrete families.
+
+Key concepts
+------------
+
+- Main (count) model: A standard count distribution (e.g., Poisson, Generalized Poisson, NegativeBinomialP) modeled on the endogenous response variable endog with exog covariates exog.
+- Zero-inflation model: A binary model that governs the probability of an observation being a structural zero. This component uses exog_infl as its design matrix and a choice of link function (inflation) either 'logit' (default) or 'probit'.
+- Combined likelihood: The overall log-likelihood is a mixture of zeros coming from the inflation process and the main count process. Observations with y > 0 rely on the main model; zero observations rely on a combination of the inflation probability and the main model’s likelihood.
+
+Public API
+----------
+
+__all__ = ["ZeroInflatedPoisson", "ZeroInflatedGeneralizedPoisson",
+           "ZeroInflatedNegativeBinomialP"]
+
+Class: GenericZeroInflated
+-------------------------
+
+Purpose
+^^^^^^^
+GenericZeroInflated implements the shared infrastructure for zero-inflated count models. It combines:
+- A main count model (Poisson, Generalized Poisson, or NegativeBinomialP)
+- A zero-inflation sub-model that predicts the probability of an observation being a zero
+
+Inheritance
+^^^^^^^^^^^
+GenericZeroInflated inherits from CountModel, leveraging the common statistics and optimization routines from the Statsmodels discrete modeling framework.
+
+Initialization and parameters
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+__init__(endog, exog, exog_infl=None, offset=None, inflation='logit', exposure=None, missing='none', **kwargs)
+
+- endog: array-like
+  Endogenous response variable (count data).
+
+- exog: array-like
+  Explanatory variables for the main count model.
+
+- exog_infl: array-like or None
+  Explanatory variables for the zero-inflation model. If None, an intercept-only model is used (constant term).
+
+- offset: array-like
+  Offset added to the linear predictor with coefficient 1 for the count part.
+
+- inflation: {'logit', 'probit'}
+  Link function for the zero-inflation model:
+  - 'logit' (default)
+  - 'probit'
+
+- exposure: array-like
+  Optional exposure term; log(exposure) is added to the linear predictor with coefficient 1.
+
+- missing: {'none', 'drop', 'raise'}
+  Handling of missing data.
+
+- **kwargs
+  Other keyword arguments passed to the base CountModel as needed.
+
+Behavior and internal setup
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+- If exog_infl is None, a single-column intercept (constant) design is created and k_inflate is set to 1.
+- If exog_infl is provided, k_inflate is the number of columns in exog_infl.
+- The number of main-exog parameters k_exog is inferred from exog.
+- The inflation sub-model is constructed as either:
+  - Logit(np.zeros(n_infl), exog_infl) or
+  - Probit(np.zeros(n_infl), exog_infl)
+  depending on the inflation parameter.
+- The Hessian for the inflation part is chosen according to the link:
+  - self._hessian_inflate = self._hessian_logit for 'logit'
+  - self._hessian_inflate = self._hessian_probit for 'probit'
+- The class validates that endog and exog_infl have the same number of observations.
+- exog_names is augmented with inflation parameter names, e.g. inflate_0, inflate_1, ..., followed by the main exog names.
+- Internal bookkeeping attributes:
+  - self.inflation
+  - self.infl
+  - self.k_extra (alias for k_inflate)
+  - self.model_infl (the binary-inflation model)
+  - self.exog_infl (validated to float64)
+  - self._init_keys (augmented with 'exog_infl', 'inflation')
+  - self._null_drop_keys (set to ['exog_infl'])
+
+Core methods
+------------
+
+loglike(params)
+~~~~~~~~~~~~~~~
+Compute the total log-likelihood of the zero-inflated model at the given parameter vector.
+
+- params: array_like
+  Concatenated parameter vector containing:
+  - First k_inflate entries: inflation model parameters
+  - Remaining: main model parameters
+
+Returns
+-------
+loglike: float
+  The log-likelihood value (sum across observations).
+
+Notes
+^^^^^
+The log-likelihood is defined as:
+  L = sum_i log( w_i + (1 - w_i) * P_main(y_i) ) for y_i = 0
+      sum_i log(1 - w_i) + L_main(y_i) for y_i > 0
+where w_i is the predicted inflation probability for observation i and L_main is the log-likelihood contribution of the main count model.
+
+loglikeobs(params)
+~~~~~~~~~~~~~~~~~
+Vectorized per-observation log-likelihood for the zero-inflated model.
+
+- params: array_like
+  Concatenated parameter vector as in loglike.
+
+Returns
+-------
+llf: ndarray
+  Per-observation log-likelihood values.
+
+fit(start_params=None, method='bfgs', maxiter=35, full_output=1, disp=1,
+    callback=None, cov_type='nonrobust', cov_kwds=None, use_t=None, **kwargs)
+------------------------------------------------------------------------------------------------
+Fit the zero-inflated model by maximizing the log-likelihood.
+
+- start_params: array_like or None
+  Starting values for the optimization. If None, the method derives reasonable defaults from
+  the existing model components, taking into account offset and exposure where applicable.
+
+- method: str
+  Optimization method (e.g., 'bfgs', 'newton', etc.).
+
+- maxiter: int
+  Maximum number of iterations for the optimizer.
+
+- full_output, disp, callback, cov_type, cov_kwds, use_t, **kwargs
+  Standard arguments forwarded to the underlying optimization routine and base class.
+
+Notes
+^^^^^
+- If start_params is not provided, GenericZeroInflated constructs sensible defaults via _get_start_params().
+- A no-op callback is used by default to work around potential convergence callbacks.
+
+Example usage
+-------------
+
+Conceptual example (conceptually how to use the class; concrete concrete classes
+ZeroInflatedPoisson, ZeroInflatedGeneralizedPoisson, ZeroInflatedNegativeBinomialP
+follow this pattern by fixing the main model type):
+
+- Prepare data:
+  - endog: count responses
+  - exog: main-model covariates
+  - exog_infl: covariates for the zero-inflation model (optional)
+
+- Define the main model (e.g., Poisson):
+  - main_model = Poisson(endog, exog, offset=offset, exposure=exposure, missing='none', **kwargs)
+
+- Define the zero-inflated model:
+  - zi_model = ZeroInflatedPoisson(endog, exog, exog_infl=exog_infl, offset=offset,
+                                   inflation='logit', exposure=exposure, missing='none', **kwargs)
+
+- Fit:
+  - res = zi_model.fit()
+
+Notes
+^^^^^
+- The inflating component is trained together with the main count model.
+- The default inflation link is logit; probit is also supported.
+- The main model and inflation model are optimized jointly.
+
+See Also
+--------
+
+- statsmodels.discrete.discrete_model for base count-model interfaces
+- statsmodels.discrete.discrete_model.Poisson, NegativeBinomialP, GeneralizedPoisson
+- statsmodels.distributions.zipoisson, zigenpoisson, zinegbin for underlying distributions
+
+Examples
+--------
+
+Code snippets illustrating typical usage can be found in the module’s user-facing tutorials and examples in the repository, following the pattern described above.
+
+Notes for developers
+--------------------
+
+- This module relies on NumPy for numerical operations and Statsmodels’ generic model infrastructure (base.model, base.wrapper).
+- The zero-inflation component uses either a Logit or Probit model from Statsmodels’ GLM/Discrete modeling framework to predict the probability of an observation being zero.
+- The log-likelihood implementation integrates the inflation probability with the main count-model likelihood in a numerically stable way using per-observation contributions.

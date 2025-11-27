@@ -1,0 +1,117 @@
+Dataset loading utilities
+=========================
+
+This section documents the utilities used to load datasets from local caches or remote resources (notably OpenML). The utilities are designed to provide robust, cache-friendly access with retry semantics and proper handling of compressed assets.
+
+Overview
+--------
+
+The dataset loading utilities enable seamless access to datasets stored locally or retrieved from the OpenML platform. Key goals are to minimize redundant downloads, ensure atomic cache updates, transparently handle gzip-compressed content, and recover gracefully from transient network errors.
+
+OpenML integration
+------------------
+
+The primary online data source supported by these utilities is OpenML. The following components relate to OpenML interaction:
+
+- Base URL prefix:
+  - _OPENML_PREFIX = "https://api.openml.org/"
+
+- OpenML API endpoints (assembled under OpenML path helpers):
+  - _SEARCH_NAME: api/v1/json/data/list/data_name/{}/limit/2
+  - _DATA_INFO: api/v1/json/data/{}
+  - _DATA_FEATURES: api/v1/json/data/features/{}
+  - _DATA_QUALITIES: api/v1/json/data/qualities/{}
+  - _DATA_FILE: data/v1/download/{}
+
+- Data type aliases:
+  - OpenmlQualitiesType = List[Dict[str, str]]
+  - OpenmlFeaturesType = List[Dict[str, str]]
+
+- fetch_openml (exported API):
+  - __all__ = ["fetch_openml"]
+
+Caching and local storage
+-------------------------
+
+- Local cache path:
+  - _get_local_path(openml_path, data_home) -> str
+  - Returns a path of the form: data_home/openml.org/openml_path.gz
+
+- Atomic caching strategy:
+  - Downloads are written to a temporary directory first.
+  - The final file is atomically moved into place to ensure safe updates, even under concurrency.
+
+- Compressed data handling:
+  - The utilities transparently detect gzip-encoded content and decompress as needed.
+  - gzip.GzipFile is used when appropriate to read compressed assets.
+
+Retry and error handling
+------------------------
+
+Two decorators implement robust retry logic:
+
+- _retry_with_clean_cache(openml_path, data_home, no_retry_exception=None)
+  - If a cached file exists and a download attempt fails, the local cached file is removed and the download is retried.
+  - If data_home is None, no caching is used and the function is invoked once.
+  - Allows specification of an exception type that should not trigger a retry via no_retry_exception.
+
+- _retry_on_network_error(n_retries=3, delay=1.0, url="")
+  - Retries the decorated function upon URLError or TimeoutError.
+  - If an HTTPError with status code 412 is encountered, the error is not retried (412 is treated as a specific OpenML error).
+  - Between retries, a warning is issued and a delay is observed.
+
+OpenML URL access
+-----------------
+
+- _open_openml_url(openml_path, data_home, n_retries=3, delay=1.0)
+  - Fetches a resource from OpenML, with optional caching to data_home.
+  - If data_home is None, a network-retry wrapper is used and the response may be gzip-decoded on the fly.
+  - If data_home is provided, the resource is cached under data_home/openml.org/openml_path.gz.
+  - Uses HTTP requests with gzip encoding support and performs an atomic download-and-move into the cache.
+
+Error handling
+--------------
+
+- OpenMLError
+  - A specific error class used to represent HTTP 412 OpenML errors (treated as non-retriable in network retries).
+
+JSON data retrieval
+-------------------
+
+- _get_json_content_from_openml_api(url, error_message, data_home, n_retries=3, delay=1.0)
+  - Loads JSON data from the OpenML API and returns it as a dictionary.
+  - Handles errors and returns structured data for downstream processing.
+
+Usage notes
+-----------
+
+- The dataset loading utilities support both online retrieval and offline usage through caching.
+- Network reliability is improved by automatic retries, with sensible handling of OpenML-specific error codes.
+- Cached files are stored under a predictable path, making it easy to inspect or manage local data.
+- gzip-encoded content is transparently decompressed for user convenience.
+
+Example
+-------
+
+- Basic usage (conceptual; actual invocation may depend on the public API surface):
+
+  from sklearn.datasets import fetch_openml
+
+  # Retrieve a dataset by name (data_id or name-based lookup via OpenML)
+  dataset = fetch_openml(name="some_dataset")
+
+  # Access data from the returned Bunch
+  X = dataset.data
+  y = dataset.target
+
+Notes
+-----
+
+- 412 OpenML errors are treated as non-retriable to avoid redundant retries on known OpenML error states.
+- The caching mechanism ensures atomic updates to prevent partial writes in concurrent environments.
+
+For more details, see the source implementing:
+- _get_local_path, _retry_with_clean_cache, _retry_on_network_error
+- _open_openml_url and _get_json_content_from_openml_api
+- OpenML endpoint constants and type aliases
+- fetch_openml export surface

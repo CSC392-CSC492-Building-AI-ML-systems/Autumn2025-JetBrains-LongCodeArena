@@ -1,0 +1,147 @@
+Feature extraction for model inspection
+=======================================
+
+This document describes how to perform feature extraction for model inspection using the utilities in feature_extraction.rst. The implementation focuses on tracing model execution, naming internal graph nodes, and extracting intermediate activations in a stable, inspectable way.
+
+Overview
+--------
+
+- Feature extraction is built for introspecting internal activations of a model without modifying the forward logic.
+- A custom tracer records a mapping from graph nodes to human-friendly names, enabling you to select which intermediate features to output.
+- You can control how tracing behaves at module boundaries by designating certain modules as leaf modules. Leaf modules appear as single nodes (their forward calls are not traced into), which helps manage graph complexity and focus on higher-level operations.
+- The tracing infrastructure detects differences between train-time and eval-time graphs and can warn you if the required output nodes do not align between modes.
+
+Key concepts
+------------
+
+- NodePathTracer
+  - An FX tracer that records, for every operation, the name (qualname) of the node’s origin in the module hierarchy.
+  - Node names are built as a dot-separated path from the top-level module down to the operation or leaf module. The top-level module name itself is not included.
+  - When multiple nodes share the same name, a suffix like _1, _2, etc. is appended to disambiguate.
+  - Tracks a mapping from FX Node objects to their computed node names via node_to_qualname.
+
+- LeafModuleAwareTracer
+  - A tracer variant that lets you declare a set of leaf modules.
+  - Leaf modules are not traced through; instead, a single node is created for their forward calls.
+  - This helps you inspect higher-level structures without digging into every internal operation inside the leaf modules.
+
+- Node naming and disambiguation
+  - The tracer computes a node’s qualname using the current module context and the node’s own representation.
+  - For non-call_module operations, the node’s qualname appends the node’s string form to the surrounding module qualname.
+  - If a node name repeats, a local postfix _{int} is added to keep names unique.
+  - The naming logic strips any existing _{int} suffix before applying a new local suffix, ensuring stable, deterministic names within a traversal run.
+
+- Graph consistency checks
+  - When comparing train-time and eval-time graphs, the system compares the sequences of recorded node names.
+  - If there are differences, a warning suggests how to align output node specifications for train and eval modes.
+  - A helper, _is_subseq, checks whether one list of node names is a subsequence of another, aiding in compatibility checks between modes.
+
+API surface (high level)
+------------------------
+
+- create_feature_extractor(model, return_nodes, ...):
+  - Creates a feature-extractor variant of the given model.
+  - Returns a new module that, when invoked, returns a mapping from user-specified feature names to corresponding intermediate activations.
+  - Internally uses NodePathTracer to determine the actual graph node names and to build a stable mapping from node objects to human-friendly names.
+
+- get_graph_node_names(model, ...):
+  - Provides a way to discover graph node names that can be used for feature extraction.
+  - Useful for selecting which internal activations you want to expose via the feature-extractor.
+
+- leaf_modules (via LeafModuleAwareTracer initialization)
+  - A collection of module types or module instances that should be treated as leaves during tracing.
+  - When a module is designated as a leaf, tracing stops at that module, and its forward is represented by a single node.
+
+How to use
+----------
+
+1) Identify candidate nodes for feature extraction
+
+- Use the graph-naming utilities to inspect possible nodes you may want to extract.
+- Optionally, run a quick trace with a dummy input to see the node names as they appear in the trace.
+
+2) Create a feature extractor
+
+- Provide a mapping from your desired feature keys to the actual graph node names (as discovered in step 1).
+- Build the feature extractor model that, on forward, returns a dictionary of activations keyed by your chosen feature names.
+
+3) Run and inspect activations
+
+- Pass a real input tensor to the feature extractor.
+- The output is a dictionary of activations for the requested features.
+
+Code example
+------------
+
+This example demonstrates the intended usage pattern. Adjust node names to match your model’s actual graph after you inspect it with get_graph_node_names or by performing a small trace.
+
+- Example: simple model feature extraction
+
+  - Identify nodes to extract
+  - Create the feature extractor
+  - Run with a dummy input
+
+  Code:
+
+  .. code-block:: python
+
+     import torch
+     import torch.nn as nn
+     import torchvision
+     from torchvision.models.feature_extraction import create_feature_extractor, get_graph_node_names
+
+     # Example model
+     model = torchvision.models.resnet18(pretrained=False)
+
+     # Discover candidate node names for feature extraction (adjust as needed)
+     # This returns a structure you can pass to create_feature_extractor
+     # For demonstration, we assume you want features after two ReLU activations
+     # node_names = get_graph_node_names(model, return_nodes={"feat1": "relu1", "feat2": "relu2"})
+
+     # Create the feature extractor
+     # feature_extractor = create_feature_extractor(model, return_nodes=node_names)
+
+     # Run a forward pass
+     # inputs = torch.randn(1, 3, 224, 224)
+     # features = feature_extractor(inputs)
+     # print(features)  # dict[str, Tensor]
+
+12
+Notes on internal tracing details
+---------------------------------
+
+- Node naming
+  - Each node’s qualname reflects its position in the module hierarchy and its own operation string.
+  - Duplicate names receive a suffix (e.g., _1, _2) to keep names unique within the trace.
+  - Non-call_module nodes amplify the surrounding module qualname with the node’s text when forming the final name.
+
+- Leaf modules
+  - By declaring leaf modules, you prevent tracing into those submodules.
+  - This yields fewer, higher-level feature nodes that are often easier to interpret when inspecting a model’s behavior.
+
+- Train vs. eval graphs
+  - The system compares node sequences produced during train and eval traces.
+  - If the sequences differ, a warning is issued with a suggestion to align the requested output nodes for each mode.
+  - A subsequence check helps determine whether eval-time graph names are a subset of train-time names, guiding node selection.
+
+Tips and troubleshooting
+------------------------
+
+- Start with a broad set of nodes to understand the graph structure, then narrow down to the most informative activations.
+- Use leaf_modules to isolate sections of the model you don’t want to probe deeply.
+- If you see mismatches between train and eval graphs, verify that the same intended outputs are being requested in both modes and consider computing separate return_nodes for each mode.
+
+Reference implementation notes
+------------------------------
+
+- The NodePathTracer is an extension of FX’s Tracer with additional bookkeeping for node-to-qualname mappings.
+- The mapping is stored in node_to_qualname and used to construct stable, human-friendly keys for features.
+- The helper _warn_graph_differences and _is_subseq assist in providing actionable guidance when the graph structure changes across modes.
+
+Appendix: internal helpers (conceptual)
+---------------------------------------
+
+- _is_subseq(x, y): checks if y is a subsequence of x
+- _warn_graph_differences(train_tracer, eval_tracer): emits guidance if train/eval traces differ
+
+This documentation provides a practical overview and usage patterns to leverage feature extraction for model inspection efficiently. For exact API signatures and latest behavior, refer to the source code in feature_extraction.rst.

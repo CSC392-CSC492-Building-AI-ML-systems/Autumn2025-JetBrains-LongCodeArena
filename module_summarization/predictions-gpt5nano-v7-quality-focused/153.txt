@@ -1,0 +1,168 @@
+Geometry subpixel transformations
+===============================
+
+Overview
+--------
+This section documents geometric subpixel operations used for camera models and image transformations. It covers the PinholeCamera class, which represents a batched pinhole camera with intrinsic and extrinsic parameters, image size, and convenient accessors for camera matrices and transformed coordinates.
+
+PinholeCamera
+-------------
+The PinholeCamera class models a pinhole camera using full 4x4 calibration and pose matrices.
+
+- Stores:
+  - intrinsics: tensor of shape (B, 4, 4)
+    - The full camera calibration matrix.
+  - extrinsics: tensor of shape (B, 4, 4)
+    - The full rotation-translation matrix.
+  - height: tensor of shape (B)
+    - Image height per batch item.
+  - width: tensor of shape (B)
+    - Image width per batch item.
+
+- Notes:
+  - All attributes are batched to leverage PyTorch parallelism.
+  - Accessors provide convenient views into the matrices (e.g., focal lengths, principal point, translation).
+
+Constructor
+-----------
+PinholeCamera(intrinsics, extrinsics, height, width)
+
+- intrinsics: torch.Tensor with shape (B, 4, 4)
+  - Full 4x4 intrinsic calibration matrix per batch item.
+- extrinsics: torch.Tensor with shape (B, 4, 4)
+  - Full 4x4 extrinsic pose matrix per batch item.
+- height: torch.Tensor with shape (B)
+  - Image height per batch item.
+- width: torch.Tensor with shape (B)
+  - Image width per batch item.
+
+Validation
+----------
+The constructor validates input shapes and consistency:
+
+- _check_valid(data_iter)
+  - Ensures batch dimension is present and consistent across inputs.
+- _check_valid_params(data, data_name)
+  - Ensures shapes are either Bx4x4 or BxNx4x4 (N can vary per batch item).
+- _check_valid_shape(data, data_name)
+  - Ensures height/width are 1D tensors of shape (B,).
+
+Attributes and properties
+-------------------------
+
+Core accessors return or validate internal state before exposing data:
+
+- intrinsics (B, 4, 4)
+  - Returns the stored intrinsics after validation.
+- extrinsics (B, 4, 4)
+  - Returns the stored extrinsics after validation.
+- batch_size
+  - Returns the batch size (B) from intrinsics.shape[0].
+
+Camera parameter helpers (from intrinsics and extrinsics)
+
+- fx
+  - Focal length in x-direction. Shape: (B)
+  - Accessed as intrinsics[..., 0, 0].
+- fy
+  - Focal length in y-direction. Shape: (B)
+  - Accessed as intrinsics[..., 1, 1].
+- cx
+  - Principal point x-coordinate. Shape: (B)
+  - Accessed as intrinsics[..., 0, 2].
+- cy
+  - Principal point y-coordinate. Shape: (B)
+  - Accessed as intrinsics[..., 1, 2].
+
+- tx
+  - Translation along x in the extrinsics. Shape: (B)
+  - Accessed as extrinsics[..., 0, -1].
+  - Setter allowed: cam.tx = value, updates extrinsics.
+
+- ty
+  - Translation along y in the extrinsics. Shape: (B)
+  - Accessed as extrinsics[..., 1, -1].
+  - Setter allowed: cam.ty = value, updates extrinsics.
+
+- tz
+  - Translation along z in the extrinsics. Shape: (B)
+  - Accessed as extrinsics[..., 2, -1].
+  - Setter allowed: cam.tz = value, updates extrinsics.
+
+Derived matrices
+
+- rt_matrix
+  - Return the 3x4 rotation-translation matrix from extrinsics. Shape: (B, 3, 4).
+
+- camera_matrix
+  - Return the 3x3 camera intrinsics. Shape: (B, 3, 3).
+
+- rotation_matrix
+  - Return the 3x3 rotation part of the extrinsics. Shape: (B, 3, 3).
+
+- translation_vector
+  - Return the translation vector from the extrinsics. Shape: (B, 3, 1).
+
+Usage examples
+--------------
+
+Basic usage: create a batched camera and inspect parameters
+
+.. code-block:: python
+
+   import torch
+   from your_module import PinholeCamera
+
+   B = 2
+   intrinsics = torch.eye(4).repeat(B, 1, 1)  # simple identity intrinsics for illustration
+   extrinsics = torch.eye(4).repeat(B, 1, 1)  # identity extrinsics
+   height = torch.tensor([480, 640], dtype=torch.float32)
+   width = torch.tensor([640, 480], dtype=torch.float32)
+
+   cam = PinholeCamera(intrinsics, extrinsics, height, width)
+
+   # Access properties
+   print(cam.batch_size)      # 2
+   print(cam.fx)              # tensor([1., 1.])
+   print(cam.cx)              # tensor([0., 0.])
+
+   # Modify translation components
+   cam.tx = torch.tensor([1.0, -1.0])
+   cam.ty = torch.tensor([0.5, 0.5])
+   cam.tz = torch.tensor([2.0, 2.0])
+
+   # Derived matrices
+   print(cam.rt_matrix.shape)     # (2, 3, 4)
+   print(cam.camera_matrix.shape) # (2, 3, 3)
+
+Projecting and transforming points (conceptual)
+-----------------------------------------------
+While the class focuses on parameter storage and accessors, it is commonly used with geometric transformation helpers such as transform_points and inverse_transformation (imported in this module with other geometry utilities). Typical usage flow:
+
+- Convert 3D world or camera coordinates to the appropriate frame using the extrinsics.
+- Apply the perspective projection using the intrinsics to obtain pixel coordinates.
+- Use batching to process multiple items in parallel.
+
+Example: analyzing a 3D point through the camera model (illustrative)
+
+.. code-block:: python
+
+   import torch
+   from kornia.geometry.linalg import transform_points
+
+   # Example 3D point in world coordinates for each batch item
+   X_world = torch.tensor([[[0.0, 0.0, 5.0]]], dtype=torch.float32)  # shape (1, 1, 3)
+
+   # Transform to camera coordinates using the camera's extrinsics
+   # (Assume a function that applies the extrinsics; here represented conceptually)
+   # X_cam = transform_points(cam.extrinsics, X_world)  # if such helper exists
+
+   # Project to pixel coordinates using the intrinsics
+   # x_pixel = project_points_to_pixels(cam.camera_matrix, X_cam)
+
+Notes
+-----
+- Shapes are batched for performance: you typically work with (B, ...) tensors throughout.
+- Accessors provide a convenient interface to camera parameters without manually indexing into the matrices.
+
+This documentation targets professional developers implementing and using geometric image transformations in a batched, differentiable setting.

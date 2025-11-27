@@ -1,0 +1,101 @@
+Generate getting started tutorial
+===============================
+
+Overview
+--------
+This module defines common functionality used by master and parent processes in the Mitogen framework. It is sent to child contexts that are designated to become a parent during recursive connections. It also includes environment- and platform-aware helpers for operating system specifics, PTY management, and core source handling that are essential for initializing and coordinating child contexts.
+
+Key Components
+--------------
+- get_log_level(): Retrieve the effective logging level.
+- get_sys_executable(): Return sys.executable if set, otherwise fall back to a default and log a warning.
+- _get_core_source(): Obtain the Mitogen core source via the import mechanism (replaced by minification logic on the master).
+- get_core_source_partial(): Lazily compute and cache a minified/partial representation of the Mitogen core source to send to child contexts.
+- _ioctl_cast(n): Normalize ioctl request parameters for different platforms (Linux vs BSD/Darwin, and Python versions).
+- Constants and environment checks:
+  - SELINUX_ENABLED: Whether SELinux enforcement is present.
+  - BROKER_SHUTDOWN_MSG, OPENPTY_MSG, SYS_EXECUTABLE_MSG: Standard messages used for error handling and user feedback.
+  - _preexec_hook: Optional pre-exec hook called before starting a new child process.
+  - LINUX_TIOCGPTN, LINUX_TIOCSPTLCK: IOCTL request codes for PTY handling.
+  - IS_LINUX, SIGNAl_BY_NUM: Platform and signal mapping helpers.
+- Internal synchronization:
+  - _core_source_lock, _core_source_partial: Thread-safe caching and synchronization primitives.
+
+Usage
+-----
+Common patterns you might use when preparing a child context or diagnosing startup issues:
+
+- Determine the Python executable to use for a child process
+  - The function get_sys_executable() returns a usable path, defaulting to '/usr/bin/python' if needed.
+  - This is useful when spawning child contexts where sys.executable may be unset.
+
+  Example:
+  .. code-block:: python
+
+     path = get_sys_executable()
+     print("Child Python executable:", path)
+
+- Access the core Mitogen source for transmission or inspection
+  - _get_core_source() retrieves the full Mitogen core source.
+  - get_core_source_partial() computes and caches a partial/minified version to reduce payload when sending to a child.
+
+  Example:
+  .. code-block:: python
+
+     partial = get_core_source_partial()
+     print("Partial core source cached:", isinstance(partial, mitogen.core.PartialZlib))
+
+- Handle platform-specific PTY and syscall considerations
+  - The module defines platform guards and ioctl constants to support PTY provisioning in a cross-platform way.
+
+  Example:
+  .. code-block:: python
+
+     if IS_LINUX:
+         n = _ioctl_cast(2147767344)  # TIOCGPTN, opened with proper ioctl sequence
+         print("Linux PTY number request code casted:", n)
+
+- Use helpful startup messages
+  - OPENPTY_MSG and SYS_EXECUTABLE_MSG provide clear guidance when PTY creation fails or when Python executable detection is inconclusive.
+
+  Example:
+  .. code-block:: python
+
+     print(OPENPTY_MSG % "Resource exhausted")
+
+Details
+-------
+- Python version compatibility:
+  - The module handles both Python 2 and Python 3 environments. It defines:
+    - xrange aliasing (range in Py3)
+    - closure_attr and IM_SELF_ATTR differences between Py2 and Py3
+  - Example snippet:
+    .. code-block:: python
+
+       if mitogen.core.PY3:
+           xrange = range
+           closure_attr = '__closure__'
+           IM_SELF_ATTR = '__self__'
+       else:
+           closure_attr = 'func_closure'
+           IM_SELF_ATTR = 'im_self'
+
+- SELinux consideration:
+  - On systems with SELinux enforcing, Mitogen avoids using socketpairs, as indicated by the SELINUX_ENABLED check. This helps maintain compatibility with policy constraints.
+
+- Pre-exec hook:
+  - _preexec_hook allows a pre-exec function to run in the child process before exec(), enabling affinity or environment adjustments. It is globally set and used to control scheduling of child processes.
+
+- PTY and IOCTL handling:
+  - The module defines Linux-specific PTY constants:
+    - LINUX_TIOCGPTN via _ioctl_cast
+    - LINUX_TIOCSPTLCK via _ioctl_cast
+  - These are used to manage pseudo-terminal devices reliably across platforms.
+
+- Logging and messages:
+  - The module provides standardized messages to aid troubleshooting, such as BROKER_SHUTDOWN_MSG, OPENPTY_MSG, and SYS_EXECUTABLE_MSG, ensuring consistent user feedback during failures.
+
+Notes
+-----
+- This module is designed for internal use by Mitogen’s master/parent processes and is sent to child contexts during recursive connections.
+- The get_core_source_partial() function is intended to avoid contention when multiple threads attempt to minify the core source concurrently, by caching a PartialZlib instance after first creation.

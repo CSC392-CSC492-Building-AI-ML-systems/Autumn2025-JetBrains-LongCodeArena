@@ -1,0 +1,282 @@
+# Unfamiliar.rst: Less Frequently Used FITS Data Structures
+
+This document describes hard-to-find or rarely-used data structures that you may encounter in FITS files. It is targeted at developers who need to read, validate, or generate FITS files beyond the common primary image extensions and simple binary/ascii tables.
+
+Note: FITS is a flexible format with optional and legacy conventions. Some structures described here are deprecated or not universally supported by all software. When possible, favor standard and widely-supported structures, and validate inputs before processing.
+
+---
+
+## 1) Random Groups (deprecated data model)
+
+What it is
+- A historically supported data model where the primary data block is divided into “groups.” Each group has its own data array and header values. This mechanism is largely deprecated in favor of binary tables and primary image data.
+
+Why you might care
+- Some older datasets (or archives) may use Random Groups. Modern software and many pipelines discourage its use, but you may still need to recognize and skip or interpret such files.
+
+How to identify
+- Look for header keywords indicating groups and group data layout (legacy conventions rather than standard image or table extensions).
+
+Notes for implementation
+- Astropy’s modern IO tends to emphasize images and tables. If you encounter Random Groups, treat them as legacy and consider converting to a more current structure during preprocessing.
+
+Example (conceptual)
+- Open the file and inspect the HDU structure; if a primary data block appears to be composed of repeating blocks with per-group metadata, you’re in Random Groups territory.
+
+```
+# Pseudocode only; exact API depends on the FITS library version
+with fits.open('legacy_random_groups.fits') as hdul:
+    primary = hdul[0]
+    if primary.header.get('GROUPS', False):
+        # Legacy handling or conversion path
+        data_groups = extract_random_groups(primary)
+```
+
+---
+
+## 2) Variable-Length Array (VLEN) columns in Binary Tables
+
+What it is
+- A binary table column where each row can hold an array of varying length. This is useful for per-row lists, such as varying numbers of measurements or per-row metadata items.
+
+Why you might care
+- Many astronomical datasets encode per-object lists (e.g., multi-band measurements, per-object flags) as VLEN columns.
+
+How to identify
+- The TFORMn format code for a VLEN column typically indicates a variable-length data type (implementation-dependent; check your library’s docs). In Astropy, VLEN columns are surfaced as object-like per-row arrays.
+
+Notes for implementation
+- Reading yields per-row elements that are Python lists/arrays. Writing requires care to ensure per-row lengths are preserved and padding rules are respected if you regenerate FITS.
+
+Example (conceptual with Astropy)
+```
+from astropy.io import fits
+import numpy as np
+
+# Assuming a FITS file contains a binary table with a VLEN column named 'VALS'
+with fits.open('data_with_vlen.fits') as hdul:
+    tb = hdul[1].data  # BinTableHDU
+    vlen_column = tb['VALS']  # each entry is a 1D array/list
+    for i, vals in enumerate(vlen_column):
+        print(f"Object {i}: {np.asarray(vals)}")
+```
+
+Tips
+- When creating such a column, you typically provide a sequence of sequences (e.g., a list of lists) for the column values.
+- Ensure downstream consumers can handle the per-row variable-length data.
+
+---
+
+## 3) Ragged arrays and 2D per-row data in table columns
+
+What it is
+- Related to VLEN, but sometimes expressed as per-row 2D arrays or ragged structures within a single column (e.g., per-object spectra with varying channel counts).
+
+Why you might care
+- Some pipelines store per-object spectra, time-series, or multi-dimensional measurements where each row’s data shape differs.
+
+How to identify
+- Look for columns with per-row substructure (arrays of arrays). You may see Python objects (lists/arrays) as the column values.
+
+Notes for implementation
+- Access patterns resemble VLEN columns; you’ll iterate per row and then per sub-index.
+
+Example
+```
+# Conceptual example: per-object spectra stored as ragged 2D arrays in a table
+with fits.open('ragged_table.fits') as hdul:
+    tb = hdul[1].data
+    spectra = tb['SPECTRUM']  # list/array per row; each item is an array of channel values
+    for i, spec in enumerate(spectra):
+        print(f"Object {i} spectrum length: {len(spec)} channels")
+```
+
+---
+
+## 4) High-Dlex/dimensional images (NAXIS > 3)
+
+What it is
+- FITS images can have NAXIS greater than 2 (NAXIS3, NAXIS4, …). These are valid and sometimes used for hyper-spectral cubes, time-dimensioned data, or multi-dimensional simulations.
+
+Why you might care
+- Some instruments or simulations produce data with more than three axes (e.g., flux across wavelength and time, with spatial dimensions).
+
+How to identify
+- Check header keywords NAXIS, NAXIS1, NAXIS2, NAXIS3, etc. The data array shape in the image HDU reflects all axes.
+
+Notes for implementation
+- Be mindful of memory usage when loading high-dimensional data. Not all tools implement efficient slicing for all axes; loading lazily or in chunks may be needed.
+
+Example
+```
+with fits.open('multi_dim_image.fits') as hdul:
+    data = hdul[0].data
+    print("Data shape (NAXIS):", data.shape)  # e.g., (time, z, y, x)
+```
+
+---
+
+## 5) ASCII long tables and CONTINUE records
+
+What it is
+- Long ASCII table entries or very long string fields that exceed a single line may be continued on subsequent lines using CONTINUE records in the ASCII table extension.
+
+Why you might care
+- Some archival ASCII tables use continuation convention to store long strings or multi-line fields.
+
+How to identify
+- Look for lines with CONTINUE records or header conventions indicating continued text. The literal handling is library-dependent, but the concept is common.
+
+Notes for implementation
+- If generating such tables, you may need to implement and test CONTINUE semantics to ensure round-tripping works.
+
+Example (conceptual)
+```
+# Reading a long ASCII table with potential CONTINUE fields
+with fits.open('long_ascii_table.fits') as hdul:
+    tab = hdul[1].data
+    long_text = tab['DESCRIPTION']  # may include CONTINUE-extended strings
+    print(long_text[0])
+```
+
+---
+
+## 6) HIERARCH and non-standard keyword conventions
+
+What it is
+- HIERARCH is a convention used by some FITS writers (CFITSIO and others) to allow longer keyword names than the standard limit. It is not part of the original FITS standard, but is widely recognized by modern tools.
+
+Why you might care
+- Some archives and pipelines use long keyword names for metadata. If you encounter them, you’ll need to access them via the extended naming (e.g., 'HIERARCH.MY.LONG.KEY').
+
+How to identify
+- Look for HIERARCH-prefixed keywords in the header. Astropy and many FITS libraries map these in a convenient way.
+
+Example
+```
+with fits.open('hierarch_keywords.fits') as hdul:
+    hdr = hdul[0].header
+    # Access a long keyword
+    val = hdr['HIERARCH.MY.LONG.KEY']
+    print(val)
+```
+
+Tips
+- When writing, consider max compatibility: include standard keywords where possible, and provide a non-HIERARCH fallback if you must share with older tools.
+
+---
+
+## 7) Compressed FITS extensions
+
+What it is
+- FITS files may store compressed data in dedicated extensions (e.g., compressed images or compressed binary tables). This helps save space and I/O time.
+
+Why you might care
+- Archives increasingly use compressed extensions. Your software should transparently decompress on read and compress on write as appropriate.
+
+How to identify
+- Look for extension types indicating compression (often named something like COMPRESSED_IMAGE or COMPRESSED_TABLE, depending on the library).
+
+How to implement
+- Use the FITS library’s compressed extension support. Writes typically require explicitly choosing a compression type (e.g., gzip, rice, or others) and the library will handle decompression on read.
+
+Example
+```
+# Pseudocode; exact API may vary by library version
+with fits.open('compressed.fits') as hdul:
+    comp_img = hdul['SCI']  # a compressed image extension
+    data = comp_img.data      # decompressed automatically
+```
+
+---
+
+## 8) Bit-packed and non-standard bit-depth images
+
+What it is
+- Some very old or specialized datasets use bit-packed images (e.g., BITPIX = 1 meaning 1 bit per pixel). These are rare in modern pipelines but supported by some tools for completeness.
+
+Why you might care
+- You may encounter bit-packed images in legacy archives. They require careful handling to unpack bits into 0/1 values.
+
+How to implement
+- If your library supports it, ensure you understand how to unpack bits to booleans or 0/1 integers, and verify alignment/padding rules.
+
+Example (conceptual)
+```
+# Unpacking a 1-bit image (conceptual)
+packed = hdul[0].data  # e.g., dtype=uint8 with 8 pixels per byte
+image = unpack_1bit(packed)  # library helper
+```
+
+---
+
+## 9) 64-bit and other integer widths in tables
+
+What it is
+- Binary tables can store integers of widths beyond the most common sizes. Depending on the FITS dialect and library, 64-bit integers may be supported in table columns, either natively or via specific format codes.
+
+Why you might care
+- Large catalogs or simulations may require 64-bit IDs or counts.
+
+How to implement
+- Use the library’s documented column types for large integers. Be mindful of endianness and cross-software compatibility.
+
+Example (conceptual)
+```
+# Access a 64-bit integer column
+with fits.open('catalog_with_int64.fits') as hdul:
+    tb = hdul[1].data
+    ids = tb['ID64']  # assumed to be 64-bit integers
+    print(ids.dtype)
+```
+
+---
+
+## 10) Best practices for developers when handling less common structures
+
+- Validate before processing: Use a structured verification step to detect unsupported or deprecated features early.
+  - If you’re implementing support for a rare structure, consider a dedicated “handler” class that can be tested in isolation.
+- Prefer modern, standard structures when possible: Primary images and Binary/ASCII Table extensions are the most portable.
+- Be mindful of padding and headers: Many rare structures rely on 2880-byte blocks and may have alignment requirements.
+- Consider conversion paths: If your workflow encounters a deprecated or non-standard structure, implement a clean conversion path to a standard form (e.g., convert random groups to a binary table, or flatten a ragged per-row data into a multi-row representation).
+- Document assumptions: Any code path that deals with less common structures should clearly document what is supported, what is not, and any caveats.
+
+---
+
+## 11) Practical reading and probing patterns (quick-start examples)
+
+- Inspecting an unknown FITS file to locate uncommon structures
+```
+from astropy.io import fits
+from astropy.io.fits import HDUList
+
+def inspect_unfamiliar_fits(path):
+    with fits.open(path) as hdul:
+        print("Number of HDUs:", len(hdul))
+        for i, hdu in enumerate(hdul):
+            print(f"HDUnumber={i}, type={type(hdu).__name__}, header keys={list(hdu.header.keys())[:5]}")
+inspect_unfamiliar_fits('sample_unknown.fits')
+```
+
+- Reading a potential VLEN column safely
+```
+with fits.open('data_with_vlen.fits') as hdul:
+    table = hdul[1].data
+    # Access per-row variable-length data (structure depends on the library)
+    vlen = table['VLEN_COL']
+    for i, row in enumerate(vlen):
+        print(f"Row {i} length: {len(row)}")
+```
+
+- Handling HIERARCH keys in headers
+```
+with fits.open('hierarch_example.fits') as hdul:
+    header = hdul[0].header
+    if 'HIERARCH.SOME.KEY' in header:
+        value = header['HIERARCH.SOME.KEY']
+        print(value)
+```
+
+---
+
+If you need more precise guidance for a specific less-common FITS structure (e.g., exact VLEN format codes, exact compression extensions, or specific edge cases with NAXIS > 3), let me know the file examples or library version you’re targeting and I can tailor examples accordingly.

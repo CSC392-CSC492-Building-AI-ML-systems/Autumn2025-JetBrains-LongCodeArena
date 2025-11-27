@@ -1,0 +1,125 @@
+Publishing versions
+==================
+
+This document describes how the publishing workflow is implemented and configured in the ftrack_api Session. It explains how to prepare a session for publishing changes to a Ftrack server and which options influence the publishing path.
+
+Overview
+--------
+
+Publishing in this context means sending changes and events from a client (your code) to a connected Ftrack server. The Session handles authentication, caching, plugin loading, and optional event hub connectivity to enable publishing and listening for events beyond the local process.
+
+Key concepts
+------------
+
+- SessionAuthentication
+  - Attaches authentication information to HTTP requests via headers.
+  - Headers added:
+    - ftrack-api-key: your API key
+    - ftrack-user: your API user
+
+  Example:
+  - The __call__ method updates the request with the appropriate headers before sending.
+
+- Session
+  - Central entry point for interacting with a Ftrack server.
+  - Requires a server URL, API key, and API user to initialize.
+  - Supports automatic population of missing fields from the environment when possible.
+  - Maintains a record of pending operations for publishing.
+  - Provides a layered caching mechanism with a top-level memory cache by default.
+  - Supports plugin discovery and optional event hub connectivity.
+
+Environment and credentials
+---------------------------
+
+Publishing requires a server URL and credentials. The session resolves these from explicit arguments or environment variables:
+
+- server_url
+  - Required. If not provided, falls back to FTRACK_SERVER environment variable.
+- api_key
+  - Required. If not provided, falls back to FTRACK_API_KEY (or FTRACK_APIKEY for backward compatibility).
+- api_user
+  - Required. If not provided, falls back to FTRACK_API_USER or the current system user via getpass.
+
+If any required value is missing, the session raises a TypeError with guidance on how to supply it.
+
+Publishing and operation recording
+----------------------------------
+
+- recorded_operations
+  - A ftrack_api.operation.Operations instance that tracks pending operations to be published.
+  - Available on the session as session.recorded_operations.
+- record_operations
+  - A boolean flag indicating whether operations are to be published. When True (default), operations are recorded for publication.
+  - This flag controls whether changes you perform are added to the publishing queue.
+
+Caching and schema
+------------------
+
+- cache
+  - The session accepts a cache instance or a callable that returns a cache when invoked with the session.
+  - The top-level cache is a MemoryCache by design to ensure consistent behavior across the session.
+- cache_key_maker
+  - Used to generate cache keys for objects stored in the cache.
+  - Defaults to a StringKeyMaker if not provided.
+- schema_cache_path
+  - Enables schema caching by providing a folder path.
+  - If unset, FTRACK_API_SCHEMA_CACHE_PATH env var is used.
+  - If neither is set, schema caching may be disabled (or a temporary path used).
+
+Event hub publishing
+---------------------
+
+- auto_connect_event_hub
+  - If True, the embedded event hub automatically connects to the event server.
+  - Enables publishing and subscribing to non-local events.
+  - If False, only local-event publishing/subscription is available until the hub is connected.
+  - The hub connection is performed in a background thread to improve startup time.
+
+- Publishing via events
+  - When the event hub is connected, you can publish events from your application and subscribe to events emitted by other components.
+
+Plugin and configuration
+------------------------
+
+- plugin_paths
+  - A list of filesystem paths to search for plugins that extend publishing capabilities.
+- plugin_arguments
+  - An optional mapping of keyword arguments passed to plugin register functions during discovery.
+  - If a plugin signature cannot accept a given argument, discovery narrows the arguments to the subset the plugin accepts (with a warning).
+
+Practical usage
+
+- Minimal publishing-ready session:
+
+  .. code-block:: python
+
+     from ftrack_api import Session
+
+     session = Session(
+         server_url='https://your-ftrack-server',
+         api_key='your_api_key',
+         api_user='your_api_user',
+         auto_populate=True,
+         plugin_paths=['/path/to/plugins'],
+         cache=None,
+         cache_key_maker=None,
+         auto_connect_event_hub=True,
+         schema_cache_path='~/.ftrack/schema_cache',
+         plugin_arguments={'log_level': 'INFO'}
+     )
+
+  # The session is now ready to publish operations to the server.
+  # Access pending/published operations via:
+  ops = session.recorded_operations
+  # Actual publication is performed by the underlying ftrack_api mechanisms
+  # when operations are dispatched to the server.
+
+Notes and best practices
+------------------------
+
+- Always ensure server_url, api_key, and api_user are valid before attempting to publish.
+- Use schema caching to speed up publishing-related queries and reduce server load.
+- Enable the embedded event hub only if you need non-local event publishing; otherwise keep it disabled to minimize resource usage.
+- When using plugins, provide appropriate plugin_arguments and verify compatibility to avoid warnings.
+
+If you need specific examples of publishing particular entity types (e.g., versions of assets or representations), consult the public API reference for the ftrack_api.operation module and the object models exposed by your Ftrack server. This document focuses on the publishing configuration and workflow available through the Session.

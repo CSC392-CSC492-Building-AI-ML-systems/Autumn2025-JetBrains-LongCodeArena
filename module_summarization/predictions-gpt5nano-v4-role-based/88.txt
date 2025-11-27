@@ -1,0 +1,130 @@
+Using SQLite and asyncio effectively
+====================================
+
+Overview
+--------
+
+This module provides utilities to use SQLite with asyncio in a way that mirrors Postgres behavior where appropriate. It registers type adapters and converters so SQLite values map to Python types consistently, and it exposes an AsyncBatch class that enables asynchronous, batched query processing using aiosqlite.
+
+Key concepts addressed here include:
+
+- Consistent cross-database type handling (via adapters and converters)
+- Asynchronous batched query iteration with aiosqlite
+- Integration points with Piccolo’s Batch and Query abstractions
+
+Type adapters and converters
+---------------------------
+
+To achieve PostgreSQL-like type consistency, the module defines a set of adapters (for going from Python to SQLite) and converters (for going from SQLite to Python) and registers them with sqlite3.
+
+Adapters (Python -> SQLite)
+- Decimal -> Numeric
+- uuid.UUID -> UUID
+- datetime.time -> Time
+- datetime.date -> Date
+- datetime.datetime -> DateTime (via convert_datetime_in)
+- datetime.timedelta -> Seconds
+- list -> Array (serialized as JSON)
+
+Converters (SQLite -> Python)
+- Numeric -> Decimal
+- Integer -> int
+- UUID -> uuid.UUID
+- Date -> datetime.date
+- Time -> datetime.time
+- Seconds -> datetime.timedelta
+- Boolean -> bool
+- Timestamp -> datetime.datetime
+- Timestamptz -> datetime.datetime with UTC tzinfo
+- Array -> list (deserialized from JSON)
+- M2M -> list (deserialized as comma-separated values)
+
+Registration
+- sqlite3.register_converter(...) and sqlite3.register_adapter(...) are used to wire these conversions into the SQLite API.
+- Note: To enable the converters, the SQLite connection should be opened with detect_types set appropriately (e.g., sqlite3.PARSE_DECLTYPES).
+
+Data flow example
+- When writing Python values (e.g., Decimal, UUID, datetime) to SQLite, the corresponding adapter transforms them to SQLite-friendly representations.
+- When reading from SQLite, the registered converters convert raw bytes into Python types (Decimal, uuid.UUID, datetime.*, etc.).
+
+AsyncBatch: asynchronous batched query processing
+-----------------------------------------------
+
+AsyncBatch is a dataclass that extends Piccolo’s Batch and enables asynchronous pagination of query results.
+
+Inheritance and purpose
+- AsyncBatch(Batch)
+- Purpose: Execute a query asynchronously and yield results in batches of a specified size.
+
+Core fields
+- connection: aiosqlite Connection
+- query: a Piccolo Query object
+- batch_size: int
+- _cursor: Optional[Cursor] (internal)
+
+Key methods and behavior
+- cursor property
+  - Returns the internal _cursor or raises ValueError if not set.
+- next(self) -> List[Dict]
+  - Fetches the next batch using self.cursor.fetchmany(self.batch_size) and processes results via self.query._process_results(data).
+- __aiter__(self)
+  - Returns self to support async iteration protocol.
+- __anext__(self)
+  - Retrieves the next batch and raises StopAsyncIteration when no more data is available.
+- __aenter__(self)
+  - Creates the underlying async cursor:
+    - Retrieves the first query string (querystrings[0]).
+    - Compiles the string into a template and its arguments.
+    - Executes the query asynchronously and stores the cursor in self._cursor.
+- __aexit__(self, exception_type, exception, traceback)
+  - Closes the cursor and the connection.
+  - Returns whether an exception occurred.
+
+Usage example
+- Typical usage involves creating an AsyncBatch instance and iterating over it asynchronously to process results in chunks.
+
+Code example (rst)
+.. code-block:: python
+
+    # Assuming you have a Piccolo Query object named `query` and an async
+    # database connection `conn` (aiosqlite Connection).
+
+    batch_size = 100
+    async with AsyncBatch(connection=conn, query=query, batch_size=batch_size) as batch:
+        async for rows in batch:
+            # `rows` is a list of dictionaries representing the result set
+            process(rows)
+
+Notes:
+- The AsyncBatch relies on the provided Query to process raw database rows into the expected dictionary format.
+- The underlying connection is closed when exiting the async context manager.
+- To enable proper type parsing, ensure the SQLite connection uses appropriate type detection (e.g., detect_types).
+
+TransactionType
+---------------
+
+The module defines a TransactionType enumeration intended to represent SQLite transaction modes. The excerpt shows a placeholder enum with a descriptive reference to SQLite, but the enumeration members are not shown in the provided snippet. Use of this enum would be aligned with how the codebase manages SQLite transactions.
+
+Usage considerations and best practices
+---------------------------------------
+
+- Type safety: By registering converters, you can rely on Python types (Decimal, uuid.UUID, datetime, etc.) instead of loose bytes or strings when reading from SQLite.
+- Performance: AsyncBatch enables processing large result sets in chunks without blocking the event loop, which is beneficial for IO-bound workloads.
+- Compatibility: The adapters/converters help maintain consistency with other backends (like Postgres) used in the Piccolo ecosystem.
+- Initialization: When using SQLite with asyncio in this setup, ensure you install and configure aiosqlite and open connections in an async context.
+- Connection lifecycle: AsyncBatch opens a cursor in __aenter__ and closes the cursor and connection in __aexit__. Manage lifecycles using async context managers.
+
+See also
+--------
+
+- aiosqlite: Async SQLite driver used via LazyLoader
+- sqlite3.register_adapter / sqlite3.register_converter: SQLite type adaptation and conversion mechanisms
+- Piccolo Engine, Batch, Query: Core abstractions this module integrates with
+- QueryString: Used to compile SQL templates and arguments for execution
+
+Notes
+-----
+
+- The code uses a LazyLoader for aiosqlite to avoid importing it until needed.
+- The provided converters help align SQLite’s type system with Python types used elsewhere in the project.
+- The exact TransactionType members are not shown in the provided snippet; consult the full module or related code for the complete enumeration.

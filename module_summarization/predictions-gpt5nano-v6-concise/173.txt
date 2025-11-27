@@ -1,0 +1,165 @@
+sesans_fitting.rst
+===================
+
+
+Fitting SESANS Data
+-------------------
+
+This document describes how SESANS data are modeled and fitted within the sasmodels framework, with emphasis for developers extending or debugging SESANS fitting workflows.
+
+Overview
+========
+
+- SESANS (Spin-Echo Small-Angle Neutron Scattering) data are typically represented as a polarization or correlation function that depends on the spin-echo length z. Fitting SESANS data involves predicting a SESANS response G(z) or P(z) from a structural model and adjusting model parameters to best reproduce the observed data.
+- Models in sasmodels expose a kernel that maps physical parameters to the SESANS observable. Each model declares a set of kernel parameters, each with a name, type, and bounds.
+- Parameter discovery and inspection are supported by a small CLI utility (list_pars) and by programmatic access to model information (load_model_info, list_models).
+
+Key concepts
+------------
+
+- Kernel parameters: model parameters that directly influence the SESANS kernel calculation. Each parameter has:
+  - name: string used to identify the parameter in output and configuration.
+  - type: one of volume, orientation, sld, none, any (as exposed by the parameter listing tool). This helps filtering and documentation.
+- Model information: sasmodels exposes a model_info object per model. The parameters kernel_parameters are the primary source for what can be varied during fitting.
+- Data representation: SESANS data are stored as a set of data points (z, observed SESANS response, uncertainties). The fitting routine compares model predictions to these data points, typically by chi-squared or likelihood criteria.
+
+Data model and code references
+------------------------------
+
+- Parameter discovery and listing:
+  - Command line:
+    - List all parameters used across all models:
+      python -m sasmodels.list_pars
+    - List parameters along with the models that use them (verbose):
+      python -m sasmodels.list_pars -v
+    - List only parameter names, not the models:
+      python -m sasmodels.list_pars
+    - Restrict to a parameter kind (volume, orientation, sld, none, or any):
+      python -m sasmodels.list_pars volume
+  - Programmatic access (for developers):
+    - Enumerate models and their kernel parameters:
+      from sasmodels.core import load_model_info, list_models
+      for name in list_models():
+          model_info = load_model_info(name)
+          for p in model_info.parameters.kernel_parameters:
+              print(p.name, p.type)
+
+- Data and model flow:
+  - Each model defines kernel_parameters (names and types) that participate in the SESANS kernel calculation.
+  - Fitting routines vary these parameters to minimize a misfit between observed SESANS data and the model-predicted SESANS response.
+
+Fitting workflow
+================
+
+1) Prepare data
+   - Collect SESANS data as (z, observable, uncertainty) tuples.
+   - Ensure units are consistent with the model definitions (typically z in length units, e.g., nm; SLD units are in common neutron scattering conventions).
+
+2) Choose a model
+   - Select a SESANS-capable model. Models expose kernel_parameters that will be treated as fit parameters.
+   - Inspect model_info to identify which parameters are available for fitting.
+
+3) Configure fitting
+   - Set initial guesses for the kernel_parameters.
+   - Apply bounds and priors if supported by the fitter.
+   - Optionally fix certain parameters (set bounds to a single value or expose them as constants).
+
+4) Run fit
+   - Execute the fitting routine to minimize the objective function (e.g., chi-squared) between observed SESANS data and model predictions.
+   - Monitor convergence and goodness-of-fit metrics.
+
+5) Diagnose and validate
+   - Check residuals, parameter correlations, and fit stability.
+   - Refit with alternative models or constrained parameters if necessary.
+
+6) Output
+   - Best-fit parameters and uncertainties.
+   - Predicted SESANS curve and confidence bands.
+   - Optional model comparison metrics.
+
+Examples
+--------
+
+Below are representative, developer-focused examples that illustrate common tasks.
+
+- Inspecting available parameters programmatically
+
+  .. code-block:: python
+
+     from sasmodels.core import load_model_info, list_models
+
+     for name in list_models():
+         model_info = load_model_info(name)
+         print("Model:", name)
+         for p in model_info.parameters.kernel_parameters:
+             print("  Param:", p.name, "type=", p.type)
+
+- Listing parameters and their usage (via CLI)
+
+  - List all parameter names only:
+    python -m sasmodels.list_pars
+
+  - List parameters with the models that use them:
+    python -m sasmodels.list_pars -v
+
+  - List parameters of a specific kind:
+    python -m sasmodels.list_pars volume
+
+Notes for developers
+====================
+
+- Model interface
+  - A model must expose a parameters object with a kernel_parameters attribute. Each parameter has at least a name and a type, and typically bounds.
+  - The fitting layer consumes the kernel_parameters to generate a predicted SESANS response for a given z-grid.
+
+- Extending SESANS models
+  - Implement the SESANS kernel as part of a model’s parameterization. Ensure that:
+    - The parameter names are stable and documented.
+    - The parameter types (volume, orientation, sld, none, any) are properly set in the kernel_parameters metadata to support filtering in the listing utility.
+  - Update model metadata so that load_model_info can expose the kernel_parameters to the fitting subsystem.
+
+- Data validation
+  - SESANS data should be checked for:
+    - Non-negative uncertainties
+    - Consistency of z-grid (monotonicity, range)
+    - Absence of NaNs or infinities in observed data and uncertainties
+  - Fit diagnostics should report potential numerical issues (e.g., near-singular Jacobians, poor conditioning).
+
+- Testing
+  - Add unit tests that exercise:
+    - Parameter enumeration for a known SESANS model
+    - A synthetic SESANS data fit where the true parameters are known
+    - Edge cases for parameter bounds and fixed parameters
+
+- Performance considerations
+  - SESANS predictions can be computationally intensive if the kernel evaluation is costly or requires numerically heavy transforms. Consider caching repeated computations when residuals are evaluated with the same parameter set, and ensure that unit tests cover performance-sensitive paths.
+
+Appendix: SEL/Model Parameter Details
+=====================================
+
+- Kernel parameters: The primary interface for fitting SESANS data. Each parameter contributes to the SESANS kernel calculation. Parameter objects typically expose:
+  - name: string
+  - type: one of volume, orientation, sld, none, any
+  - bounds: (min, max) for fitting (if supported)
+  - fixed: boolean indicating whether the parameter should be held constant during fitting
+
+- Model discovery helpers
+  - list_models(): returns the available SESANS models
+  - load_model_info(model_name): returns a model_info object containing parameters and metadata
+  - model_info.parameters.kernel_parameters: sequence of parameter descriptors used by the SESANS kernel
+
+Developer tips
+--------------
+
+- Use the CLI list_pars to quickly understand which parameters exist across all SESANS models and how they are classified.
+- Use the programmatic access pattern shown in the examples to generate documentation or tooling that reflects the actual parameter landscape of your models.
+- When adding new SESANS models, ensure the parameter set is complete and that the model’s SESANS prediction function respects the parameter bounds and any fixed flags.
+
+References
+==========
+
+- sasmodels.core: model loading and parameter introspection
+- sasmodels.list_pars: command-line utility for parameter discovery
+- SESANS model implementations within sasmodels (kernels and parameter definitions)
+
+This documentation is intended for developers who implement, extend, or debug SESANS fitting within sasmodels. It complements user-oriented docs by focusing on the parameter interface and the workflow of fitting SESANS data.

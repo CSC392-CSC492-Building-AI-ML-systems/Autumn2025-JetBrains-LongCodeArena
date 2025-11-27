@@ -1,0 +1,154 @@
+Cross Decomposition
+===================
+
+Cross decomposition in scikit-learn provides a family of methods that extract shared structure between two data sets X and Y by projecting them onto latent vectors. It focuses on maximizing the covariance (or cross-information) between the projections, yielding a compact representation that captures the relationships between X and Y.
+
+Overview
+--------
+
+- X ∈ R^(n_samples × n_features_x) and Y ∈ R^(n_samples × n_features_y) are analyzed jointly.
+- The methods produce latent components (scores) for X and Y and associated weights/loadings that describe how X and Y contribute to these components.
+- Available implementations in sklearn.cross_decomposition:
+  - PLSCanonical: Canonical PLS, maximizes the covariance between X and Y directly via a cross-covariance decomposition.
+  - PLSRegression: PLS in the regression setting, typically extracted by iterative updates that maximize the covariance with Y (mode A) or via alternative formulations (mode B).
+  - PLSSVD: PLS based on a direct singular value decomposition of the cross-covariance matrix XᵀY (one-shot approach for each component).
+
+Key concepts
+------------
+
+- Cross-covariance matrix: C = XᵀY captures the shared structure between X and Y.
+- Latent vectors:
+  - x_weights (W): directions in X space that define the X part of each component.
+  - y_weights (Q): directions in Y space that define the Y part of each component.
+- Scores:
+  - x_scores (T): projections of X onto x_weights.
+  - y_scores (U): projections of Y onto y_weights.
+- Loadings:
+  - x_loadings and y_loadings describe how the original variables load onto the components.
+- Centering and scaling: X and Y are centered; scaling can be applied to unit variance per feature if requested.
+
+Algorithms and internal helpers
+------------------------------
+
+The cross-decomposition implementation relies on a few internal helpers:
+
+- Centering and scaling
+  - _center_scale_xy(X, Y, scale=True)
+  - Centers X and Y and optionally scales them to unit variance. Returns X, Y, x_mean, y_mean, x_std, y_std.
+
+- SVD-based first singular vectors (canonical solution)
+  - _get_first_singular_vectors_svd(X, Y)
+  - Computes C = XᵀY and performs a full SVD. Returns the first left singular vector U[:, 0] and the first right singular vector Vt[0, :], which serve as the initial x_weights and y_weights.
+
+- Power-method-based first singular vectors (iterative solution)
+  - _get_first_singular_vectors_power_method(X, Y, mode="A", max_iter=500, tol=1e-06, norm_y_weights=False)
+  - Returns the first pair of x_weights and y_weights found by an iterative update scheme.
+  - mode "A" uses Xᵀy_score and Yᵀx_score updates; mode "B" uses pseudo-inverse-based updates suitable for certain configurations.
+  - norm_y_weights optionally normalizes y_weights during iterations.
+
+- Sign handling
+  - _svd_flip_1d(u, v)
+  - Aligns the sign of the first singular vectors for determinism.
+
+- Pseudo-inverse compatibility
+  - _pinv2_old(a)
+  - Provides a stable pseudo-inverse when needed (older SciPy behavior). Used by mode B in the power-method implementation.
+
+Notes on modes
+--------------
+
+- Mode A (default for regression-oriented cross decomposition):
+  - Focuses on maximizing covariance with Y by updating x_weights from Xᵀy_score and then re-computing y_score from Y with the resulting y_weights.
+- Mode B (alternative/CCA-like configuration):
+  - Uses precomputed pseudo-inverses of X and Y to form X_pinv and Y_pinv and computes weights as X_pinv y_score and Y_pinv x_score.
+
+Examples
+--------
+
+Basic usage with PLSCanonical
+- Canonical PLS maximizes the covariance between X and Y via a cross-covariance decomposition.
+
+.. code-block:: python
+
+   from sklearn.cross_decomposition import PLSCanonical
+   import numpy as np
+
+   # X: n_samples x n_features_x, Y: n_samples x n_features_y
+   X = np.random.rand(100, 5)
+   Y = np.random.rand(100, 3)
+
+   pls_can = PLSCanonical(n_components=2)
+   pls_can.fit(X, Y)
+
+   # Access latent structures
+   x_scores = pls_can.x_scores_  # or pls_can.x_scores
+   y_scores = pls_can.y_scores_  # or pls_can.y_scores
+   x_weights = pls_can.x_weights_  # or pls_can.x_weights
+   y_weights = pls_can.y_weights_  # or pls_can.y_weights
+
+Basic usage with PLSRegression
+- PLS regression extracts components that maximize covariance with the target Y (mode A by default).
+
+.. code-block:: python
+
+   from sklearn.cross_decomposition import PLSRegression
+   import numpy as np
+
+   X = np.random.rand(120, 6)
+   Y = np.random.rand(120, 1)  # or shape (120, n_targets)
+
+   pls_reg = PLSRegression(n_components=2)
+   pls_reg.fit(X, Y)
+
+   # Access learned components and coefficients
+   coef = pls_reg.coef_       # regression coefficients
+   x_scores = pls_reg.x_scores_
+   y_scores = pls_reg.y_scores_
+   x_weights = pls_reg.x_weights_
+   y_weights = pls_reg.y_weights_
+
+Basic usage with PLSSVD
+- PLSSVD uses a direct SVD-based cross-decomposition per component.
+
+.. code-block:: python
+
+   from sklearn.cross_decomposition import PLSSVD
+   import numpy as np
+
+   X = np.random.rand(100, 8)
+   Y = np.random.rand(100, 4)
+
+   plssvd = PLSSVD(n_components=2)
+   plssvd.fit(X, Y)
+
+   x_scores = plssvd.x_scores_
+   y_scores = plssvd.y_scores_
+   x_weights = plssvd.x_weights_
+   y_weights = plssvd.y_weights_
+
+Input data
+----------
+
+- X must be a 2D array with shape (n_samples, n_features_x).
+- Y must be a 2D array with shape (n_samples, n_features_y).
+- Both X and Y are centered, and optional scaling is applied according to the estimator settings.
+- The cross-decomposition methods support multi-output targets (Y with multiple columns) via the same machinery.
+
+Implementation notes
+--------------------
+
+- The core classes (PLSCanonical, PLSRegression, PLSSVD) derive from a common internal implementation that handles:
+  - component extraction
+  - deflation/deflated representations
+  - alignment of latent spaces between X and Y
+  - optional scaling of features
+- Internal helpers provide stable behavior across SciPy versions (e.g., pinv handling) and consistent sign conventions for the first singular vectors.
+
+See also
+--------
+
+- The public API:
+  - PLSCanonical, PLSRegression, PLSSVD from sklearn.cross_decomposition
+- Related documentation pages on multi-output regression and dimensionality reduction concepts.
+
+This page documents cross decomposition components at a high level and explains the core helpers and algorithms used by the implementation. For practical usage, instantiate one of PLSCanonical, PLSRegression, or PLSSVD, fit on (X, Y), and inspect the resulting scores, weights, and coefficients.

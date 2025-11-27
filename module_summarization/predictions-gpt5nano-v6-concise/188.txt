@@ -1,0 +1,147 @@
+kernel_approximation.rst
+
+Kernel approximation feature mappings
+===================================
+
+Overview
+--------
+The kernel_approximation module provides lightweight, scalable ways to approximate
+the feature mappings that correspond to common kernel functions. Instead of
+computing the full kernel matrix, these estimators project input data into a
+low- to mid-dimensional feature space such that inner products in the projected
+space approximate the kernel evaluations. This enables linear models to be trained
+on large datasets with nonlinear decision boundaries.
+
+Key ideas
+- For a kernel K(x, y) = phi(x) · phi(y), we seek a feature map phi_hat such that
+  K(x, y) ≈ phi_hat(x) · phi_hat(y).
+- Approximations rely on Fourier transforms (e.g., random Fourier features) or
+  sketching techniques (e.g., Count Sketch, Tensor Sketch) to efficiently
+  generate phi_hat.
+- Each estimator is a transformer compatible with scikit-learn's fit/transform API.
+
+API overview
+- RBFSampler: Random Fourier features for approximating the RBF (Gaussian) kernel.
+- PolynomialCountSketch: Tensor Sketch-based approximation of polynomial kernels
+  of a given degree.
+- AdditiveChi2Sampler: Approximate feature map for the additive Chi-squared kernel.
+- SkewedChi2Sampler: Approximate feature map for the skewed Chi-squared kernel.
+- Nystroem: Nyström method to approximate a kernel map using a subset of training data.
+
+For each estimator, you typically call fit(X) to learn internal random projections
+or subset samples, and then transform(X) to obtain the approximate feature map.
+
+Theoretical background
+- Random Fourier Features (RBF kernel):
+  - Based on Bochner’s theorem, a shift-invariant kernel K(x − y) can be expressed as an expectation over random Fourier features.
+  - The feature map is phi(x) = sqrt(2) cos(W x + b), where W contains random frequencies and b is a random phase.
+  - The inner product phi(x) · phi(y) approximates K(x, y) as the number of features grows.
+
+- Tensor Sketch / Count Sketch (Polynomial kernels):
+  - The polynomial kernel K(X, Y) = (gamma <X, Y> + coef0)^degree can be mapped via a tensor sketch
+    to an approximate low-dimensional feature space without explicitly forming outer products.
+  - PolynomialCountSketch uses degree independent random hashings and FFTs to combine
+    sketches efficiently, yielding a compact phi_hat.
+
+- Chi-squared kernels (Additive and Skewed Chi-squared):
+  - These kernels operate on histogram-like features and can be approximated by
+    feature maps that transform counts into a space where dot products approximate the kernel.
+
+Usage notes
+- Random_state controls reproducibility of random projections or sample selections.
+- n_components defines the dimensionality of the approximate feature space.
+- For best performance, n_components should be large enough to capture the variance
+  of the data but small enough to keep the transformed feature matrix tractable.
+- Feature names: Some estimators expose feature_names_in_ after fit when input X has named features.
+
+API details
+The following estimators are provided in this module (high-level descriptions and typical parameters):
+
+RBFSampler
+- Purpose: Approximate the RBF kernel feature map using random Fourier features.
+- Typical parameters:
+  - gamma: float, default 1.0. Kernel coefficient for the RBF kernel.
+  - n_components: int, default 100. Dimensionality of the output feature space.
+  - random_state: int or RandomState, default None. Seed for random state.
+- fit(X, y=None): Learn random frequencies and phases.
+- transform(X): Compute the approximate RBF feature map for X.
+- Notes: Pairwise kernel evaluations are approximated via inner products in the
+  randomized feature space.
+
+PolynomialCountSketch
+- Purpose: Approximate polynomial kernel feature maps through Tensor Sketch/Count Sketch.
+- Typical parameters (subset):
+  - gamma: float, default 1.0. Multiplier inside the polynomial kernel.
+  - degree: int, default 2. Degree of the polynomial kernel to approximate.
+  - coef0: float, default 0. Constant term in the polynomial kernel.
+  - n_components: int, default 100. Output dimensionality of the feature map.
+  - random_state: int or RandomState, default None. Seed for hash function initialization.
+- fit(X, y=None): Initialize Count Sketch and related random hashes.
+- transform(X): Produce the approximate feature map of shape (n_samples, n_components).
+- notes: Uses per-degree hashing (indexHash_) and sign hashing (bitHash_) with FFT-based
+  combination to estimate the outer product feature map efficiently.
+
+AdditiveChi2Sampler
+- Purpose: Approximate feature map for the additive Chi-squared kernel (useful for histogram-like data).
+- Typical parameters:
+  - n_components: int, default 100. Output dimensionality.
+  - random_state: int or RandomState, default None.
+- fit/transform: Learn and apply the feature map approximation for histograms.
+
+SkewedChi2Sampler
+- Purpose: Approximate feature map for the skewed Chi-squared kernel.
+- Typical parameters similar to AdditiveChi2Sampler.
+- fit/transform: Learn and apply the feature map approximation for skewed histograms.
+
+Nystroem
+- Purpose: Kernel map approximation via the Nyström method using a subset of training data.
+- Typical parameters:
+  - kernel: {'linear', 'poly', 'rbf', 'sigmoid', 'cosine'}, default 'rbf'.
+  - gamma, coef0, degree: kernel-specific parameters (depending on kernel).
+  - n_components: int, default 100. Number of basis samples to use.
+  - random_state: int or RandomState, default None.
+- fit(X, y=None): Sample a subset of data and compute the approximate kernel matrix to build phi_hat.
+- transform(X): Project new data into the Nyström feature space.
+- notes: Provides a way to approximate kernels using a subset of the data, trading off accuracy for scalable memory usage.
+
+Examples
+- RBFSampler example
+  - Project data into random Fourier feature space and fit a linear model.
+
+  .. code-block:: python
+     from sklearn.kernel_approximation import RBFSampler
+     from sklearn.linear_model import SGDClassifier
+     X = [[0, 0], [1, 1], [1, 0], [0, 1]]
+     y = [0, 0, 1, 1]
+     rbf = RBFSampler(gamma=0.5, n_components=500, random_state=1)
+     X_features = rbf.fit_transform(X)
+     clf = SGDClassifier(max_iter=10, tol=1e-3)
+     clf.fit(X_features, y)
+     print(clf.score(X_features, y))
+
+- PolynomialCountSketch example
+  - Approximate a polynomial kernel feature map and train a classifier.
+
+  .. code-block:: python
+     from sklearn.kernel_approximation import PolynomialCountSketch
+     X = [[0, 0], [1, 1], [1, 0], [0, 1]]
+     y = [0, 0, 1, 1]
+     ps = PolynomialCountSketch(degree=3, random_state=1)
+     X_features = ps.fit_transform(X)
+     from sklearn.linear_model import SGDClassifier
+     clf = SGDClassifier(max_iter=10, tol=1e-3)
+     clf.fit(X_features, y)
+     print(clf.score(X_features, y))
+
+Notes and compatibility
+- These estimators are designed to be lightweight and scalable alternatives to exact kernel computations.
+- They rely on NumPy/SciPy and are compatible with SciPy versions that provide FFT support (SciPy >= 1.4 offers scipy.fft; older versions use scipy.fftpack).
+- The internal state (e.g., random projections, hash tables) is stored in attributes suffixed with “_” after fit, such as indexHash_ and bitHash_ (for PolynomialCountSketch).
+
+See also
+- sklearn.metrics.pairwise for a list of kernels and their definitions.
+- sklearn.kernel_approximation for the full set of approximators and their detailed docstrings.
+
+This document is intended for developers extending or integrating kernel-approximation estimators
+into large-scale pipelines, with emphasis on understanding the underlying feature-mapping
+approximations and practical usage patterns.

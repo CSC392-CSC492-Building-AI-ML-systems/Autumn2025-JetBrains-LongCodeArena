@@ -1,0 +1,176 @@
+Three Types of Algorithms for the Estimation of the Parameters of a Model
+=======================================================================
+
+This section documents the three broad classes of optimization algorithms exposed by the generic Optimizer in optimization.rst. The optimizer is designed to fit any model with an objective function and to be reusable across different estimation problems.
+
+Overview
+--------
+
+- The Estimation problem is cast as unconstrained minimization (or maximization, via sign convention) of an objective function.
+- The Optimizer._fit method supports a family of solvers from SciPy, grouped into three categories:
+  - Gradient-based local optimization (requires gradient and often Hessian)
+  - Derivative-free local optimization (does not require gradient)
+  - Global optimization (basin-hopping and related global-search strategies)
+- You can supply a problem-specific objective function, its gradient, and optionally its Hessian, along with solver-specific options.
+
+Type 1 — Gradient-based Local Optimization
+------------------------------------------
+
+Description
+- Solvers in this group use derivatives to guide the search for a local optimum.
+- Typical choices include Newton-Raphson (newton), Broyden-Fletcher-Goldfarb-Shanno (bfgs), Conjugate Gradient (cg), Newton-Conjugate Gradient (ncg), and the generic 'minimize' wrapper which can call various gradient-based methods.
+- Best suited for smooth, differentiable objectives where gradients (and optionally Hessians) are available and reasonably well-behaved.
+
+What you need
+- A differentiable objective function: objective(x, ...).
+- Its gradient function: gradient(x, ...). This is required for most gradient-based solvers.
+- Optionally, a Hessian (or Hessian-vector product) for solvers like 'newton' that use second-order information.
+
+Typical solver options
+- method: 'newton', 'bfgs', 'cg', 'ncg', or 'minimize' (wrapper to SciPy minimize)
+- maxiter: maximum iterations
+- full_output: return additional information from the solver
+- disp: display convergence messages
+- tol/gtol, etc.: solver-specific tolerances (exposed via solver settings; see Notes)
+
+Example
+- A simple quadratic objective with known analytic gradient and Hessian:
+
+  - Objective: objective(x) = ||x - x_true||^2
+  - Gradient: gradient(x) = 2*(x - x_true)
+  - Hessian: hessian(x) = 2*I
+
+  This example shows Newton-style refinement to the minimum at x_true.
+
+  Python sketch (using Optimizer._fit):
+
+  - objective = lambda x, *args: np.sum((x - x_true)**2)
+  - gradient  = lambda x, *args: 2*(x - x_true)
+  - hessian   = lambda x, *args: 2*np.eye(len(x))
+  - x0 = np.zeros_like(x_true)
+
+  optimizer = Optimizer()
+  xopt, retvals, optim_settings = optimizer._fit(
+      objective, gradient, x0, fargs=(), kwargs={},
+      hessian=hessian, method='newton', maxiter=100, full_output=True, disp=True
+  )
+
+Notes
+- The gradient and Hessian are expected to be functions of x (the parameter vector) and any fixed arguments supplied via fargs/kwargs.
+- If a Hessian is not provided, some solvers (e.g., certain variants of BFGS) can operate with gradient information only.
+- The 'lbfgs' option appears in the detailed solver notes to accommodate the L-BFGS-B style interface.
+
+Type 2 — Derivative-free Local Optimization
+-------------------------------------------
+
+Description
+- This class uses optimization without requiring gradient information.
+- Typical choices include Nelder-Mead (nm) and Powell (powell).
+- Best suited for non-smooth, noisy, or otherwise difficult objectives where gradients are unavailable or unreliable.
+
+What you need
+- A scalar objective function objective(x, ...). Gradients are not required.
+- Optional gradient is ignored by these solvers; providing one may be ignored or discouraged depending on the solver.
+
+Typical solver options
+- method: 'nm' (Nelder-Mead) or 'powell'
+- xtol, ftol: tolerances for convergence
+- maxfun: maximum function evaluations
+- retall, full_output, etc.: behavior controlled similarly to gradient-based solvers
+
+Example
+- Non-differentiable objective, e.g., a piecewise or noisy function:
+
+  observable_obj = lambda x, *args: some_piecewise_noisy_function(x)
+
+  optimizer = Optimizer()
+  x0 = np.zeros(3)
+
+  xopt, retvals, optim_settings = optimizer._fit(
+      observable_obj, gradient=None, start_params=x0, fargs=(), kwargs={},
+      method='nm', maxiter=1000, full_output=True, disp=True
+  )
+
+Notes
+- Derivative-free methods are robust to gradient inaccuracies but may require more function evaluations and may converge slowly on high-dimensional problems.
+- If you have gradient information but choose to use a derivative-free method, you may trade accuracy and speed for robustness.
+
+Type 3 — Global Optimization
+----------------------------
+
+Description
+- Global optimization seeks the best solution across multiple local basins of attraction, to improve the chance of finding the global optimum.
+- Basinhopping is the canonical global-search method provided here, typically used in combination with a local minimizer.
+- The generic 'minimize' wrapper can also be employed in conjunction with a global strategy via Python/scipy interfaces.
+
+What you need
+- A differentiable or non-differentiable objective function objective(x, ...).
+- A local minimizer to be used inside the global search (basinhopping uses a local minimizer internally).
+- Optional: a local gradient/hessian to speed up the internal minimizer.
+
+Typical solver options
+- method: 'basinhopping' (with its own set of sub-options like niter, T, stepsize, interval, etc.)
+- niter: number of basin-hopping iterations
+- niter_success: stop condition based on stability of the global minimum candidate
+- T, stepsize, interval: basin-hopping parameters
+- minimizer: dict of options passed to the internal local minimizer (e.g., method='L-BFGS-B', tol=...)
+
+Example
+- Global optimization of a multi-modal objective:
+
+  objective = lambda x, *args: multi_modal_function(x)
+
+  optimizer = Optimizer()
+  x0 = np.array([0.0, 0.0])
+
+  xopt, retvals, optim_settings = optimizer._fit(
+      objective, gradient=None, start_params=x0, fargs=(), kwargs={},
+      hessian=None, method='basinhopping', maxiter=None,  # basinhopping ignores some args
+      full_output=True, disp=True,
+      callback=None, retall=False
+  )
+
+- For a targeted global search with a specific local minimizer:
+
+  minimizer_settings = {'method': 'L-BFGS-B', 'tol': 1e-6}
+  xopt, retvals, optim_settings = optimizer._fit(
+      objective, gradient=None, start_params=x0, fargs=(), kwargs={},
+      hessian=None, method='basinhopping', minimizer=minimizer_settings,
+      full_output=True, disp=True
+  )
+
+Notes
+- Basinhopping ignores maxiter, retall, and full_output arguments explicitly, as noted in the solver documentation.
+- The 'minimize' wrapper can be combined with a global strategy by configuring the internal minimizer appropriately.
+- Global optimization is more robust to local minima but typically more computationally intensive.
+
+API and Usage Details
+---------------------
+
+Common interface
+- objective(x, *fargs, **kwargs): scalar objective to minimize (or maximize, via sign convention)
+- gradient(x, *fargs, **kwargs): gradient of the objective with respect to x (optional for derivative-free methods)
+- hessian(x, *fargs, **kwargs): Hessian (optional; used by some solvers)
+- start_params: initial guess for the parameter vector
+- fargs: extra positional arguments passed to objective/gradient/hessian
+- kwargs: extra keyword arguments passed to objective/gradient/hessian
+- method: one of the solver identifiers described above
+- maxiter, full_output, disp, callback, retall: solver control flags (as described in the full documentation above)
+
+Return values
+- xopt: optimized parameter vector
+- retvals: dictionary of solver-specific outputs (only when full_output is True)
+- optim_settings: dictionary containing the arguments passed to the solver
+
+Practical guidance
+- If your objective is smooth and gradients are cheap, prefer a gradient-based local method (e.g., 'newton' or 'bfgs').
+- If gradients are unavailable or unreliable, start with a derivative-free local method (e.g., 'nm' or 'powell').
+- If the objective is highly multi-modal or you suspect multiple local minima, use a global strategy such as 'basinhopping' (potentially with a chosen local minimizer).
+- Always check the solver's return information (retvals) when full_output is True to assess convergence status and diagnostic information.
+
+Examples summary
+- Type 1 (gradient-based): optimization using 'newton' with objective, gradient, and Hessian.
+- Type 2 (derivative-free): optimization using 'nm' without providing gradient.
+- Type 3 (global): optimization using 'basinhopping' with a specified inner minimizer.
+
+This completes the three-type taxonomy for parameter estimation algorithms supported by the Optimizer in optimization.rst.

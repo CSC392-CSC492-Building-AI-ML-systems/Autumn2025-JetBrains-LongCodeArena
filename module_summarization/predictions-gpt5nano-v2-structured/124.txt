@@ -1,0 +1,177 @@
+Header Interface Transition Guide
+=================================
+
+This guide describes the transition of the header interface to a more robust verification and notification system. It covers the purpose, usage patterns, key components, and migration steps to adopt the new header behavior.
+
+Overview
+--------
+
+The header interface is evolving to provide:
+
+- A unified verification framework for header values with flexible reporting and optional automatic fixes.
+- Structured, readable error reporting through a hierarchical error list.
+- A notifier mechanism to propagate header changes to interested listeners in a safe, memory-efficient way.
+
+The transition aims to improve reliability, diagnosability, and maintainability of code that manipulates and validates FITS headers.
+
+Key Concepts
+------------
+
+- Verification framework
+  - A header (or header-like object) can be verified via a verify method that accepts a option string controlling reporting and fixing behavior.
+  - Supported options are:
+    - ignore, warn, exception, fix, silentfix
+    - Combinations with +ignore, +warn, +exception (e.g., fix+warn, silentfix+ignore)
+  - The option string is parsed into two aspects:
+    - fix_opt: whether fixable errors should be fixed (e.g., fix or silentfix)
+    - report_opt: how to report issues (e.g., ignore, warn, exception)
+  - Example behavior:
+    - ignore: do not verify
+    - warn: issue a warning for issues
+    - exception: raise an exception for issues
+    - fix: attempt to fix fixable issues and report fixes
+    - silentfix: fix issues silently (no immediate report unless unrecoverable)
+- Error reporting and formatting
+  - Verification results are collected in a nested error structure (_ErrList).
+  - Messages can be rendered in a hierarchical, indented fashion suitable for user-facing output.
+  - The error listing supports filtering, indentation, and level-based headers for readability.
+- Notifier mixin
+  - Objects can inherit from NotifierMixin to support registering listeners that react to changes.
+  - Listeners are registered with weak references to prevent memory leaks.
+  - When changes occur, objects call _notify to propagate updates to all listeners that implement appropriate update methods.
+
+Public API and Behavior (What to expect)
+----------------------------------------
+
+- Header.verify(option="warn")
+  - Validates header values according to the chosen option.
+  - If option includes a fix component (e.g., "fix", "silentfix"), it will attempt to fix fixable issues.
+  - If reporting is enabled (e.g., "warn" or "exception"), issues are reported accordingly.
+  - If the option is not recognized, a ValueError is raised.
+
+- Verification results
+  - When issues exist, the verifier may:
+    - Print warnings (VerifyWarning) for each issue.
+    - Raise VerifyError with a consolidated message.
+    - Silently fix and report nothing (silentfix+ignore) when appropriate.
+
+- Error formatting
+  - The nested error structure (_ErrList) provides iter_lines with indentation to render a readable report.
+  - The report begins with a header line and ends with a note about indexing (zero-based) to prevent confusion.
+
+- NotifierMixin (for header change propagation)
+  - Provides _add_listener and _notify mechanisms to manage listeners.
+  - Listeners are called with updates on changes, enabling real-time reaction to header updates.
+
+Migration Strategy
+------------------
+
+1. Identify header-consuming code paths that rely on manual validation or ad-hoc checks.
+2. Replace ad-hoc checks with header.verify(option=...) calls, selecting an option that matches the desired behavior:
+   - For non-intrusive checks: option="warn" or option="ignore"
+   - For strict validation with exceptions on failure: option="exception"
+   - For automatic fixes where safe: option="fix" or option="fix+warn" (or other appropriate combo)
+   - For silent fixes where you do not want reports: option="silentfix" or "silentfix+ignore"
+3. If you previously relied on manual error handling, map your error handling to the new verification flow:
+   - Warnings map to user-visible warnings.
+   - Exceptions map to raised VerifyError.
+4. If your components manage header changes, consider adopting NotifierMixin to promote decoupled, event-driven updates.
+5. Update tests to cover the new verification behavior, including combinations of fix/report options and the resulting messages or exceptions.
+6. Exercise existing headers with a mix of fixable and unfixable issues to validate the line-filtering behavior and the final output.
+
+Usage Examples
+--------------
+
+Note: The following examples illustrate the intended usage patterns for header verification and notifier integration. The exact class names are representative of the transition and reflect the behavior described in the verification framework and notifier mixin.
+
+1) Basic header verification with warnings
+
+.. code-block:: python
+
+   # Conceptual example: header implements verify(...)
+   header = MyHeader(...)
+   header.verify(option="warn")
+
+2) Verification with exception on error
+
+.. code-block:: python
+
+   header.verify(option="exception")
+   # If issues are present, a VerifyError is raised with details
+
+3) Automatic fixing of fixable issues, with reporting
+
+.. code-block:: python
+
+   header.verify(option="fix+warn")
+   # Fixes applied where possible and warns about remaining issues
+
+4) Silent fixes without reporting
+
+.. code-block:: python
+
+   header.verify(option="silentfix+ignore")
+   # Attempts to fix, but produces no external report
+
+5) Listener-based updates (using NotifierMixin)
+
+.. code-block:: python
+
+   from astropy.io.fits.header import Header  # hypothetical example
+   class MyHeaderNotifier(NotifierMixin):
+       def __init__(self):
+           super().__init__()
+           self.header = Header(...)
+
+       def update_value(self, key, value):
+           self.header[key] = value
+           self._notify("header_changed", key, value)
+
+   notifier = MyHeaderNotifier()
+   # A listener would be registered to react to 'header_changed' events
+   notifier.update_value("NAXIS", 3)
+
+Internal components (for developers)
+-------------------------------------
+
+- _Verify
+  - Encapsulates the core verification logic and option parsing.
+  - run_option(self, option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+    - Executes verification with the given option, returning a tuple (fixable, text).
+
+  - verify(self, option="warn")
+    - Public entry point for verification, handling option parsing, splitting fix/report parts, and producing messages or exceptions as appropriate.
+
+- _ErrList
+  - A specialized nested list to hold verification error messages.
+  - iter_lines(filter=None, shift=0)
+    - Iterate through a hierarchical structure and yield properly indented lines for rendering.
+
+- NotifierMixin
+  - Mixin supporting listener registration and notification on changes.
+  - Underscored methods (e.g., _add_listener, _notify) indicate internal usage.
+  - Designed to work with weak references to avoid keeping objects alive unintentionally.
+
+Backwards Compatibility
+------------------------
+
+- The transition focuses on providing a richer, more explicit verification flow. If you relied on older, ad-hoc header checks, migrate to using header.verify(...) with appropriate options.
+- Behavior for common scenarios (warnings vs. exceptions) remains intuitive and configurable via the option string.
+- If you previously used a direct exception-based approach for all issues, you can continue to do so with option="exception", or migrate to a mixed strategy using fix+warn or silentfix+ignore when appropriate.
+
+Changelog and References
+------------------------
+
+- See the header interface transition notes in the project documentation for more details on the migration timeline and deprecations.
+- Internal components are documented for developers who implement or extend header verification and notifier behavior.
+
+Appendix: Key Keywords
+-----------------------
+
+- option: string controlling verification behavior (ignore, warn, exception, fix, silentfix, and combinations with +ignore/+warn/+exception)
+- fixable: boolean indicating whether an issue can be fixed
+- VerifyWarning, VerifyError: classes controlling how verification results are reported or raised
+- _ErrList: structured error list for nested verification messages
+- NotifierMixin: mechanism to register/listen to header changes via weak references
+
+This guide provides the essential guidance to understand and adopt the Header Interface Transition. For concrete implementation details, refer to the header-related modules in the codebase and the accompanying API docs.

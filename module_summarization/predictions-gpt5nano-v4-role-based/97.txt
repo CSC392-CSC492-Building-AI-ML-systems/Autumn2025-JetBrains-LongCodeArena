@@ -1,0 +1,139 @@
+How Mitogen Works: Tutorial
+=============================
+
+This tutorial explains, at a practical level, how Mitogen’s core architecture and message protocol work together to enable fast, scalable remote execution. The explanations reference the responsibilities exercised by the bootstrap module and the message types defined in the code excerpt you provided.
+
+Overview
+--------
+
+- Mitogen coordinates long-running master processes with one or more slave (remote) contexts via a lightweight broker/router infrastructure.
+- A bootstrap implementation is shipped to every new slave context to establish the minimal runtime environment necessary to participate in Mitogen’s messaging and execution model.
+- Communication relies on a small, well-defined set of message types (opcodes) exchanged between master and slave, together with a routing table that determines where to deliver messages.
+
+Core Concepts
+-------------
+
+- Broker and Router
+  - The master side maintains a Broker that handles IO and a Router that dispatches messages to the appropriate endpoints (slave contexts).
+  - Routes can be added or removed at runtime using ADD_ROUTE and DEL_ROUTE messages.
+- Slave context
+  - Each remote process or worker starts with a bootstrap module that sets up Mitogen’s internal structures and communication channels.
+- Message-based protocol
+  - Communication is driven by numeric opcodes (100–111) that indicate the desired operation (e.g., loading modules, calling functions, routing changes).
+  - A special IS_DEAD value (999) signals disconnection or an inability to route a message; receiving this in reply_to typically raises a ChannelError.
+- IDs and lifecycle
+  - ALLOCATE_ID is used to generate unique identifiers for remote objects or requests.
+  - DETACHING is used to signal that a remote endpoint is detaching, allowing cleanup callbacks to run.
+- Module and function execution
+  - LOAD_MODULE, FORWARD_MODULE, and GET_MODULE manage modules on remote contexts.
+  - CALL_FUNCTION carries a request to execute a function on a remote context and return the result.
+  - CALL_SERVICE and STUB_CALL_SERVICE expose service-style interfaces across the boundary.
+
+Message Protocol: Opcodes
+-------------------------
+
+The following opcodes are defined (as integers) to drive the protocol between master and slave:
+
+- GET_MODULE = 100
+- CALL_FUNCTION = 101
+- FORWARD_LOG = 102
+- ADD_ROUTE = 103
+- DEL_ROUTE = 104
+- ALLOCATE_ID = 105
+- SHUTDOWN = 106
+- LOAD_MODULE = 107
+- FORWARD_MODULE = 108
+- DETACHING = 109
+- CALL_SERVICE = 110
+- STUB_CALL_SERVICE = 111
+
+- IS_DEAD = 999
+  - Used in reply_to to indicate a dead/disconnected route or an inability to route the message.
+
+Bootstrap and Data Handling
+----------------------------
+
+- The bootstrap module is kept lean to minimize startup cost on new slaves, yet complete enough to support the core messaging and remote execution primitives.
+- IO and data encoding optimizations
+  - LATIN1_CODEC is prepared for fast encoding/decoding of common text payloads.
+  - The default I/O buffer size for Side.read/Side.write and transport buffers is 128 KiB. This size represents a balance between throughput and memory usage, taking into account:
+    - Larger buffers improve throughput but use more kernel and userspace memory.
+    - Smaller buffers reduce memory footprint but increase the number of IO events and CPU usage.
+
+Version and compatibility notes
+------------------------------
+
+- The code contains compatibility shims for Python 2/3, including:
+  - PY24 (Python 2.4-era checks) and PY3 (Python 3+ checks) to adapt types, buffer handling, and text/bytes semantics.
+  - Several aliases and fallbacks (BytesType, UnicodeType, BufferType) to smooth over differences across Python versions.
+- A warning suppression note exists for a known import-order issue when profiling.
+
+Practical Execution Flow (end-to-end)
+--------------------------------------
+
+1. Master starts a broker and creates a slave context. The bootstrap code is dispatched to the slave to initialize Mitogen’s runtime on that context.
+2. The master configures a routing table. Add routes with ADD_ROUTE to map logical destinations to specific slave contexts; DEL_ROUTE removes them.
+3. When a function or module must run remotely:
+   - ALLOCATE_ID reserves a unique identifier for the remote object or request.
+   - LOAD_MODULE or GET_MODULE ensures the needed module code/codepath is available on the remote side (or forwards it if already present).
+   - CALL_FUNCTION sends a request to execute a function on the remote context; the remote side executes and returns a result.
+4. Logs and service interfaces can be forwarded or invoked via FORWARD_LOG, CALL_SERVICE, or STUB_CALL_SERVICE to support observability and remote services.
+5. If a slave detaches or the channel becomes unavailable, DETACHING and the IS_DEAD sentinel help cleanup and error handling, and the router raises appropriate exceptions (e.g., ChannelError) to the master.
+6. SHUTDOWN cleanly tears down a slave context and removes its routes and resources.
+
+Illustrative Example (Conceptual)
+----------------------------------
+
+- You want to run a function remotely without importing the target module on the master process:
+  - ALLOCATE_ID -> acquire a remote handle ID.
+  - CALL_FUNCTION with the ID and function reference -> remote executes, returns result.
+- You need to ensure a module is present on the remote side:
+  - LOAD_MODULE with module payload -> remote stores module.
+  - CALL_FUNCTION to invoke a function from that module remotely.
+
+Reference: Quick Mapping of Op Codes
+------------------------------------
+
+- 100 GET_MODULE
+- 101 CALL_FUNCTION
+- 102 FORWARD_LOG
+- 103 ADD_ROUTE
+- 104 DEL_ROUTE
+- 105 ALLOCATE_ID
+- 106 SHUTDOWN
+- 107 LOAD_MODULE
+- 108 FORWARD_MODULE
+- 109 DETACHING
+- 110 CALL_SERVICE
+- 111 STUB_CALL_SERVICE
+- 999 IS_DEAD (sentinel in reply_to)
+
+Design Notes
+------------
+
+- The bootstrap-first design ensures each new slave has a minimal, robust entry point to participate in Mitogen’s protocol without depending on the master’s full runtime.
+- The message-type-centric protocol enables a clean separation of concerns:
+  - Module management (LOAD/GET/FORWARD_MODULE)
+  - Execution (CALL_FUNCTION)
+  - Runtime observability (FORWARD_LOG)
+  - Routing control (ADD_ROUTE, DEL_ROUTE)
+  - Service integration (CALL_SERVICE, STUB_CALL_SERVICE)
+- The IS_DEAD sentinel provides a uniform mechanism to indicate dead channels or routing failures, enabling consistent error handling.
+
+Further Reading and Reference
+-----------------------------
+
+- The bootstrap module responsibilities and message-oriented architecture are central to understanding how Mitogen scales to multiple remotes.
+- For implementation details, examine how ADD_ROUTE/DEL_ROUTE updates the Router’s routing table and how CALL_FUNCTION traverses the broker’s IO loop to deliver results back to the caller.
+
+Appendix: Typical Debug Scenarios
+-------------------------------
+
+- Dead route observed in reply_to:
+  - Check routing table consistency; verify the target slave is still alive and its connection is intact.
+- High latency on CALL_FUNCTION:
+  - Inspect buffer sizes and transport overhead; consider adjusting the default 128 KiB IO buffer if appropriate for your environment.
+- Module not found after LOAD_MODULE:
+  - Ensure the correct module payload is sent; verify that FORWARD_MODULE paths are properly configured and that the remote context has sufficient permissions to load the module.
+
+This documentation provides a focused, tutorial-style explanation of how Mitogen works based on the provided code snippet, highlighting the core concepts, message protocol, and execution flow that enable remote function invocation and module management.

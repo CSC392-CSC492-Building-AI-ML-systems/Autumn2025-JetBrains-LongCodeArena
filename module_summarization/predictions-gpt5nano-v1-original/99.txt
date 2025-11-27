@@ -1,0 +1,182 @@
+Filters
+=======
+
+Overview
+--------
+
+This module provides utilities to build Ethereum event/log filter parameters and a small hierarchy of gevent-based filter classes. It is designed to work with a Web3-compatible provider and uses Greenlets to poll for changes or logs.
+
+API reference
+-------------
+
+Functions
+---------
+
+construct_event_filter_params(event_abi, contract_address=None, argument_filters=None, topics=None, fromBlock=None, toBlock=None, address=None)
+
+- Purpose
+  Build the data filter set and the corresponding filter parameters for querying events/logs.
+
+- Parameters
+  - event_abi: ABI of the event to filter on.
+  - contract_address: Optional contract address to constrain the filter.
+  - argument_filters: Optional dictionary/list of argument filters for the event.
+  - topics: Optional topics specification to filter by topics.
+  - fromBlock: Optional starting block.
+  - toBlock: Optional ending block.
+  - address: Optional address(es) to filter by.
+
+- Returns
+  A tuple (data_filters_set, filter_params) where:
+  - data_filters_set: A set of per-event data filters constructed from the event ABI and argument_filters.
+  - filter_params: A dict of filter parameters (e.g., topics and address) suitable for use with Eth filters.
+
+- Notes
+  - If topics is None, topic_set is derived from the event ABI and argument_filters.
+  - If topics is provided, it is combined with the derived topic set.
+  - The topics value is normalized to either a single list or multiple entries depending on the computed topic_set.
+  - Address handling supports combinations of address and contract_address (string or array) or a standalone address/contract_address.
+
+construct_data_filter_regex(data_filter_set)
+
+- Purpose
+  Compile a regular expression to validate log data fields against a data filter set.
+
+- Parameters
+  - data_filter_set: Iterable of data filter specifications (each typically a list of 32-byte hex strings or None for wildcards).
+
+- Returns
+  A compiled regular expression object that matches the serialized log data against the supplied filters.
+
+Classes
+-------
+
+Filter (gevent.Greenlet)
+
+- Purpose
+  Base class for asynchronous log/event filters backed by gevent.
+
+- Initialization
+  __init__(self, web3, filter_id)
+  - web3: Web3-like client instance.
+  - filter_id: Identifier for the underlying filter.
+
+- Attributes
+  - web3: Web3 client
+  - filter_id: Filter identifier
+  - callbacks: List of callback functions to invoke on new entries
+  - running: Indicates if the filter is actively polling
+  - stopped: Indicates if the filter was stopped
+  - poll_interval: Optional polling interval (seconds)
+
+- Methods
+  - __str__(self): Returns "Filter for {filter_id}"
+  - _run(self): Core loop to poll for changes and dispatch callbacks
+  - format_entry(self, entry): Hook to transform the entry before delivering to callbacks
+  - is_valid_entry(self, entry): Hook for additional filtering; defaults to True
+  - watch(self, *callbacks): Register callbacks and start the filter if not running
+  - stop_watching(self, timeout=0): Stop and uninstall the filter; wait for thread to join
+  - stopWatching = stop_watching
+
+BlockFilter(Filter)
+
+- Subclass of Filter with no changes; placeholder for block-specific filters.
+
+TransactionFilter(Filter)
+
+- Subclass of Filter with no changes; placeholder for transaction-specific filters.
+
+ZERO_32BYTES
+
+- Constant
+  Pattern string for a 32-byte hex value: '[a-f0-9]{64}'
+
+LogFilter(Filter)
+
+- Purpose
+  Filter for log data with optional per-entry formatting and data filtering.
+
+- Class attributes
+  - data_filter_set: The raw data filter specification
+  - data_filter_set_regex: Optional compiled regex for validating log data
+  - log_entry_formatter: Optional callable to format log entries before returning
+
+- Initialization
+  __init__(self, *args, **kwargs)
+  - Optional keyword argument log_entry_formatter to customize formatting
+  - Optional data_filter_set to set data filters immediately
+
+- Methods
+  - get(self, only_changes=True)
+    - Retrieve log entries either as changes only or all logs for the filter_id.
+    - Returns a list of formatted log entries.
+  - format_entry(self, entry)
+    - Applies log_entry_formatter if provided, otherwise returns the entry unchanged.
+  - set_data_filters(self, data_filter_set)
+    - Stores the filter set and builds data_filter_set_regex if any filters are provided.
+  - is_valid_entry(self, entry)
+    - Validates an entry against the data_filter_set_regex; returns True if no regex is set.
+
+PastLogFilter(LogFilter)
+
+- Purpose
+  Retrieve and deliver past logs for a filter once, then stop.
+
+- _run(self)
+  - Checks for stop condition, fetches previous logs via getFilterLogs, and dispatches callbacks for entries that pass is_valid_entry.
+  - Sets running to False after processing, so the filter exits.
+
+ShhFilter(Filter)
+
+- Purpose
+  Filter for Whisper (Shh) messages, analogous to LogFilter but via the Shh API.
+
+- _run(self)
+  - Similar to Filter._run but pulls changes via self.web3.shh.getFilterChanges for the filter_id.
+
+- stop_watching(self, timeout=0)
+  - Uninstalls the Shh filter via self.web3.shh.uninstallFilter and joins.
+
+Notes
+-----
+
+- The module relies on gevent for asynchronous operation and on a Web3-compatible interface.
+- Address handling supports combinations of address and contract_address, including lists; otherwise, a ValueError is raised for unsupported types.
+- Data filter regex construction uses a fixed 64-hex-digit representation for wildcard segments and strips the 0x prefix from supplied segments when matching.
+
+Examples
+--------
+
+- Creating an event filter and watching for changes:
+
+  Example (pseudo-usage):
+  - data_filters, params = construct_event_filter_params(event_abi, argument_filters=...)
+  - log_filter = LogFilter(web3, filter_id, data_filter_set=data_filters, log_entry_formatter=...)
+  - log_filter.watch(callback)
+
+- Using BlockFilter and TransactionFilter as placeholders for block/transaction filters:
+
+  Example (pseudo-usage):
+  - blk_filter = BlockFilter(web3, some_filter_id)
+  - blk_filter.watch(handle_block)
+
+Code references and related topics
+----------------------------------
+
+- construct_event_topic_set, construct_event_data_set (from events)
+- is_string, is_array (from types)
+- Web3.eth.filter interfaces: getFilterChanges, getFilterLogs, getFilterEntries, uninstallFilter
+- gevent Greenlets and asynchronous polling model
+
+Code excerpts (for reference)
+-----------------------------
+
+- The construct_event_filter_params function shows the logic to assemble topics and address fields as well as returning a data filters set.
+
+- The LogFilter class demonstrates how to fetch logs, format them, and apply data-filtering via a regex built from the data filter set.
+
+- PastLogFilter demonstrates a single-pass retrieval of historical logs.
+
+- ShhFilter mirrors Filter behavior for the Whisper API.
+
+If you need a specific section expanded or want a different tone (developer-oriented vs. user-oriented), tell me and I’ll adjust the docs.

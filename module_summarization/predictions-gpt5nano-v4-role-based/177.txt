@@ -1,0 +1,117 @@
+Compose: Pipelines and Composite Estimators
+===========================================
+
+Overview
+--------
+The sklearn.pipeline module provides utilities to build composite estimators by chaining a sequence of transformers and a final estimator. A Pipeline behaves like a single estimator while internally orchestrating fit/transform calls across its steps. This enables you to grid-search and cross-validate a complete processing and modeling workflow as a unit, while still tuning individual steps via a unified parameter interface.
+
+Key ideas
+- Transforming vs. estimating: All intermediate steps must be transformers (implement fit and transform). The final step must be an estimator (implements fit; may or may not implement transform/predict).
+- Parameterization: Parameters of steps are accessed through hierarchical names using the double-underscore separator (e.g., pipeline__scaler__with_mean, or pipeline__classifier__C).
+- Composite estimator API: Pipeline is a _BaseComposition, allowing it to expose a single estimator interface while containing multiple inner estimators/transformers.
+- Reproducibility and efficiency: A memory option enables caching of fitted transformers between fits to speed up repeated calls (e.g., in grid search). The last step is never cached.
+- Output handling: Set the output container for transform/fit_transform via set_output to harmonize outputs (e.g., pandas DataFrames) across steps.
+
+API: Pipeline
+-------------
+Class
+- Pipeline(steps, memory=None, verbose=False)
+
+Parameters
+- steps: list of (name, transform) tuples
+  - A sequence of (string name, estimator/transformer) pairs. All but the last step must be transformers (support fit and transform). The last step must be an estimator (support fit).
+- memory: str or object with joblib.Memory interface, default=None
+  - Enables caching of fitted transformers. If a string path is provided, it is used as the cache directory. The Pipeline is cloned before fitting when caching is enabled. The final estimator is never cached.
+- verbose: bool, default=False
+  - If True, prints the elapsed time for each step as it is completed during fitting.
+
+Attributes
+- named_steps: Bunch
+  - Dictionary-like mapping from step name to the corresponding estimator/transformer instance. Useful for parameter inspection and retrieval.
+- classes_: ndarray
+  - If the last step is a classifier, contains the class labels.
+- n_features_in_: int (version added: 0.24)
+  - Number of features seen during fit (exposed if the first estimator supports it).
+- feature_names_in_: ndarray (version added: 1.0)
+  - Names of features seen during fit (exposed if the underlying estimator provides them).
+
+Behavior and semantics
+- Step requirements
+  - All steps except the final estimator must implement fit and transform.
+  - The final step must implement fit (and may implement transform/predict as appropriate for the estimator type).
+- Chaining and composition
+  - The pipeline enables cross-validation and hyperparameter tuning across multiple steps as a single estimator. You can replace a step by assigning a new estimator, or drop it by setting the corresponding parameter to 'passthrough' or None.
+- Parameter naming
+  - Parameters are addressed with the step name and the parameter name, separated by double underscores, e.g., pipeline__scaler__with_mean or pipeline__clf__C.
+- Output management
+  - set_output allows configuring the output format for transform and fit_transform across all steps. Supported options include "default", "pandas", or leaving as None to keep the existing configuration.
+- Availability checks
+  - The pipeline can expose dynamic parameter constraints via utilities like available_if and _final_estimator_has to conditionally expose parameters based on properties of the final estimator. This is useful when certain parameters only make sense for a particular final estimator.
+
+Using a Pipeline
+----------------
+Example: Simple preprocessing + classifier
+
+- Concept: Scale features, then apply an SVM classifier.
+- Code (illustrative, reflects the documented approach):
+
+  from sklearn.pipeline import Pipeline
+  from sklearn.preprocessing import StandardScaler
+  from sklearn.svm import SVC
+  from sklearn.datasets import make_classification
+  from sklearn.model_selection import train_test_split
+
+  X, y = make_classification(random_state=0)
+  X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0)
+
+  pipe = Pipeline([
+      ('scaler', StandardScaler()),
+      ('svc', SVC())
+  ])
+
+  # Fit and evaluate
+  score = pipe.fit(X_train, y_train).score(X_test, y_test)
+
+  # Example: tune a parameter across steps
+  score = pipe.set_params(svc__C=10).fit(X_train, y_train).score(X_test, y_test)
+
+Notes
+- The final estimator is responsible for scoring/predicting, while the preceding steps transform the data.
+- You can insert more complex preprocessing steps (e.g., PCA, imputation, custom transformers) before the final estimator.
+
+Advanced: memory and efficiency
+- When memory is set, transformers are cloned and cached between fits to avoid repeated fitting of expensive preprocessing steps during procedures like GridSearchCV.
+- The last step is not cached, even if it is a transformer, to preserve the ability to inspect the final estimator and its parameters.
+
+Output configuration with set_output
+- set_output(transform=None|{"default","pandas"})
+  - Propagates the requested output configuration to all steps, ensuring consistent transform/fit_transform outputs across the pipeline.
+  - Typical uses include obtaining DataFrame outputs from transformers that support pandas-like outputs.
+
+Inspecting and manipulating pipelines
+- Access steps via named_steps: pipeline.named_steps.scaler
+- Adjust parameters using set_params with hierarchical names or by updating internal steps if needed.
+
+Composite Estimators and Related Utilities
+------------------------------------------
+- The Pipeline is a composite estimator: it aggregates multiple sub-estimators/transforms into a single estimator interface.
+- It leverages internal utilities from the sklearn.utils._estimator_html_repr and metadata routing to support rich representations and parameter routing.
+- Tools like FeatureUnion and make_pipeline/make_union provide alternative patterns for combining estimators:
+  - FeatureUnion combines the outputs of several transformers in parallel.
+  - make_pipeline and make_union offer concise constructors for common patterns.
+
+Examples in Practice
+- GridSearchCV with Pipeline: You can grid-search over parameters across different steps using the double-underscore syntax, facilitating joint optimization of preprocessing and modeling choices.
+- Replacing steps: To try a different estimator or transformer, assign a different object to the corresponding parameter name (e.g., pipeline__scaler = None to drop scaling, or pipeline__svc = LogisticRegression()).
+
+Implementation notes (conceptual)
+- Pipeline inherits from _BaseComposition, enabling it to behave like a single estimator while encapsulating a sequence of steps.
+- _iter() and internal orchestration handle the sequential application of fit and transform across steps, while ensuring caching semantics are respected when memory is provided.
+- The final estimator’s attributes (e.g., classes_, n_features_in_) become available after fit, enabling downstream consumers to adapt to the learned model.
+
+Relevant references
+- The module includes utilities for output handling, parameter validation, metadata routing, and parallel execution to support robust composition.
+- Typical usage patterns are demonstrated in accompanying examples, including plotting, drafting workflows for cross-validation, and integrating with model selection tools.
+
+Notes
+- This documentation focuses on pipelines and composite estimators, outlining core concepts, API surfaces, usage patterns, and practical considerations for building, inspecting, and tuning chained estimators.

@@ -1,0 +1,204 @@
+Controlling chunking
+====================
+
+This section documents how chunking is handled in dask.array and how the module's dispatch
+infrastructure and per-block helpers can influence and preserve chunking during
+operations. It covers backend dispatch mechanisms, per-block masked-array utilities,
+and practical guidance for maintaining efficient and predictable chunk layouts.
+
+Overview
+--------
+
+- Chunking in Dask arrays determines how work and memory are partitioned across
+  tasks. Controlling chunk sizes and alignment is critical for performance and
+  memory efficiency.
+- The module introduces dispatch-based routing (via Dispatch objects) for
+  backend-specific implementations of common operations. This allows keeping
+  chunking consistent across backends (e.g., NumPy, CuPy) and across
+  operations.
+- For masked arrays, per-block utilities apply operations within each chunk while
+  respecting the overall chunked layout, avoiding unintended cross-chunk
+  broadcast or data movement.
+
+Backend dispatch and chunking
+-----------------------------
+
+The module exposes several Dispatch-backed lookups intended to route
+implementations to the appropriate backend or data type:
+
+- concatenate_lookup
+- tensordot_lookup
+- einsum_lookup
+- empty_lookup
+- divide_lookup
+- percentile_lookup
+- numel_lookup
+- nannumel_lookup
+- to_numpy_dispatch
+- to_cupy_dispatch
+
+Key idea
+- Register backend-specific implementations on these Dispatch objects. The
+  implementation chosen at runtime depends on the types of the inputs
+  (e.g., numpy arrays vs. CuPy arrays). This helps ensure that chunking
+  behavior is preserved and that operations can be performed with the most
+  efficient backend for the data type in use.
+
+Example (conceptual)
+- The following skeleton demonstrates how one might provide backend-specific
+  implementations:
+
+Code example (illustrative)
+```python
+from dask.utils import Dispatch
+import numpy as np
+
+# Create a dispatch table for an operation (e.g., concatenation)
+concatenate_lookup = Dispatch("concatenate")
+
+# Backend-specific implementation for NumPy arrays
+@concatenate_lookup.register(np.ndarray)
+def _concatenate_numpy(arrays, axis=0):
+    # Implement using numpy, preserving per-block semantics
+    return np.concatenate(arrays, axis=axis)
+
+# Optional: backend-specific implementation for another array type
+try:
+    import cupy as cp
+    @concatenate_lookup.register(cp.ndarray)
+    def _concatenate_cupy(arrays, axis=0):
+        return cp.concatenate(arrays, axis=axis)
+except Exception:
+    pass
+
+# Usage (illustrative; actual API may differ)
+# The dispatch system selects the appropriate backend implementation
+# based on input types.
+# result = concatenate_lookup.dispatch(type_of_first_argument)(arrays, axis=0)
+```
+
+Note: The exact invocation pattern depends on the Dispatch API usage in the surrounding codebase.
+
+Masked array utilities and per-block operations
+----------------------------------------------
+
+To support chunk-aware operations on masked arrays, the module provides:
+
+- A specialized normalize_token entry for NumPy masked arrays:
+  - normalize_masked_array(x) returns a normalized representation of the masked data:
+    (normalized_data, normalized_mask, normalized_fill_value)
+
+- filled(a, fill_value=None)
+  - Returns a masked array with masked elements filled per-block, preserving chunking.
+
+- _wrap_masked(f)
+  - Internal helper that creates a per-block wrapper around a function f.
+  - Ensures inputs are converted to arrays suitable for per-block application and that blockwise alignment is respected.
+
+- High-level masked operations that work chunk-wise:
+  - masked_greater, masked_greater_equal, masked_less, masked_less_equal, masked_not_equal
+  - masked_equal (with an explicit edge case)
+  - masked_invalid, masked_inside, masked_outside, masked_where
+  - masked_values, fix_invalid, getdata, getmaskarray
+
+Important edge case
+- masked_equal raises a ValueError if the provided value is array-like (i.e., has a shape).
+  This ensures scalar comparisons are used in a per-block manner.
+
+Practical usage examples
+------------------------
+
+- Basic per-block masking with masked_where:
+
+Code example
+```python
+import numpy as np
+import dask.array as da
+from dask.array import masking as ma  # conceptual import for illustration
+
+# Create a chunked array
+x = da.from_array(np.arange(6).reshape(2, 3), chunks=(1, 3))
+
+# Condition for masking
+cond = x > 2
+
+# Apply masking per chunk
+masked = ma.masked_where(cond, x)
+
+# Compute the result
+result = masked.compute()
+```
+
+- Masked operations using per-block wrappers (illustrative):
+
+Code example
+```python
+import numpy as np
+import numpy.ma as ma
+import dask.array as da
+
+# Chunked input
+a = da.from_array(np.array([[0, 1, 2], [3, 4, 5]]), chunks=(1, 3))
+
+# Use a per-block masked operation (e.g., greater-than masking)
+res = a.map_blocks(ma.masked_greater, fill_value=False, dtype=a.dtype)
+```
+
+- Masked values and fill behavior per block:
+
+Code example
+```python
+import numpy as np
+import numpy.ma as ma
+import dask.array as da
+
+x = da.from_array(np.arange(6).reshape(2, 3), chunks=(1, 3))
+masked_vals = x.map_blocks(lambda block: ma.masked_values(block, value=5, rtol=0.0, atol=0.0), dtype=x.dtype)
+```
+
+Chunking tips and considerations
+-------------------------------
+
+- Chunk alignment matters: Operations that combine multiple inputs (e.g., binary operations
+  or per-block reductions) should have compatible chunk grids along the axes involved.
+  Misaligned chunks may trigger re-chunking orBlockwise reorganization, increasing
+  overhead.
+
+- Rechunk when needed:
+  - To adjust chunk sizes, use rechunk (or equivalent) to align chunk grids before
+    performing cross-block reductions or concatenations.
+
+  Code example
+ ```python
+  import dask.array as da
+  x = da.from_array(np.ones((1000, 1000)), chunks=(250, 250))
+  # Rechunk to a different grid
+  y = da.rechunk(x, chunks=(500, 250))
+  ```
+
+- Edge cases:
+  - When using masked_equal, ensure the second argument is a scalar. If it has a shape (i.e., a
+    non-scalar array), a ValueError is raised to avoid ambiguous per-block semantics.
+
+- Backend backends:
+  - The Dispatch-based lookups enable backend-specific optimizations and data-type
+    compatibility (e.g., NumPy vs. CuPy). Ensure that the registered backends preserve
+    chunking behavior and avoid unnecessary data movement.
+
+Usage patterns
+--------------
+
+- Use per-block operators (map_blocks, blockwise) to implement chunk-aware computations
+  that respect the existing chunk layout and avoid cross-chunk broadcasting.
+
+- Extend with new backends by registering them on the appropriate Dispatch objects; this
+  helps keep chunking behavior consistent across different array types.
+
+End notes
+---------
+
+- The dispatch infrastructure and per-block masked array utilities in this module are
+  designed to keep chunking predictable while enabling backend-specific optimizations.
+- For developers, the key takeaways are: register backend-specific implementations on
+  Dispatch objects and use map_blocks/blockwise-based wrappers to perform per-block
+  operations that respect the current chunking.

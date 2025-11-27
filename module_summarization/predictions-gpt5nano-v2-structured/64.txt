@@ -1,0 +1,152 @@
+Operations
+==========
+
+Documentation for the operations module used to represent and manipulate
+migration operations, including constraint additions and removals.
+
+Module overview
+---------------
+
+This module defines the core abstractions for representing migration operations
+in the extensible migration framework.
+
+Key concepts:
+- MigrateOperation: Base class for all migration command objects.
+- AddConstraintOp: Abstract representation of adding a constraint; concrete
+  constraint types are registered via a dispatch mechanism.
+- DropConstraintOp: Concrete representation of dropping a constraint; supports
+  both single-operations and batch-operations paths.
+
+The module integrates with the broader migration context, including
+the Rewriter system and the MigrationContext, and uses SQLAlchemy
+constraint representations.
+
+Classes and responsibilities
+-----------------------------
+
+MigrateOperation
+^^^^^^^^^^^^^^^
+Base class for migration command and organization objects.
+
+- info
+  - A memoized property returning a dict for arbitrary per-operation
+    metadata.
+- _mutations
+  - A frozen set intended to track supported mutation types (default: empty).
+- reverse(self) -> MigrateOperation
+  - Subclasses must implement to return the inverse operation.
+- to_diff_tuple(self) -> Tuple[Any, ...]
+  - Subclasses must implement to describe the operation in a serializable form.
+
+AddConstraintOp
+^^^^^^^^^^^^^^
+Represents an operation that adds a constraint.
+
+- add_constraint_ops
+  - A util.Dispatcher used to register concrete constraint-type handlers.
+- constraint_type
+  - Abstract property specifying the type of constraint (e.g., "foreignkey",
+    "unique", "primary", "check").
+- register_add_constraint(type_: str) -> Callable
+  - Decorator to register a concrete AddConstraintOp subclass for a given
+    constraint type.
+- from_constraint(cls, constraint: Constraint) -> AddConstraintOp
+  - Factory that dispatches to the appropriate concrete subclass based on
+    constraint.__visit_name__.
+- to_constraint(self, migration_context: Optional[MigrationContext] = None) -> Constraint
+  - Abstract method that should construct a SQLAlchemy Constraint from the
+    operation.
+- reverse(self) -> DropConstraintOp
+  - Inverse operation that returns the corresponding drop-constraint operation.
+- to_diff_tuple(self) -> Tuple[str, Constraint]
+  - Serializes the operation as a diff tuple, e.g. ("add_constraint", constraint).
+
+DropConstraintOp
+^^^^^^^^^^^^^^
+Represents an operation that drops a constraint.
+
+- Decorators
+  - Operations.register_operation("drop_constraint")
+  - BatchOperations.register_operation("drop_constraint", "batch_drop_constraint")
+- __init__(constraint_name, table_name, type_=None, schema=None, _reverse=None)
+  - Stores the constraint name, the host table, optional type and schema, and
+    an optional reverse AddConstraintOp instance used for reconstruction.
+- reverse(self) -> AddConstraintOp
+  - Returns the inverse AddConstraintOp by converting the current constraint
+    back from its stored representation.
+- to_diff_tuple(self) -> Tuple[str, SchemaItem]
+  - Serializes as either ("remove_fk", constraint) for foreign keys or
+    ("remove_constraint", constraint) for others.
+- from_constraint(cls, constraint: Constraint) -> DropConstraintOp
+  - Builds a DropConstraintOp from a SQLAlchemy Constraint, mapping the visit
+    name to a drop type (e.g., "foreign_key_constraint" -> "foreignkey").
+  - Populates the stored reverse AddConstraintOp for symmetry.
+- to_constraint(self) -> Constraint
+  - Reconstructs a Constraint from the stored reverse operation, applying
+    the constraint and table/schema names.
+  - Raises ValueError if the original constraint is not present.
+- drop_constraint(operations, constraint_name, table_name, type_=None, schema=None) -> None
+  - Convenience classmethod to drop a constraint by name on a table.
+  - Creates a DropConstraintOp and dispatches it to the given Operations context.
+- batch_drop_constraint(operations, constraint_name, type_=None) -> None
+  - Batch-friendly variant that omits table_name and schema, for use with batch
+    migration context.
+
+Usage notes
+-----------
+
+- Constraint type dispatch:
+  - Concrete AddConstraintOp subclasses are registered via AddConstraintOp.register_add_constraint.
+  - The system uses constraint.__visit_name__ to select the appropriate subclass.
+
+- Reversibility:
+  - Each add operation can be reversed to a corresponding drop operation, and
+    vice versa, enabling straightforward migration rollbacks.
+
+- Diff representation:
+  - The to_diff_tuple method yields a serializable form suitable for generating
+    migration diffs, e.g., ("add_constraint", constraint) or
+    ("remove_constraint"/"remove_fk", constraint).
+
+- Batch operations:
+  - The batch_drop_constraint method allows expressing drop operations in a batch
+    migration context, omitting table and schema details when appropriate.
+
+Examples
+--------
+
+Add a constraint (abstract example)
+.. code-block:: python
+
+    # Suppose concrete AddConstraintOp subclass for a given constraint_type
+    # has been registered, and constraint_obj is a SQLAlchemy Constraint.
+    add_op = AddConstraintOp.from_constraint(constraint_obj)
+    diff = add_op.to_diff_tuple()  # e.g., ("add_constraint", constraint)
+
+Drop a constraint
+.. code-block:: python
+
+    # Obtain a DropConstraintOp and apply it via an Operations context
+    DropConstraintOp.drop_constraint(operations, "fk_order_customer", "orders",
+                                     type_="foreignkey")
+
+Batch drop a constraint
+.. code-block:: python
+
+    # Use a batch-enabled operations context
+    DropConstraintOp.batch_drop_constraint(batch_operations, "fk_order_customer",
+                                          type_="foreignkey")
+
+See also
+--------
+
+- Rewriter and MigrationContext for integration with the broader migration system.
+- sqla_compat helpers used to map constraint details to SQLAlchemy schema elements.
+
+Notes
+-----
+
+- The module relies on typing tricks guarded by TYPE_CHECKING for static analysis,
+  importing several SQLAlchemy types only when type checking.
+- Concrete constraint types and their registrations are defined in the concrete
+  migration plugin implementations.

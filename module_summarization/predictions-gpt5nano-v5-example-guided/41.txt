@@ -1,0 +1,104 @@
+# How to use QuerySet to build your queries
+
+## Overview
+This module implements the core QuerySet logic used to build and execute asynchronous ORM queries. It uses a PyPika-based QueryBuilder to compose SQL, supports filtering through Q expressions, joining related tables, applying annotations, prefetching related data, and flexible ordering (including across relations and annotated fields). The central piece is the AwaitableQuery class, which tracks joined tables, annotations, and the evolving SQL command.
+
+Key capabilities include:
+- Filtering with Q objects and combined predicates
+- Automatic joins for related fields (left outer joins by default)
+- Support for nested field lookups (e.g., related_model__field)
+- Annotations and their use in ordering
+- Correct handling of aggregates with optional GROUP BY
+- Flexible ordering including related fields and annotations
+
+## Key Components
+- AwaitableQuery
+  - Core builder that constructs the SQL query incrementally.
+  - Attributes:
+    - _joined_tables: list of already joined PyPika Tables to avoid duplicate joins
+    - model: the model the query targets
+    - query: the PyPika QueryBuilder being progressively constructed
+    - _db: database client
+    - capabilities: database capabilities
+    - _annotations: user-provided annotations as Function instances
+  - Methods:
+    - resolve_filters(model, q_objects, annotations, custom_filters)
+      - Builds WHERE and HAVING clauses from Q objects and annotations
+      - Performs necessary LEFT OUTER JOINs for related fields
+      - Handles aggregates and, if needed, applies GROUP BY on the model’s primary key
+    - _join_table_by_field(table, related_field_name, related_field)
+      - Resolves and applies joins for a given related field
+    - _resolve_ordering_string(ordering)
+      - Parses a possibly prefixed ordering string (e.g., "-created_at") into field name and order
+    - resolve_ordering(model, table, orderings, annotations)
+      - Applies standard and related-field ordering
+      - Supports ordering by annotated fields
+      - Raises FieldError if an unknown field is requested
+- QuerySetSingle (Protocol)
+  - Defines chainable, awaitable query behaviors for single-object queries
+  - Methods include: prefetch_related, annotate, only, values_list, values
+- Related helpers
+  - Q: query utility object used to build complex filter predicates
+  - Prefetch: for prefetching related data
+  - F: field reference expressions (used in annotations)
+  - _get_joins_for_related_field: utility to determine join conditions for related lookups
+
+Note: This module uses a global placeholder QUERY: QueryBuilder = QueryBuilder() to bootstrap query construction.
+
+## Usage
+This section shows how the pieces work together to build and execute a QuerySet-backed query. The public API is exposed via the ORM’s model manager (e.g., Model.objects...) and the internal methods shown here illustrate the building steps.
+
+- Filtering with Q objects and annotations
+  - Create filter predicates as Q objects and provide optional annotations and custom filters.
+  - resolve_filters will attach the necessary WHERE/HAVING clauses and join any related tables as needed.
+
+Code example (illustrative):
+- Build filters and apply them to the query
+  - from tortoise.query_utils import Q
+  - from tortoise.expressions import F
+  - q_objects = [Q(name="Alice"), Q(age__gte=18)]
+  - annotations = {"upper_name": F("name").upper()}
+  - awaitable = AwaitableQuery(UserModel)
+  - awaitable.resolve_filters(UserModel, q_objects, annotations, {})
+
+- Ordering
+  - Use resolve_ordering to apply ordering, including across relations or using annotations
+  - orderings = [("profile__created_at", "asc"), ("name", "desc")]
+  - from pypika import Table
+  - table = Table(UserModel._meta.basetable)
+  - awaitable.resolve_ordering(UserModel, table, orderings, annotations)
+
+- Prefetching and value extraction
+  - The public API supports prefetch_related, annotate, only, values_list, and values for flexible result shapes.
+  - Example usage would typically look like:
+    - results = [row async for row in awaitable]  # or await awaitable if using the public API
+    - ids, names = await awaitable.values_list("id", "name", flat=False)
+
+Code references from the source (for orientation):
+- resolve_filters builds where/having parts and adds necessary joins:
+  - where_criterion, joins, having_criterion = modifier.get_query_modifiers()
+  - for join in joins: self.query = self.query.join(join[0], how=JoinType.left_outer).on(join[1])
+  - self.query._wheres = where_criterion
+  - self.query._havings = having_criterion
+  - if has_aggregate and (self._joined_tables or having_criterion or self.query._orderbys): self.query = self.query.groupby(self.model._meta.basetable[self.model._meta.db_pk_column])
+- _join_table_by_field resolves and applies joins for a related field
+- _resolve_ordering_string parses a leading '-' to determine descending order
+- resolve_ordering applies ordering by simple fields, related fields (via joins), and annotations; raises FieldError on unknown fields
+
+## Details
+- Joins and related lookups
+  - When ordering or filtering references a related field (e.g., "author__name"), the system joins the related table and applies the operation on the related model, potentially recursing into deeper relations.
+  - Joins are deduplicated by tracking _joined_tables to avoid redundant SQL joins.
+
+- Annotations and aggregates
+  - Annotations can be included in ordering or filtering contexts.
+  - If aggregates are present and there are joins or having/orderings, a GROUP BY on the model’s primary key is automatically applied to ensure correct results.
+
+- Errors
+  - FieldError is raised for unknown fields or invalid usage (e.g., attempting to filter directly by a relation rather than by its nested field).
+  - Other standard database/ORM errors (DoesNotExist, MultipleObjectsReturned, IntegrityError, ParamsError) may be raised by higher-level APIs when executing the query.
+
+- Execution model
+  - The AwaitableQuery object is designed to be awaited to fetch results, with a design intent compatible with asynchronous usage patterns common in ORMs (e.g., awaiting a query to obtain results, or iterating results asynchronously).
+
+For more details, refer to the associated utilities (Q, Prefetch, F, and _get_joins_for_related_field) and how QueryBuilder integrates with PyPika to generate SQL.

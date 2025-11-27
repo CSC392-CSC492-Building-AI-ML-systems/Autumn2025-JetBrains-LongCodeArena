@@ -1,0 +1,75 @@
+array-chunks.rst
+==================
+
+
+Controlling chunking
+--------------------
+
+This section explains how chunking is determined and preserved when performing masked-array operations in Dask. The implementations shown here use blockwise/map_blocks patterns to apply NumPy masked-array functions while respecting input chunk layouts.
+
+Key ideas
+- Unary operations preserve the chunking of the input array.
+- Binary operations determine the output chunking based on the inputs’ axes, using a minimal but explicit blockwise layout.
+- When an operation requires only scalar inputs, the output chunking follows the chunking of the non-scalar input.
+- The actual output chunk order for binary masked operations is controlled by oinds, which is derived from the input axes with the greatest dimensionality.
+
+How chunking is controlled in masked operations
+- Unary wrappers (examples: masked_invalid, fix_invalid, getdata, getmaskarray, masked_values, filled)
+  - The result preserves the input’s chunking.
+  - Implementation uses map_blocks with the corresponding NumPy function, so the output grid matches the input grid.
+
+- Binary wrappers (examples: masked_greater, masked_greater_equal, masked_less, masked_less_equal, masked_not_equal)
+  - The calculation uses _wrap_masked, which computes:
+    - ainds: the axes of the first input (reversed for blockwise convenience)
+    - vinds: the axes of the second input (reversed)
+    - oinds: the longer of ainds and vinds (by length)
+  - The blockwise call then uses oinds as the output axes, with inputs provided along ainds and vinds respectively.
+  - Resulting chunking follows the input that provides the larger axis structure. If the value input is a scalar, its vinds is empty, and the output chunking matches the first input (a).
+  - This mechanism ensures consistent chunking even when broadcasting across blocks.
+
+- Equality-based masking (masked_equal)
+  - Value must be scalar; the output chunking follows the input’s chunking (a).
+
+- Conditional masking (masked_where)
+  - Output chunking follows the main input (a) chunking, with a inds setting the computation along the input’s axes.
+
+- Broadcasting behavior
+  - The implementation explicitly handles axis coordination via blockwise, so you can influence output chunking by shaping inputs (e.g., making the second operand have more axes or different chunk layouts).
+
+Code references (conceptual)
+- _wrap_masked demonstrates how binary masked operations choose the output chunking:
+  - ainds = tuple(range(a.ndim))[::-1]
+  - vinds = tuple(range(value.ndim))[::-1]
+  - oinds = max(ainds, vinds, key=len)
+  - blockwise(f, oinds, a, ainds, value, vinds, dtype=a.dtype)
+
+Practical guidance
+- To control the output chunking, control the inputs’ chunk layouts:
+  - Use chunks=(...) to set how an input is chunked along each axis.
+  - If you want the result to inherit a particular chunking, ensure the corresponding input has that chunking.
+- For scalar thresholds in binary masked operations, the output chunking matches the primary input’s layout.
+- When using an array-valued threshold, the output chunking aligns with the input that has more axes; this can change the resulting chunk grid.
+
+Examples
+- Unary operation preserves input chunking
+  - Given an input a with chunks[(3, 3), (2, 2)], applying a unary masked operation preserves that exact chunking.
+
+  Example (conceptual):
+  - a = da.from_array(np.random.rand(6, 4), chunks=(3, 2))
+  - r = masked_invalid(a)  # or any unary wrapper
+  - assert r.chunks == a.chunks
+
+- Binary operation with scalar threshold preserves the primary input’s chunking
+  - a = da.from_array(np.random.rand(6, 4), chunks=(3, 2))
+  - r = masked_greater(a, 0.5)
+  - assert r.chunks == a.chunks
+
+- Binary operation with array threshold follows the longer axis
+  - a = da.from_array(np.random.rand(6, 4), chunks=(3, 2))
+  - v = da.from_array(np.random.rand(6, 1), chunks=(3, 1))
+  - r = masked_greater(a, v)
+  - r.chunks reflects the combined axis structure determined by oinds
+
+Notes
+- These behaviors are implemented in the wrappers that apply NumPy masked-array operations via map_blocks/blockwise, ensuring consistent chunking semantics across a range of input shapes and chunk layouts.
+- If you need a specific output chunking for a masked operation, adjust the inputs’ chunking so that the resulting blockwise layout matches your desired grid.

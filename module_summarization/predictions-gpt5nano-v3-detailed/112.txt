@@ -1,0 +1,202 @@
+Metadata
+========
+
+Overview
+--------
+
+This module provides plan helpers for the Bluesky RunEngine that facilitate
+common data-collection patterns and produce rich per-plan metadata. It
+defines three primary plans:
+
+- count: take one or more readings from detectors, with configurable timing
+  and a per-shot hook.
+- list_scan: perform a Cartesian product scan of one or more motors against
+  a detector, generating structured metadata describing the scan.
+- rel_list_scan: a planned placeholder for relative-scanning functionality
+  (not yet implemented in this version).
+
+The plans are designed to integrate with Bluesky conventions, generating
+generator-based plans that yield messages to the RunEngine. They attach
+metadata about detectors, motors, and plan arguments to support downstream
+data analysis and provenance.
+
+API Overview
+------------
+
+Functions provided by this module:
+
+count(detectors, num=1, delay=None, *, per_shot=None, md=None)
+    Take one or more readings from detectors.
+
+list_scan(detectors, *args, per_step=None, md=None)
+    Scan over one or more variables in a Cartesian (inner product) fashion.
+
+rel_list_scan(detectors, *args, per_step=None, md=None)
+    Scan over one variable in steps relative to the current position
+    (not yet implemented).
+
+Key concepts
+------------
+
+- detectors: A list of "readable" objects (typically Ophyd devices) to be read.
+- num: Number of readings to take (default 1). If None, the plan runs until canceled.
+- delay: Time delay between successive readings. Can be a scalar or an iterable
+  of delays. If iterable, it must have at least num - 1 entries.
+- per_shot: Optional hook that customizes behavior for each inner loop step.
+  Expected signature: f(detectors: Iterable[OphydObj]) -> Generator[Msg, ...]
+- md: Optional metadata dictionary. Metadata is merged into a generated
+  internal _md structure and exposed to downstream analysis.
+
+count
+-----
+
+Purpose
+^^^^^^^
+Create a simple plan that reads detectors a specified number of times with an
+optional delay between readings.
+
+Parameters
+^^^^^^^^^^
+- detectors (list): Detectors to read.
+- num (int or None): Number of readings to take. If None, the plan runs
+  indefinitely until canceled.
+- delay (float or iterable of float, optional): Delay between readings. If an
+  iterable is supplied, it must contain at least num - 1 entries.
+- per_shot (callable, optional): Hook to customize inner-loop action per step.
+  Signature: def f(detectors: Iterable[OphydObj]) -> Generator[Msg, ...]
+- md (dict, optional): Metadata to attach to the plan.
+
+Return value
+^^^^^^^^^^^^
+A generator-based plan that, when executed by a RunEngine, yields the appropriate
+read messages and returns control after completing the requested number of samples.
+
+Usage example
+-------------
+- Simple count with a scalar delay:
+
+.. code-block:: python
+
+   RE(count([det1], num=5, delay=0.1))
+
+- Using a per_shot hook (conceptual example):
+
+.. code-block:: python
+
+   def my_per_shot(dets):
+       # yield custom messages per step, then proceed with the default behavior
+       yield Msg('custom', {'detectors': [d.name for d in dets]})
+       return
+
+   RE(count([det1, det2], num=3, per_shot=my_per_shot))
+
+Notes
+^^^^^
+- If num is None, the plan has an indefinite length and may need external
+  cancellation.
+- The per_shot hook enables custom messaging or side effects per inner-loop
+  iteration without altering core read semantics.
+
+list_scan
+---------
+
+Purpose
+^^^^^^^
+Perform a multi-dimensional scan where each motor advances through its own
+list of points, effectively computing an inner product of the provided points.
+
+Parameters
+^^^^^^^^^^
+- detectors (list): Detectors to read at each scan point.
+- *args: Pairs of (motor, [points]) for each dimension. The number of point lists
+  must be the same across all motors (i.e., all lengths must be equal).
+  Each motor should be a settable object (e.g., Ophyd motor).
+- per_step (callable, optional): Hook for customizing the action at each
+  step. Signature: f(detectors, motor, step) -> plan (generator)
+- md (dict, optional): Metadata to attach to the plan.
+
+Return value
+^^^^^^^^^^^^
+A generator-based plan that yields the necessary messages to perform the
+inner-product scan across the provided motors while reading the detectors.
+
+Usage example
+-------------
+- 2D scan over two motors with a single detector:
+
+.. code-block:: python
+
+   RE(list_scan([det1], motorA, [0, 1, 2], motorB, [-1, 0, 1]))
+
+Notes
+^^^^^
+- All point lists must have the same length; otherwise a ValueError is raised.
+- The plan captures a structured metadata dictionary describing detectors, motors,
+  number of points, and argument representations.
+
+rel_list_scan
+-------------
+
+Current state
+^^^^^^^^^^^^
+Not implemented in this version. The function exists as a placeholder and
+documentation scaffolding for future support of relative scans.
+
+Usage example
+-------------
+Not applicable in this version until implemented.
+
+Edge cases and considerations
+-----------------------------
+
+- num=None in count yields an indefinite plan; ensure run control cancels appropriately.
+- If delay is an iterable, its length must be at least num - 1; otherwise a ValueError
+  will be raised during iteration.
+- In list_scan, all motor point lists must be the same length; otherwise a ValueError is raised.
+- rel_list_scan is not implemented; users should await future updates for relative scans.
+
+Related modules
+---------------
+
+- plan_patterns: Used to generate scan patterns and hints about plans.
+- preprocessors (bpp): Decorators for stage and run control in the plan.
+- plan_stubs (bps): Helpers for common plan actions (e.g., one_shot, repeat).
+- utils (Msg): Message type used for signaling in per-step hooks.
+
+Code references
+---------------
+
+See the source module for detailed implementation and parameter handling:
+- count
+- list_scan
+- rel_list_scan
+
+Examples of usage
+-----------------
+
+- Simple detector read sequence:
+
+.. code-block:: python
+
+   from bluesky.run_engine import RunEngine
+   # dets, motors, and RE would be defined in the user's environment
+   RE = RunEngine(...)
+   RE(count([det1], num=5, delay=0.1))
+
+- Grid-like scan across two motors:
+
+.. code-block:: python
+
+   RE(list_scan([det1], motorX, [0, 1, 2], motorY, [-1, 0, 1]))
+
+Notes on implementation
+-----------------------
+
+- The plans attach a structured metadata dictionary (_md) that includes plan
+  name, arguments, and hints about dimensions to support downstream analysis.
+- Decorators from bluesky-preprocessors provide consistent stage handling and
+  run control semantics.
+
+End of documentation
+--------------------
+

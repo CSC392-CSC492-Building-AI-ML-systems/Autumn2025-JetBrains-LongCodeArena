@@ -1,0 +1,208 @@
+# MixedGLM: Bayesian Inference for Generalized Linear Mixed Models
+
+A technical reference for the mixed_glm module, focusing on the Generate description and usage details for developers.
+
+## Overview
+
+The mixed_glm module provides Bayesian inference for generalized linear mixed models (GLMMs). It currently supports only families without extra scale or shape parameters (e.g., Binomial and Poisson). Two estimation approaches are available:
+
+- Laplace approximation (maximum a posteriori, MAP) via fit_map
+- Variational Bayes (VB) with a mean-field approximation via fit_vb
+
+Key design points
+
+- All realizations of random effects are modeled as mutually independent in this implementation.
+- The design matrix exog_vc drives the random-effects structure. Each column corresponds to an independent random effect realization.
+- Random effects have mean zero and an unknown standard deviation. Standard deviations are constrained to be equal within subsets of the columns, as specified by ident (or inferred from formulas when used).
+- Random effects across columns with identical ident share the same variance parameter (vcp). When formulas are used, columns derived from a common formula are constrained to have the same standard deviation.
+- exog_vc may be provided as a sparse matrix. If a dense array is provided, it will be converted to sparse internally. Note: using formulas may require creating a temporary dense version of exog_vc.
+
+## Model and Parameterization
+
+The joint density of data and parameters factors as:
+p(y | vc, fep) p(vc | vcp) p(vcp) p(fe)
+
+- p(y | vc, fep): GLM likelihood part, dependent on the specific family (binomial, Poisson, etc.).
+- p(vc | vcp): Independent Gaussian random effects distribution (given the variance structure described below).
+- p(vcp): Prior on the log-variances (vcp); the vcp parameters themselves have Gaussian priors, which induce log-normal priors on the standard deviations.
+- p(fe): Prior on fixed effects (Gaussian).
+
+Parameterization details
+
+- exog: design matrix for fixed effects (columns correspond to fep).
+- exog_vc: design matrix for random effects. Each column yields an independent random effect realization.
+- ident: integer labels for columns of exog_vc. Columns sharing the same ident value have the same random-effect standard deviation.
+- vcp: standard deviations of the random effects, structured by ident. The vcp parameters have Gaussian priors (log-standard deviations have priors that induce log-normal-distributed standard deviations).
+- vcp_p: prior standard deviation for variance-component parameters (controls the prior spread on log(s) for s being the random-effect standard deviations).
+- fe_p: prior standard deviation for fixed effects parameters.
+- fep_names, vcp_names, vc_names: human-readable names for fixed effects, variance components, and random-effect realizations, respectively.
+- Family: a Statsmodels GLM family instance (e.g., binomial, Poisson).
+
+Notes
+
+- The prior for fixed effects and variance components are Gaussian; because vcp represents log-standard deviations, the effective priors on standard deviations are log-normal.
+- For some families (notably Binomial), very large vcp_p values can complicate posterior mode finding. A moderate value (e.g., 0.5) is often a practical choice.
+
+## API and Parameters
+
+Class constructor (as described in the module’s initialization docstring)
+
+- endog: array_like
+  Response vector.
+
+- exog: array_like
+  Design matrix for fixed effects.
+
+- exog_vc: array_like
+  Design matrix for random effects. May be SciPy sparse; will be converted internally to sparse if not already.
+
+- ident: array_like
+  Integer labels showing which columns of exog_vc share a variance parameter.
+
+- vcp_p: float
+  Prior standard deviation for variance component parameters (log-standard deviations).
+
+- fe_p: float
+  Prior standard deviation for fixed-effects parameters.
+
+- family: statsmodels.genmod.families instance
+  GLM family (e.g., Binomial, Poisson).
+
+- fep_names: list of str
+  Names for fixed effects. If None, defaults are constructed.
+
+- vcp_names: list of str
+  Names for variance component parameters (distinct labels in ident). If None, defaults are constructed.
+
+- vc_names: list of str
+  Names for random effect realizations.
+
+Returns
+
+- MixedGLMResults object
+
+Methods
+
+- fit_map(): Fit using the Laplace approximation (MAP).
+- fit_vb(): Fit using variational Bayes (mean-field approximation).
+
+Additional notes
+
+- When formulas are used to generate exog_vc (via Patsy), columns derived from the same formula are constrained to share the same standard deviation (via ident-like structure constructed internally).
+
+## Input Handling
+
+- exog_vc may be a scipy.sparse matrix. If a dense matrix is provided, it will be converted to sparse internally.
+- If formulas are used, there may be an internal step that constructs exog_vc columns from the formula-derived terms. In such cases, a temporary dense version of exog_vc may be created.
+
+## Estimation Methods
+
+- MAP (fit_map)
+  - Uses Laplace approximation to the posterior of the model parameters.
+  - Appropriate for moderate-sized problems where a point estimate with an uncertainty approximation is sufficient.
+
+- Variational Bayes (fit_vb)
+  - Mean-field VB approximation to the posterior.
+  - Often faster on larger problems and provides a full approximate posterior, useful for uncertainty quantification and further Bayesian inference.
+
+## Examples
+
+Example 1: Simple Binomial GLMM with a single random intercept
+
+- Objective: Fit a logistic GLMM with one fixed effect and one random-effects column, using MAP.
+
+Code (illustrative):
+
+- (Note: replace with your actual data arrays.)
+
+- endog: binary response vector
+- exog: fixed effects design matrix (e.g., intercept + covariate)
+- exog_vc: random effects design matrix (e.g., random intercept for each group)
+- ident: labels assigning the same variance to columns sharing the same random-effect group
+
+```python
+import numpy as np
+import statsmodels.api as sm
+from mixed_glm import MixedGLM  # hypothetical import path
+
+# Example data (illustrative)
+endog = np.array([0, 1, 0, 1, 1, 0, 1])
+exog = np.column_stack([np.ones(len(endog)), np.random.randn(len(endog))])
+exog_vc = np.random.randn(len(endog), 2)  # two random-effect columns
+ident = np.array([0, 0])  # same variance for both random effects
+
+model = MixedGLM(endog, exog, exog_vc, ident, vcp_p=1.0, fe_p=1.0,
+                 family=sm.families.Binomial(),
+                 fep_names=['Intercept', 'x1'],
+                 vcp_names=['grp_sd1', 'grp_sd2'],
+                 vc_names=['grp1', 'grp2'])
+
+res = model.fit_map()
+print(res.summary())
+```
+
+Example 2: Poisson GLMM with a fixed effect and a random intercept per group (VB)
+
+```python
+# Example data (illustrative)
+endog = np.random.poisson(lam=2.0, size=100)
+exog = np.column_stack([np.ones(len(endog)), np.random.randn(len(endog))])
+exog_vc = np.random.randn(len(endog), 1)  # one random effect (random intercept)
+ident = np.array([0])
+
+model = MixedGLM(endog, exog, exog_vc, ident, vcp_p=0.5, fe_p=1.0,
+                 family=sm.families.Poisson(),
+                 fep_names=['Intercept', 'x1'],
+                 vcp_names=['grp_sd'],
+                 vc_names=['grp'])
+
+res_vb = model.fit_vb()
+print(res_vb.summary())
+```
+
+Example 3: Formula-based specification (conceptual)
+
+- If you construct exog_vc via Patsy formulas, columns derived from the same formula receive the same variance parameter automatically derived by ident-like grouping.
+
+```python
+# Pseudo-illustrative: actual implementation depends on the class API
+# You would define a design matrix using Patsy, then pass to MixedGLM
+# with appropriate ident handling implied by the formula groups.
+```
+
+Note: The actual formula-based construction details depend on how the MixedGLM class is integrated with Patsy in your environment.
+
+## Output and Results
+
+- The fit methods (fit_map and fit_vb) return a MixedGLMResults object.
+- The results object provides access to the estimated fixed-effects parameters, random-effect realizations, and variance components, along with standard diagnostics and a summary representation.
+
+Usage patterns
+
+- Use fit_map for quick point-estimate inference with an approximate posterior mode.
+- Use fit_vb when you need an approximate full posterior and/or faster scaling to larger problems.
+
+## References
+
+- UCLA Institute for Digital Research and Education: Introduction to generalized linear mixed models
+  https://stats.idre.ucla.edu/other/mult-pkg/introduction-to-generalized-linear-mixed-models
+
+- SAS documentation (general intro to mixed modeling)
+  https://support.sas.com/documentation/cdl/en/statug/63033/HTML/default/viewer.htm#statug_intromix_a0000000215.htm
+
+- Assessments of estimation methods for GLMMs with binary outcomes
+  https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3866838/
+
+## Notes for Developers
+
+- Ensure that exog_vc is efficiently stored as a sparse matrix when possible to reduce memory usage.
+- When using formulas, be mindful of temporary dense representations that may arise for exog_vc.
+- The documentation for MixedGLM is intended to reflect the behavior described in the initialization docstring, including the ident-based variance sharing and the prior structures for vcp and fe.
+
+## Related Components
+
+- statsmodels.genmod.families for GLM family definitions
+- Patsy for formula-based design matrices (if used in this module)
+- Statsmodels summary utilities for presenting results
+
+This document should serve as a comprehensive reference for developers working with the mixed_glm module and for users integrating MixedGLM into their Bayesian GLMM workflows.

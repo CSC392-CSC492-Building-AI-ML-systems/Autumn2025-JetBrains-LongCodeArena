@@ -1,0 +1,162 @@
+# Operations API
+
+Introduction
+------------
+This module provides the core classes for representing and manipulating schema
+modification operations in migrations. It defines a generic MigrateOperation base
+class, along with concrete implementations for adding and dropping constraints.
+The objects produced by this module are used by the autogeneration and runtime
+migration systems to describe and apply changes to database schemas.
+
+Key concepts
+------------
+- MigrateOperation: Base class for all migration operation objects. Includes an
+  info dictionary, a reverse operation, and a representation suitable for diffs.
+
+- AddConstraintOp: Abstract base for operations that add constraints. Uses a
+  dispatcher to select a concrete subclass based on the constraint type
+  (e.g., foreign key, primary key, check). Subclasses implement to_constraint to
+  materialize a SQLAlchemy Constraint object.
+
+- DropConstraintOp: Concrete operation that drops a constraint. Supports both normal
+  and batch drop usage. Can reverse itself by producing the corresponding AddConstraintOp.
+
+- Dispatcher mechanism: AddConstraintOp.add_constraint_ops is a dispatcher that maps
+  constraint visit names to concrete AddConstraintOp implementations. The
+  @AddConstraintOp.register_add_constraint decorator registers handlers for
+  specific constraint types.
+
+- Reversible design: Each drop operation can be reversed to the corresponding add
+  operation via the _reverse attribute or via reverse().
+
+API overview
+------------
+- MigrateOperation
+  - info: dict
+  - reverse(self) -> MigrateOperation
+  - to_diff_tuple(self) -> Tuple[Any, ...]
+- AddConstraintOp(MigrateOperation)
+  - constraint_type(self) -> str (abstract)
+  - add_constraint_ops: Dispatcher
+  - register_add_constraint(type_: str) -> Callable
+  - from_constraint(constraint: Constraint) -> AddConstraintOp
+  - to_constraint(self, migration_context: Optional[MigrationContext] = None) -> Constraint
+  - reverse(self) -> DropConstraintOp
+  - to_diff_tuple(self) -> Tuple[str, Constraint]
+- DropConstraintOp(MigrateOperation)
+  - __init__(self, constraint_name, table_name, type_: Optional[str] = None, *, schema=None, _reverse=None)
+  - reverse(self) -> AddConstraintOp
+  - to_diff_tuple(self) -> Tuple[str, SchemaItem]
+  - from_constraint(constraint: Constraint) -> DropConstraintOp
+  - drop_constraint(operations, constraint_name, table_name, type_: Optional[str] = None, *, schema: Optional[str] = None) -> None
+  - batch_drop_constraint(operations, constraint_name, type_: Optional[str] = None) -> None
+
+Usage notes
+-----------
+- Creating a drop constraint operation via the public API:
+  - For a single constraint drop:
+    - DropConstraintOp.drop_constraint(operations, constraint_name, table_name, type_=…, schema=…)
+      - constraints: constraint_name is the name of the constraint to drop.
+      - table_name specifies the table containing the constraint.
+      - type_ helps disambiguate the constraint type (e.g., "foreignkey", "primary",
+        "unique", or "check") on some dialects.
+      - schema is optional and controls the schema context for the operation.
+  - For batch operations (within a batch migration context):
+    - BatchOperations.batch_drop_constraint(batch_operations, constraint_name, type_=…)
+
+- Reversing operations:
+  - DropConstraintOp.reverse() returns the corresponding AddConstraintOp for the
+    constraint that was dropped (via to_constraint()).
+  - Conversely, AddConstraintOp.reverse() yields a DropConstraintOp.
+
+- Converting constraints to operations:
+  - AddConstraintOp.from_constraint(constraint) uses the dispatcher to select the
+    appropriate AddConstraintOp subclass based on constraint.__visit_name__.
+
+- Reconstructing constraints from operations:
+  - DropConstraintOp.to_constraint() relies on the associated _reverse AddConstraintOp
+    to reconstruct the original constraint. If _reverse is not provided, attempting
+    to_constraint() raises a ValueError.
+
+Code examples
+-------------
+Example 1: Drop a foreign key constraint (single operation)
+
+```python
+from mypackage.operations import DropConstraintOp
+
+# Example values; in real usage, these come from your migration context
+constraint_name = "fk_user_profile_id"
+table_name = "user_profile"
+
+# Drop a foreign key constraint
+DropConstraintOp.drop_constraint(
+    operations=my_ops,         # an Operations instance
+    constraint_name=constraint_name,
+    table_name=table_name,
+    type_="foreignkey",
+    schema=None
+)
+```
+
+Example 2: Batch drop a constraint (within batch context)
+
+```python
+from mypackage.operations import BatchOperations
+
+# batch_ops is a BatchOperations instance tied to the current batch context
+BatchOperations.batch_drop_constraint(
+    batch_ops,            # a BatchOperations instance
+    constraint_name="chk_active",
+    type_="check"
+)
+```
+
+Example 3: Reversing a drop (conceptual)
+
+```python
+# Assuming you have a DropConstraintOp instance with a corresponding _reverse
+drop_op = DropConstraintOp("fk_user_profile_id", "user_profile", type_="foreignkey", _reverse=add_op)
+reverse_op = drop_op.reverse()
+# reverse_op is an AddConstraintOp representing the addition of the dropped constraint
+```
+
+Edge cases and considerations
+-----------------------------
+- to_diff_tuple relies on the presence of a corresponding _reverse AddConstraintOp to
+  reconstruct the Constraint. If _reverse is missing, to_diff_tuple and to_constraint
+  may fail; use reverse()/from_constraint() patterns to ensure reversibility.
+
+- constraint_name may be optional for internal representations, but for practical
+  migration usage you typically provide a concrete constraint_name to identify the
+  constraint being dropped.
+
+- The type_ parameter affects dialect-specific handling (e.g., MySQL) and helps
+  disambiguate the constraint kind when multiple constraints exist on a table.
+
+- This module is designed to work with the broader migration framework (schema
+  autogeneration, rewriters, and runtime migrations). Ensure integration with
+  MigrationContext, Rewriter, and the runtime/migration scripts as appropriate.
+
+Edge-draft API reference
+------------------------
+- MigrateOperation
+  - info: dict
+  - reverse(self) -> MigrateOperation
+  - to_diff_tuple(self) -> Tuple[Any, ...]
+
+- AddConstraintOp
+  - constraint_type(self) -> str
+  - from_constraint(constraint: Constraint) -> AddConstraintOp
+  - to_constraint(self, migration_context: Optional[MigrationContext] = None) -> Constraint
+  - reverse(self) -> DropConstraintOp
+  - to_diff_tuple(self) -> Tuple[str, Constraint]
+
+- DropConstraintOp
+  - drop_constraint(operations, constraint_name, table_name, type_: Optional[str] = None, *, schema: Optional[str] = None) -> None
+  - batch_drop_constraint(operations, constraint_name, type_: Optional[str] = None) -> None
+  - from_constraint(constraint: Constraint) -> DropConstraintOp
+  - reverse(self) -> AddConstraintOp
+  - to_diff_tuple(self) -> Tuple[str, SchemaItem]
+
+End of documentation

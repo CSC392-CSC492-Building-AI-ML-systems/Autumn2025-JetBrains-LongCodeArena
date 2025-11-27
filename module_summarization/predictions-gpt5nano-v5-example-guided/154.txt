@@ -1,0 +1,186 @@
+Connecting Steps Together
+==========================
+
+Overview
+--------
+This document describes how steps are represented and connected to form a
+computational graph in the build system. It focuses on the two core
+constructs:
+
+- Edge: a directed connection between a source and a destination
+- Step: a runnable unit with defined inputs and outputs, configured via YAML
+
+Connections are made by pairing an output handle from one step to an input handle of another step. These handles are simple, structured tokens that identify the step, the side (inputs/outputs), and the specific port.
+
+Key Components
+--------------
+- Edge
+  - Represents a directed connection between two handles.
+  - Basic usage:
+    - src and dst can be any objects that identify handles (e.g., the tuple returned by a Step handle method).
+  - API:
+    - Edge.__init__(src, dst)
+    - Edge.get_src()
+    - Edge.get_dst()
+
+- Step
+  - Models a build step configured via a YAML file.
+  - Core configuration is loaded from configure.yml, with defaults and validation applied.
+  - Exposes handles for inputs and outputs that can be connected with Edges.
+  - Important fields and behavior (as evidenced by the implementation):
+    - Step initialization reads a YAML path, validating presence of a "name" field.
+    - Inputs/outputs are normalized (removed if empty).
+    - Outputs may use shorthand forms that are expanded to real file mappings.
+    - Commands default to ['true'] when not provided or empty.
+    - Each command is kept as a string (booleans are coerced to strings).
+    - Metadata such as step_dir and source are stored for later use.
+  - API surface (highlights):
+    - clone(): shallow copy with deep-copied configuration for safe reuse.
+    - get_input_handle(name): returns a handle (step_name, 'inputs', input_name).
+    - get_output_handle(name): returns a handle (step_name, 'outputs', output_name).
+    - i(name) / o(name): syntactic sugar for input/output handles.
+    - all_input_handles(): list of all input handles for the step.
+    - all_output_handles(): list of all output handles for the step.
+    - extend_inputs(new_list): extend inputs list.
+    - extend_outputs(new_list): extend outputs list.
+    - pre_extend_commands(new_list): prepend commands.
+    - extend_commands(new_list): append commands.
+
+Usage
+-----
+Create and prepare steps, then connect them with Edge instances.
+
+Example: creating two steps and connecting an output to an input
+Code (illustrative; assumes steps are properly configured in the repository):
+
+- from <module> import Step, Edge
+- a = Step('/path/to/stepA')        # Load step A configuration
+- b = Step('/path/to/stepB')        # Load step B configuration
+- src = a.o('out_name')             # Output handle from step A
+- dst = b.i('in_name')              # Input handle on step B
+- connection = Edge(src, dst)       # Create a directed connection
+
+Notes:
+- The actual integration with a graph manager (to schedule or verify
+  the execution order) would use Edge instances to build the connectivity.
+- Handles are tuples of the form:
+  - Input handle: (step_name, 'inputs', input_name)
+  - Output handle: (step_name, 'outputs', output_name)
+
+Inspecting Step Handles
+Example usage of Step handles:
+
+- inputs:
+  - a.all_input_handles() returns a list like [( 'stepA', 'inputs', 'in1' ), ...]
+- outputs:
+  - a.all_output_handles() returns [( 'stepA', 'outputs', 'out1' ), ...]
+
+- Accessors:
+  - a.i('in1') is equivalent to a.get_input_handle('in1')
+  - a.o('out1') is equivalent to a.get_output_handle('out1')
+
+YAML and Configuration Details
+------------------------------
+- Step configuration is loaded from a YAML file named configure.yml.
+- Validation ensures:
+  - A 'name' field exists in the YAML data.
+  - Empty inputs/outputs blocks are removed.
+  - Outputs that are tagged or shorthand are validated to be a single key/value pair.
+  - If commands are missing or empty, they default to [ 'true' ].
+  - Commands are stored as strings (booleans converted to lowercase strings).
+- Output shorthand expansion:
+  - If an output is provided as a dict with a None key and a value f,
+    it is replaced with a mapping where the basename of f is the key.
+
+Internal metadata
+- step_dir: relative path to the step directory (used when instancing steps in a build).
+- source: absolute path to the YAML file’s directory.
+- _config: dictionary holding the loaded YAML data plus derived metadata.
+
+Code Snippets from the Source (Reference)
+-----------------------------------------
+- Edge class:
+  - class Edge:
+      def __init__( s, src, dst ):
+        s.src = src
+        s.dst = dst
+
+      def get_src( s ):
+        return s.src
+
+      def get_dst( s ):
+        return s.dst
+
+- Step initialization highlights:
+  - data = read_yaml( yaml_path )
+  - assert 'name' in data.keys()
+  - if 'inputs' in data.keys(): ...
+  - if 'outputs' in data.keys(): ...
+  - if 'commands' not in data.keys(): data['commands'] = [ 'true' ]
+  - for i, c in enumerate( data['commands'] ): ...
+  - if 'outputs' in data.keys(): ... (expand shorthand)
+  - s.step_dir = os.path.relpath( os.path.dirname( yaml_path ), os.getcwd() )
+  - data['source'] = os.path.dirname( os.path.abspath( yaml_path ) )
+  - s._config.update( data )
+
+- Step handles:
+  - def get_input_handle( s, f ):
+      assert s._config['inputs']
+      assert f in s._config['inputs']
+      handle = ( s._config['name'], 'inputs', f )
+      return handle
+
+  - def get_output_handle( s, f ):
+      assert s._config['outputs']
+      outputs = s.all_outputs()
+      assert f in outputs
+      handle = ( s._config['name'], 'outputs', f )
+      return handle
+
+  - def i( s, name ): return s.get_input_handle( name )
+  - def o( s, name ): return s.get_output_handle( name )
+
+  - def all_input_handles( s ):
+      if 'inputs' not in s._config.keys(): return []
+      input_handles = [ s.get_input_handle( name ) for name in s._config['inputs'] ]
+      return input_handles
+
+  - def all_output_handles( s ):
+      if 'outputs' not in s._config.keys(): return []
+      outputs = s.all_outputs()
+      output_handles = [ s.get_output_handle( name ) for name in outputs ]
+      return output_handles
+
+  - def extend_inputs( s, new_list ):
+      try: s._config['inputs']
+      except KeyError: s._config['inputs'] = []
+      s._config['inputs'].extend( new_list )
+
+  - def extend_outputs( s, new_list ):
+      try: s._config['outputs']
+      except KeyError: s._config['outputs'] = []
+      s._config['outputs'].extend( new_list )
+
+  - def pre_extend_commands( s, new_list ):
+      try: s._config['commands']
+      except KeyError: s._config['commands'] = []
+      s._config['commands'][:0] = new_list
+
+  - def extend_commands( s, new_list ):
+      try: s._config['commands']
+      except KeyError: s._config['commands'] = []
+      s._config['commands'].extend( new_list )
+
+Connecting Across Steps
+-----------------------
+- The graph is formed by connecting output handles to input handles via Edge objects.
+- A downstream Step may declare inputs that correspond to the outputs of upstream Steps.
+- The YAML-driven configuration combined with handle-based connections enables dynamic, data-driven pipeline graphs.
+
+Limitations and Notes
+---------------------
+- The Graph management API (how edges are registered, validated, and scheduled) is not shown here; Edge and Step provide the primitives for representing and querying connections.
+- The Step class expects properly formed YAML data; violations trigger assertions to fail fast.
+- The details of how outputs are expanded or how tags are expanded into real file paths depend on the provided YAML and the surrounding utilities (e.g., read_yaml, write_yaml, get_top_dir).
+
+This documentation focuses on the mechanisms that enable Connecting Steps Together: the Edge abstraction for connections, the Step model with input/output handles, and the associated APIs to inspect and extend step configurations.

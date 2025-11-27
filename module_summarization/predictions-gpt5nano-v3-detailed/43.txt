@@ -1,0 +1,175 @@
+Config usage
+============
+
+Overview
+--------
+This document describes the configuration system built around ConfigParser in this codebase. It extends Python's configparser to provide:
+
+- A structured set of default configuration values
+- Support for including other configuration files (including nested includes)
+- Environment-variable expansion within defaults
+- Optional integration with Zookeeper-backed configuration sources
+- A lifecycle that emphasizes a single, well-defined load process
+
+At a glance, you typically create a ConfigParser, add the default values, and then read your configuration files. The parser then merges defaults with the file contents, performs environment-variable expansion when appropriate, and handles includes.
+
+Class and relationships
+-----------------------
+- ConfigParser (subclass of configparser.ConfigParser)
+  - _default_values: class-level dictionary containing the default sections and options
+  - add_defaults(dictionary): merge user-supplied defaults into the current configuration
+  - _traverse_includes(includes, this_dir): read and process included configuration files (supports nested includes and zookeeper-based includes)
+  - _load(): internal lifecycle method to initialize state and kick off loading from the configured config file
+  - Other helpers (e.g., _load_dir_stack, _included) support include handling and prevention of infinite loops
+
+Key configuration structure
+---------------------------
+Defaults are organized into sections such as general, asab:metrics, asab:doc, logging, logging:console, logging:syslog, logging:file, library, passwords, and housekeeping. A special environment-driven default is provided for Zookeeper servers (ASAB_ZOOKEEPER_SERVERS).
+
+Default values (highlights)
+----------------------------
+- general
+  - config_file: path to a configuration file (read at load time)
+  - tick_period: 1 second
+  - var_dir: platform-appropriate path derived from the process name
+  - pidfile: a special value (!) indicating platform-specific pid file location
+  - working_dir, uid, gid: optional runtime values
+- asab:metrics
+  - native_metrics: "true"
+  - web_requests_metrics: False (disabled by default)
+  - expiration: 60
+- asab:doc
+  - default_route_tag: "module_name"
+- logging
+  - verbose: environment-controlled
+  - app_name: derived from the executable name
+  - sd_id: "sd"
+  - level: "NOTICE"
+  - levels: ""
+- logging:console
+  - format, datefmt: standard human-readable formats
+- logging:syslog
+  - enabled: "false"
+  - address: OS-specific default (e.g., /dev/log on many systems)
+  - format: OS-specific default
+- logging:file
+  - path, format, datefmt, backup_count, backup_max_bytes, rotate_every
+- library
+  - azure_cache: "false" or a path
+- passwords
+  - a dedicated section for securely-stored passwords (not shown in API)
+- housekeeping
+  - at, limit, run_at_startup: scheduling related defaults
+- zookeeper
+  - servers: derived from ASAB_ZOOKEEPER_SERVERS if provided
+
+Usage
+-----
+Code examples illustrate common usage patterns and typical workflows.
+
+Basic usage: create parser, add defaults, read config
+-----------------------------------------------------
+```python
+from mypackage.config import ConfigParser
+
+# Create parser and preload defaults
+cp = ConfigParser()
+cp.add_defaults(ConfigParser._default_values)
+
+# Read user configuration (overrides defaults)
+cp.read('/etc/myapp/config.ini')
+cp.read('/home/user/.config/myapp/config.ini')
+
+# Access configuration values
+tick = cp.getint('general', 'tick_period')
+log_level = cp.get('logging', 'level')
+```
+
+Environment-variable expansion in defaults
+-------------------------------------------
+Some defaults may contain environment variables and are expanded on insertion.
+
+```ini
+[general]
+var_dir = ${HOME}/.myapp
+```
+
+Or when adding defaults programmatically:
+```python
+cp.add_defaults({
+    'general': {'var_dir': '${HOME}/.myapp'}
+})
+```
+
+The add_defaults implementation expands variables when a value contains a "$":
+- If a value contains "$", os.path.expandvars(value) is used before setting.
+
+Includes and nested includes
+----------------------------
+Supported via _traverse_includes. You can include other configuration files (and “zookeeper:” based includes). Nested includes are supported; a file can include another file, which in turn can include others. Each included file is read exactly once; attempting to include the same file again logs a warning and skips it.
+
+Example in a config file:
+```ini
+[general]
+include = /etc/myapp/common.ini
+```
+
+Notes:
+- Includes may be separated by newline or spaces.
+- If a path in an include list is already loaded, a warning is emitted and loading continues.
+- zookeeper-based includes are recognized by a prefix like "zookeeper" and are handled by a dedicated mechanism (not shown in the snippet).
+
+Zookeeper integration
+---------------------
+If ASAB_ZOOKEEPER_SERVERS is set, a default zookeeper server list is provided under the zookeeper section by add_defaults at startup:
+```python
+_config_defaults['zookeeper'] = {'servers': os.environ['ASAB_ZOOKEEPER_SERVERS']}
+```
+This enables loading configuration from Zookeeper-backed sources via the internal mechanisms.
+
+Single-load lifecycle and internal state
+----------------------------------------
+- _load() initializes internal structures (e.g., _load_dir_stack, config_contents_list, config_name_list).
+- It is intended to be called once; subsequent calls have undefined behavior.
+- It reads the configured default file (if config_file is non-empty) and triggers include processing as needed.
+- The internal flow tracks loaded files to avoid infinite loops and maintain a consistent final configuration.
+
+Important considerations and edge cases
+--------------------------------------
+- Defaults are added to the current configuration only if keys do not already exist in their sections.
+- Keys are normalized with optionxform (lowercasing by default); existing keys are not overwritten by defaults.
+- If a value contains a "$", environment variables are expanded during default insertion.
+- The pidfile value ("!") is a special token requiring platform-specific resolution; consult surrounding code or runtime behavior for specifics.
+- The include mechanism can lead to multiple files contributing to a single effective configuration; order and precedence follow the load sequence.
+- If config_file is empty or missing, no file-based loading occurs; only the merged defaults are used.
+- The system supports explicit use of Zookeeper servers via an environment variable (ASAB_ZOOKEEPER_SERVERS).
+
+API reference (summary)
+-----------------------
+- ConfigParser(configparser.ConfigParser): subclass with enhanced defaulting and include features
+- _default_values: class-level dict of default sections and options
+- add_defaults(dictionary: dict) -> None: merge defaults into the current configuration
+- _traverse_includes(includes: str, this_dir: str) -> None: load included files (with nested and zookeeper support)
+- _load() -> None: internal single-use loading lifecycle
+
+Usage example: end-to-end
+-------------------------
+- Define defaults
+- Read config files
+- Access values
+- Rely on include processing for modular configuration
+
+```python
+from mypackage.config import ConfigParser
+
+cp = ConfigParser()
+cp.add_defaults(ConfigParser._default_values)
+
+cp.read('/etc/myapp/config.ini')
+cp.read('/home/user/.config/myapp/config.ini')
+
+tick = cp.getint('general', 'tick_period')
+log_format = cp.get('logging:console', 'format')
+```
+
+This provides a concise, practical overview of how to work with the ConfigParser-based configuration system, including how defaults interact with files, how includes are handled, and considerations for edge cases and environment integration.

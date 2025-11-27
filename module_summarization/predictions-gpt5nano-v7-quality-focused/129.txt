@@ -1,0 +1,134 @@
+Table Data
+==========
+
+Overview
+--------
+This document describes how table data is represented and validated within the table subsystem. It covers the in-memory data model for tables, how changes are observed, and the built-in verification framework used to detect and optionally fix issues in table data.
+
+Data model
+----------
+- A Table consists of a collection of columns. Each column has a name and a data type, and all columns are aligned by row index.
+- Rows are represented by corresponding entries across all columns; operations on the table are typically vectorized over columns.
+- The in-memory representation emphasizes efficient numeric work and predictable behaviors when indexing, slicing, and performing operations across columns.
+
+Change notification (NotifierMixin)
+-----------------------------------
+Tables can notify interested listeners when their data or structure changes. This is accomplished via the NotifierMixin, which provides:
+- A lightweight event mechanism for internal components to register listeners (_add_listener) and be notified of changes (_notify).
+- A convention that listeners implement update methods (e.g., _update_change_type) to react to specific change types.
+
+Example
+-------
+class Table(NotifierMixin):
+    def __init__(self, data):
+        self.data = data
+
+    def update_data(self, new_data):
+        self.data = new_data
+        self._notify("change", "data")
+
+class Listener:
+    def _update_change_type(self, what, *args, **kwargs):
+        print(f"Table changed: {what}, details: {args}")
+
+tbl = Table([1, 2, 3])
+lst = Listener()
+tbl._add_listener(lst)
+tbl.update_data([4, 5, 6])  # Listener receives a notification
+
+Verification framework
+----------------------
+A robust verification framework ensures table data integrity and provides flexible reporting and automatic fixes. The core components are:
+
+- VerifyError and VerifyWarning
+  - Exception and warning classes used to report verification failures and issues.
+
+- VERIFY_OPTIONS
+  - A list of supported verification modes, including combinations such as fix, warn, ignore, and their variants (e.g., fix+warn, silentfix+ignore).
+
+- _Verify
+  - A mixin-like utility providing the verification workflow.
+  - run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+    - Executes the verification with a selected option.
+    - Returns a tuple (fixable, text) indicating whether the issue is fixable and the human-readable message.
+    - If the option implies reporting (warn/exception), the issue is not fixed automatically; otherwise, an optional fix is executed if provided.
+  - verify(option="warn")
+    - Orchestrates verification for all values in the instance.
+    - Validates the option, delegates to self._verify(opt) to collect errors, and formats the results for reporting or raising.
+    - Supports combined options like "fix+warn", "silentfix+ignore", etc.
+    - Produces messages like “Verification reported errors:” and a trailing note about zero-based indexing.
+    - Behavior varies by option:
+      - ignore: returns immediately
+      - fix/silentfix: may apply fixes; reporting is controlled by the companion report option
+      - warn: issues are reported as warnings
+      - exception: issues raise VerifyError
+
+- _ErrList
+  - A nested list structure used to accumulate and render verification errors.
+  - Each top-level element is typically a pair (fixable, message), where fixable is a boolean indicating whether the issue can be fixed.
+  - Nested _ErrList items represent deeper levels of the error hierarchy.
+  - __str__ and iter_lines provide a readable, indented representation of errors.
+  - iter_lines(filter=None, shift=0)
+    - Traverses the nested structure and yields (header, indented_message) pairs suitable for display.
+    - Supports an optional filter to select or suppress specific messages.
+  - The structure supports a unit label (e.g., "Element", "Row") used as a header in nested sections.
+
+Usage pattern
+-------------
+To implement verification for a table-like object, define a _verify method that builds and returns an _ErrList describing issues. The verification flow then decides, based on the option, whether to report, raise, or fix issues.
+
+Example: a simple table verify implementation
+---------------------------------------------
+- A table must have exactly 3 rows.
+- Missing values are fixable by replacing None with a default.
+
+from astropy_verification import _Verify, _ErrList  # illustrative import path
+
+class SimpleTable(_Verify):
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def _verify(self, opt):
+        errs = _ErrList(unit="Row")
+
+        # Must have exactly 3 rows
+        if len(self.rows) != 3:
+            errs.append((False, f"Table must have 3 rows; found {len(self.rows)}"))
+
+        # Fixable example: replace None with 0
+        if any(r is None for r in self.rows):
+            # This is a fixable issue; provide a fix callable
+            def fix():
+                self.rows = [0 if r is None else r for r in self.rows]
+            errs.append((True, "Null values detected; can fix by replacing with 0"))
+            # In a more elaborate example, you could attach sub-errors here as nested _ErrList
+
+        return errs
+
+# Usage
+tbl = SimpleTable([1, None, 3])
+tbl.verify("fix+warn")
+# If fixable issues exist, they are fixed by `fix()` and reported according to the option.
+
+Notes
+-----
+- The verification system prints a header "Verification reported errors:" and appends a note about zero-based indexing for FITS-related contexts (as shown in the implementation).
+- When using silentfix, reporting of fixable issues is suppressed; if issues are not fixable, they may still be reported depending on the option (e.g., warn vs. exception).
+
+Recommended practices
+---------------------
+- Use fix+warn for issues you want to automatically address when safe, while still warning the user for visibility.
+- Use exception for non-fixable, critical issues that must halt execution.
+- Use ignore for non-critical checks where you want to suppress reports entirely.
+- Structure complex verification results with nested _ErrList to provide clear, hierarchical diagnostics to users.
+
+API reference (high level)
+--------------------------
+- VerifyError: exception class raised on verification failures.
+- VerifyWarning: warning class for verification issues.
+- VERIFY_OPTIONS: allowed verification option strings.
+- _Verify: mixin-like helper providing run_option and verify methods.
+- _ErrList: nested error list structure for reporting verification results.
+- NotifierMixin: lightweight event system enabling change notifications for table data.
+
+This documentation focuses on how table data can be represented, observed for changes, and validated using the built-in verification framework. Use the examples here to implement and integrate verification logic in your table data workflows.

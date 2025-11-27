@@ -1,0 +1,176 @@
+# Ploterr — Plot error bars and confidence intervals
+
+## Overview
+The Ploterr command generates plots of iterative expectations together with their confidence intervals from WESTPA data. It provides a common plotting base for rendering plots and a dedicated subcommand for plotting arbitrary HDF5 datasets that contain expectation and CI information.
+
+Key features:
+- Flexible axis scaling (linear, log, symlog) and axis ranges
+- Customizable axis labels and title
+- Output to various formats based on filename extension (e.g., PDF, PNG)
+- Optional terminal plotting mode for environments without a display
+- Progress reporting during data loading
+
+The implementation centers on two main components:
+- CommonPloterrs: base plotting functionality shared by Ploterr subcommands
+- GenericIntervalSubcommand: concrete subcommand that plots generic generic interval data from a specified HDF5 dataset
+
+Code excerpts illustrating the core behavior:
+- Core plotting routine
+  - do_plot handles extracting iteration indices and plotting expected values with CI bounds, applying axis scales and ranges, and saving to an output file.
+
+  ```
+  def do_plot(self, data, output_filename, title=None, x_range=None, y_range=None, x_label=None, y_label=None):
+      if not output_filename:
+          return
+
+      title = title or self.title
+      x_range = x_range or self.xrange
+      y_range = y_range or self.yrange
+      x_label = x_label or self.xlabel
+      y_label = y_label or self.ylabel
+
+      iters = data['iter_stop'] - 1
+
+      pyplot.figure()
+      pyplot.plot(iters, data['expected'], color='black')
+      pyplot.plot(iters, data['ci_lbound'], color='gray')
+      pyplot.plot(iters, data['ci_ubound'], color='gray')
+
+      pyplot.gca().set_xscale(self.xscale)
+      pyplot.gca().set_yscale(self.yscale)
+
+      if title:
+          pyplot.title(title)
+
+      if x_range is not None:
+          pyplot.xlim(x_range)
+
+      if y_range is not None:
+          pyplot.ylim(y_range)
+
+      if x_label:
+          pyplot.xlabel(x_label)
+
+      if y_label:
+          pyplot.ylabel(y_label)
+
+      pyplot.savefig(output_filename)
+  ```
+- Base plotting options
+  - CommonPloterrs.add_args defines options for axis scaling, ranges, labels, and an option to plot in a terminal instead of a graphical window.
+
+  ```
+  pogroup = self.plot_options_group = parser.add_argument_group('plot options')
+  pogroup.add_argument(
+      '--xscale',
+      choices=['linear', 'log','symlog'],
+      default='linear',
+      help='''Use "linear", "log", or "symlog" scaling for the x axis.
+                       (Default: %(default)s).''',
+  )
+  pogroup.add_argument(
+      '--yscale',
+      choices=['linear', 'log','symlog'],
+      default='linear',
+      help='''Use "linear", "log", or "symlog" scaling for the y axis.
+                       (Default: %(default)s).''',
+  )
+  pogroup.add_argument(
+      '--xrange',
+      help='''Restrict X range to XRANGE, which must be formatted as "xmin,xmax".
+                       (Default: determined by input data.)''',
+  )
+  pogroup.add_argument(
+      '--yrange',
+      help='''Restrict Y range to YRANGE, which must be formatted as "ymin,ymax".
+                       (Default: determined by input data.)''',
+  )
+  pogroup.add_argument('--xlabel', help='''Use XLABEL for the x-axis label. (Default: varies.)''')
+  pogroup.add_argument('--ylabel', help='''Use YLABEL for the y-axis label. (Default: varies.)''')
+  pogroup.add_argument('--title', help='''Use TITLE for the plot title. (Default: varies.)''')
+  pogroup.add_argument('--terminal', '-t', dest='plotting', action='store_true', help='''Plot output in terminal.''')
+  ```
+
+- Data loading and validation flow (high level)
+  - GenericIntervalSubcommand.process_args parses the dataset spec, resolves the HDF5 file and dataset, and prepares a slice for indexing.
+
+  ```
+  (pathname, slicestr) = re.search(r'([^[]+)(\[[^\]]+\])?$', args.dsspec).groups()
+  if slicestr:
+      sl = eval('np.index_exp' + slicestr)
+  else:
+      sl = np.index_exp[...]
+  self.h5file, self.h5dset = h5io.resolve_filepath(pathname, mode='r')
+  self.dset_slice = sl
+  ```
+
+- Data requirements
+  - Plotting expects the dataset to provide iterable data with fields including iter_start, iter_stop, expected, ci_lbound, and ci_ubound. A dataset must be 1-dimensional for plotting.
+
+  ```
+  reqd_fields = set(['iter_start', 'iter_stop', 'expected', 'ci_lbound', 'ci_ubound'])
+
+  self.progress.indicator.new_operation('loading data')
+  data = self.h5dset[self.dset_slice]
+
+  if data.ndim != 1:
+      raise TypeError('dataset to be plotted must be 1-dimensional')
+  ```
+
+## Usage
+
+Ploterr provides a flexible interface to plot error bars from WESTPA data. The primary subcommand shown here is GenericIntervalSubcommand, which plots arbitrary HDF5 datasets containing expectation and CI data.
+
+- Subcommand: generic
+  - Description: Plots generic expectation/CI data from a user-specified HDF5 file and dataset.
+  - Syntax: ploterr generic FILENAME/PATH[SLICE] [options]
+  - Example:
+    - Plot a rate-evolution dataset from kinavg.h5:
+      ploterr generic kinavg.h5/rate_evolution[:,0,1] -o rate_evolution_errbars.pdf
+  - Options (examples):
+    - -o, --output: Output file name and format (e.g., rate_evolution_errbars.pdf)
+    - --xrange, --yrange: Restrict axis ranges, e.g., --xrange 0,100
+    - --xscale, --yscale: Axis scaling (linear, log, symlog)
+    - --xlabel, --ylabel, --title: Axis labels and plot title
+    - --terminal, -t: Plot output in terminal instead of a graphical window
+
+- Global behavior
+  - If a display is available and the user does not request terminal mode, plots are rendered with matplotlib.
+  - If no display is available or terminal mode is requested, a text-based interface is used.
+  - Output format is inferred from the filename extension of the --output value (e.g., .pdf, .png).
+
+CLI example with common options:
+- ploterr generic kinavg.h5/rate_evolution[:,0,1] -o rate_evolution_errbars.pdf --xrange 0,100 --yrange 0,1 --xlabel "Iteration" --ylabel "Rate" --title "Rate evolution with CI"
+
+Note on interface choice:
+- The interface is chosen based on the environment and options:
+  - If args.plotting is True or DISPLAY is not set, the interface defaults to text.
+  - Otherwise, the interface uses matplotlib for graphical plotting.
+
+## Details
+
+- Data model and interpretation
+  - The Ploterr command expects datasets that provide a progression of an estimated quantity (e.g., rate, rate evolution) and corresponding confidence interval bounds. The data keys typically include:
+    - iter_start, iter_stop: iteration boundaries for the data
+    - expected: the expected value(s) over iterations
+    - ci_lbound, ci_ubound: lower and upper bounds of the confidence interval
+  - The x-axis values are computed as iters = data['iter_stop'] - 1.
+
+- Plot customization
+  - Axes can be scaled with --xscale and --yscale, supporting linear, log, and symlog scaling.
+  - Ranges can be restricted with --xrange and --yrange using the format xmin,xmax and ymin,ymax, respectively.
+  - Labels and title can be customized with --xlabel, --ylabel, and --title.
+  - Output is saved to the file specified by --output. The file format is deduced from the extension.
+
+- Dependencies and environment
+  - Requires h5py, numpy, and the WESTPA plotting utilities (WESTMasterCommand, WESTSubcommand, ProgressIndicatorComponent, Plotter).
+  - Matplotlib is used when a display is available; otherwise, a text interface is used.
+  - Logging is configured for the ploterr module via a logger named 'ploterrs':
+    log = logging.getLogger('ploterrs')
+
+- Progress reporting
+  - The plotting flow uses a progress indicator to report loading progress while retrieving data from the HDF5 dataset.
+
+---
+
+This documentation highlights the Ploterr command's purpose, structure, and usage with emphasis on the GenericIntervalSubcommand for arbitrary HDF5 datasets containing expectation and CI data.

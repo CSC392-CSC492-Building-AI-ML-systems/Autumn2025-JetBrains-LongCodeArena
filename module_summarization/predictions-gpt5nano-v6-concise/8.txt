@@ -1,0 +1,224 @@
+Using review sessions
+=====================
+
+
+Overview
+--------
+
+A review session represents a focused, collaborative review of a set of items (for example, tasks, changesets, or media assets) within an ftrack-powered workflow. A review session groups the items under review, designates participants (reviewers and authors), collects comments, and records decisions (such as approval or requests for changes). This document describes the common concepts, lifecycle, and practical usage patterns for using review sessions from the ftrack API (via ftrack_api.Session).
+
+Key concepts
+------------
+
+- ReviewSession: A container object that groups one or more items to be reviewed, along with its metadata (name, description, state, participants, etc.).
+- ReviewItem: An item that is included in a review (e.g., a Task, a Version, or an Asset). Each ReviewSession can reference multiple ReviewItems.
+- ReviewComment: A comment added by a participant during the review. Comments may be attached to a specific item or to the session as a whole.
+- Participants: The set of users involved in the review (reviewers and optionally authors). Participants may have roles (e.g., reviewer, author, approver).
+- Status / State: The lifecycle status of a ReviewSession (for example: open, in_review, approved, changes_requested, closed).
+
+Typical lifecycle
+-----------------
+
+1. Create or locate a ReviewSession.
+2. Attach one or more items to review.
+3. Invite participants (reviewers and the author).
+4. Start the review (move from draft to open/in_review).
+5. Participants leave comments, raise issues, and propose changes.
+6. Reviewers (or the owner) make a decision (approve, request changes, or re-open).
+7. Finalize the review (close the session and propagate the decision to downstream work).
+
+Prerequisites
+-------------
+
+- A functioning ftrack server with ReviewSession support enabled.
+- The ftrack_api Python package available to your project.
+- Appropriate permissions to read/create ReviewSession entities and to add items and comments.
+- A connected ftrack.Session (or equivalent API surface) to interact with the server.
+
+How to use review sessions from the API
+--------------------------------------
+
+Note: The exact API names and capabilities for ReviewSession may depend on your server version and configuration. The following patterns describe common usage semantics and illustrate typical Python code shapes. Adapt the calls to match the actual API surface exposed by your ftrack server.
+
+1) Connecting to the server
+
+.. code-block:: python
+
+   from ftrack_api import Session
+
+   session = Session(
+       server_url='https://ftrack.example.com',
+       api_key='YOUR_API_KEY',
+       api_user='YOUR_USERNAME'
+   )
+
+2) Finding or creating a ReviewSession
+
+- To find an existing session by ID or by name.
+- To create a new session with metadata.
+
+.. code-block:: python
+
+   # Find by ID
+   review_session = session.query("ReviewSession where id is 'RS-1001'").one()
+
+   # Or search by name or criteria
+   review_session = session.query("ReviewSession where name is 'Code Review: UI changes'").one()
+
+   # Create a new review session (server must support creation)
+   new_session = session.create('ReviewSession', {
+       'name': 'Code Review: Feature XYZ',
+       'description': 'Review of the changes introduced in feature XYZ',
+       'state': 'open'  # initial state; may be 'draft' or similar depending on server
+   })
+   new_session = new_session  # type: ignore
+
+3) Attaching items to the review
+
+- Add one or more ReviewItems (e.g., Tasks, Versions, or other entities) to the session.
+
+.. code-block:: python
+
+   items_to_review = [
+       {'type': 'Task', 'id': 'T-123'},
+       {'type': 'Version', 'id': 'V-456'},
+   ]
+
+   for item in items_to_review:
+       review_session.add_item(item_type=item['type'], item_id=item['id'])
+
+4) Managing participants
+
+- Add reviewers and the author to the session.
+- Optionally assign roles or notification settings if supported.
+
+.. code-block:: python
+
+   review_session.add_participants([
+       {'type': 'user', 'id': 'user-alice', 'role': 'reviewer'},
+       {'type': 'user', 'id': 'user-bob', 'role': 'reviewer'},
+       {'type': 'user', 'id': 'user-charlie', 'role': 'author'},
+   ])
+
+5) Starting or progressing the review
+
+- Change the session's state to indicate that the review is active.
+
+.. code-block:: python
+
+   review_session.set_state('in_review')  # or 'open' / 'started' depending on server
+
+6) Adding comments during the review
+
+- Comments can be general to the session or attached to a specific item.
+
+.. code-block:: python
+
+   # General comment
+   review_session.add_comment(author_id='user-alice', text='Please verify the UI edge case on mobile.')
+
+   # Comment on a specific item
+   review_session.add_comment(
+       item_id='T-123',
+       author_id='user-bob',
+       text='Consider avoiding a network call in the initialization path.'
+   )
+
+7) Responding to comments and marking progress
+
+- Reviewers can reply to comments, resolve issues, or propose changes.
+- You may have dedicated methods for marking issues as resolved, or for approving a review.
+
+.. code-block:: python
+
+   review_session.resolve_comment(comment_id='C-901')  # if supported
+   review_session.approve()  # if a final approval action is exposed
+
+8) Finalizing the review
+
+- When all issues are resolved or the team agrees, finalize or close the session.
+
+.. code-block:: python
+
+   review_session.set_state('approved')  # or 'closed' depending on server
+
+9) Retrieving review results
+
+- Inspect the final status, comments, and item-level decisions.
+
+.. code-block:: python
+
+   print(review_session.name)
+   print(review_session.state)
+   for c in review_session.comments:
+       print(f"{c.author}: {c.text} (on {c.item_id if c.item_id else 'session'})")
+
+Notes and caveats
+-----------------
+
+- The ReviewSession API surface (methods like add_item, add_comment, set_state, approve) is illustrative. Your server may expose different method names or a REST/GraphQL interface. See your server’s API reference for the exact surface.
+- Some servers require explicit persistence calls (e.g., review_session.save()) after composing changes. Others apply changes immediately. Follow the persistence semantics of your environment.
+- Notifications: If your environment has event subscriptions or email notifications, participating users may receive updates automatically when items or comments are added. Ensure event hubs are configured if you rely on real-time updates.
+- Permissions: Review sessions may require specific permissions (view, edit, comment, approve). Check your role assignments to avoid permission-related errors.
+
+Best practices
+--------------
+
+- Scope reviews to a focused set of items to keep feedback actionable.
+- Include the author in the review to ensure changes are traceable back to the requester.
+- Use meaningful names and descriptions to quickly identify the purpose and scope of the review.
+- Leverage item-level comments to pin feedback to specific changes rather than the entire review.
+- Enforce a clear completion criteria (e.g., all issues resolved or explicit approval) before closing the session.
+
+Troubleshooting
+---------------
+
+- If you cannot find a ReviewSession by ID, verify that the ID exists and you have permission to view that session.
+- If adding items fails, confirm the item types and IDs exist and that the session has permission to reference them.
+- If notifications are not delivered, verify your event hub configuration and recipients’ email addresses or notification preferences.
+
+API reference (conceptual)
+--------------------------
+
+- ReviewSession
+  - create(data): Create a new review session with initial metadata.
+  - add_item(item_type, item_id): Attach a review item to the session.
+  - add_participants(list_of_participants): Add participants with optional roles.
+  - add_comment(item_id=None, author_id, text): Add a comment; item_id=None for session-level comments.
+  - set_state(state): Transition the session to a new lifecycle state (e.g., open, in_review, approved, closed).
+  - approve(), request_changes(): Convenience actions for common review outcomes.
+  - save() / persist(): Persist changes if the API requires explicit saves.
+  - comments: Iterable of ReviewComment objects attached to the session.
+  - items: Iterable of ReviewItem objects included in the session.
+- ReviewComment
+  - id
+  - author_id
+  - text
+  - item_id (optional)
+  - created_at
+- ReviewItem
+  - type (e.g., Task, Version)
+  - id
+  - status (e.g., addressed, unresolved)
+
+Migration and compatibility
+---------------------------
+
+If you are upgrading from an older workflow or server that used a different review concept, review sessions may map to a set of new entities or state transitions. Review the server release notes for any changes to:
+- entity types and field names
+- state machine transitions
+- available actions (approve, request_changes)
+- event notifications
+
+Appendix: sample end-to-end workflow
+------------------------------------
+
+- Create a new ReviewSession named "Sprint 12 – PRD changes" with a description of the scope.
+- Attach all changesets or Tasks that relate to the PRD.
+- Add reviewers (e.g., alice, bob) and include the author (carol).
+- Start the review; participants begin commenting.
+- Reviewers mark issues and propose changes; author addresses comments.
+- Once all issues are resolved, reviewers approve the session.
+- Close the session and propagate the decision to downstream tasks or releases.
+
+If you require concrete, server-specific examples, consult your server’s review-session API documentation or the endpoint reference shipped with your deployment.

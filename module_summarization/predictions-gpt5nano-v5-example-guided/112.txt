@@ -1,0 +1,145 @@
+# Generate documentation for this code
+
+## Overview
+This module provides plan generators for Bluesky workflows, focusing on reading detectors and scanning motors with integrated metadata support. It includes:
+
+- count: take a series of readings from detectors with optional per-shot customization and metadata.
+- list_scan: perform a multi-motor list scan (inner product) over specified motors and positions, with metadata and dynamic hints.
+- rel_list_scan: a placeholder for a relative-list-scan variant (not yet implemented).
+
+The plans are decorated with Bluesky preprocessors to manage staging, run-time metadata, and plan structure. Metadata is assembled into a consistent dictionary (_md) that describes the plan, its detectors, motors, points, and hints.
+
+Key dependencies include:
+- cytools (or a fallback to toolz) for partitioning paired arguments
+- plan_patterns for building inner-list-product scan patterns
+- Bluesky preprocessors for staging and run hints
+
+## Key Components
+
+- count(detectors, num=1, delay=None, *, per_shot=None, md=None)
+  - Take one or more readings from detectors.
+  - Parameters:
+    - detectors: list of 'readable' objects (detectors)
+    - num: number of readings to take (default 1); if None, capture until canceled
+    - delay: time delay between successive readings (scalar or iterable; default 0)
+    - per_shot: optional hook for inner-loop actions; signature def f(detectors) -> Generator[Msg]
+    - md: optional metadata dictionary
+  - Behavior:
+    - Builds an internal metadata dict (_md) including detector names, number of points, intervals, plan arguments, and hints.
+    - If per_shot is not provided, defaults to bps.one_shot.
+    - Uses decorators @bpp.stage_decorator(detectors) and @bpp.run_decorator(md=_md).
+    - Returns a generator that yields from an inner_count plan, which yields from bps.repeat(partial(per_shot, detectors), num=num, delay=delay).
+  - Notes:
+    - Delay can be iterable; must have at least num-1 entries to avoid ValueError during iteration.
+  - Example usage:
+    - plan = count([det1, det2], num=5, delay=[0, 0.1, 0.2, 0.3], md={'experiment': 'test'})
+
+- list_scan(detectors, *args, per_step=None, md=None)
+  - Scan over one or more variables in steps simultaneously (inner product).
+  - Parameters:
+    - detectors: list of 'readable' objects
+    - args: alternating motor (or settable object) and list of positions, e.g.
+      motor1, [p1, p2, ...], motor2, [q1, q2, ...], ...
+    - per_step: optional hook for inner-loop actions; signature def f(detectors, motor, step) -> plan
+    - md: optional metadata dictionary
+  - Behavior:
+    - Validates that the number of positional lists matches and that all lengths are equal.
+    - Builds an _md with detectors, motors, number of points, and plan arguments.
+    - Derives x_fields from motors' hints to set default dimensions.
+    - Uses plan_patterns.inner_list_product to construct the full cycler and delegates to scan_nd for execution.
+  - Notes:
+    - If the lengths of the provided position lists are not the same, a ValueError is raised.
+    - The default dimensions are derived from motor hints if available.
+  - Example usage:
+    - list_scan(detectors, motor1, [0, 1, 2], motor2, [10, 20, 30], md={'plan': 'list_scan'})
+
+- rel_list_scan(detectors, *args, per_step=None, md=None)
+  - Scan over one variable in steps relative to the current position.
+  - Parameters mirror list_scan, but steps are relative to the current location.
+  - Status:
+    - Not yet implemented; marked as TODO.
+  - Example usage (not available until implemented):
+    - rel_list_scan(detectors, motor, [0.1, 0.5, 1.0])
+
+- Internal metadata structure (_md)
+  - For count:
+    - detectors: [det.name for det in detectors]
+    - num_points, num_intervals
+    - plan_args: {'detectors': [repr(det) for det in detectors], 'num': num}
+    - plan_name: 'count'
+    - hints: {}
+  - For list_scan:
+    - detectors: list of detector names
+    - motors: list of motor names
+    - num_points: length of each position list
+    - num_intervals: length - 1
+    - plan_args: {'detectors': [repr(d) for d in detectors], 'args': md_args, 'per_step': repr(per_step)}
+    - plan_name: 'list_scan'
+    - plan_pattern: 'inner_list_product'
+    - plan_pattern_module: plan_patterns.__name__
+    - plan_pattern_args: {'args': md_args}
+    - hints: with default dimensions derived from motor hints
+  - This metadata is updated with any user-provided md overrides.
+
+## Usage
+
+- Basic detector counting
+  - Example:
+    - plan = count([det1, det2], num=5, delay=[0, 0.1, 0.2, 0.3])
+    - RE(plan)
+
+- List scan across motors
+  - Example:
+    - plan = list_scan([det1], motorA, [0, 1, 2], motorB, [10, 20, 30])
+    - RE(plan)
+
+- Provide metadata
+  - Example:
+    - plan = count([det1], num=3, md={'experiment': 'alpha'})
+    - RE(plan)
+
+## Details
+
+- Decorators
+  - count uses:
+    - @bpp.stage_decorator(detectors): ensures detectors are staged appropriately during the plan.
+    - @bpp.run_decorator(md=_md): attaches metadata to the run for logging and provenance.
+- Per-shot customization
+  - The per_shot callback, if provided, is invoked for each inner loop step. If not provided, a default one_shot behavior is used.
+- Iterable delays
+  - If delay is an iterable, it must contain at least num - 1 entries to satisfy the plan's iteration requirements.
+- Helpers and dependencies
+  - partition (cytools or toolz) is used to split combined arguments into motor-position pairs.
+  - plan_patterns.inner_list_product(args) is used to build the full cycler for the list_scan plan.
+- Rel_list_scan TODO
+  - rel_list_scan is currently a placeholder with a TODO comment. Implementing relative-step behavior will require defining how steps are computed relative to current positions and integrating with the existing plan framework.
+
+Code excerpts (from the source):
+
+- count signature and docstring:
+  def count(detectors, num=1, delay=None, *, per_shot=None, md=None):
+      """
+      Take one or more readings from detectors.
+      ...
+      Notes
+      -----
+      If ``delay`` is an iterable, it must have at least ``num - 1`` entries or
+      the plan will raise a ``ValueError`` during iteration.
+      """
+
+- list_scan signature and logic:
+  def list_scan(detectors, *args, per_step=None, md=None):
+      """
+      Scan over one or more variables in steps simultaneously (inner product).
+      ...
+      """
+
+- rel_list_scan placeholder:
+  def rel_list_scan(detectors, *args, per_step=None, md=None):
+      """
+      Scan over one variable in steps relative to current position.
+      ...
+      # TODO
+      """
+
+This documentation reflects the structure and behavior of the code in metadata.rst, summarizing the purpose, key components, usage patterns, and important implementation details.

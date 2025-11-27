@@ -1,0 +1,114 @@
+# w_init
+
+## Overview
+w_init initializes a new WESTPA simulation. It creates the WEST HDF5 file and prepares the first iteration’s segments. Initial states (basis states) are generated from one or more basis states, supplied via a file (via --bstates-from / --bstate-file) or from CLI arguments (--bstate). Target states for (non-equilibrium) steady-state simulations are read from a file (via --tstates-from / --tstate-file) or from CLI (--tstate). If no basis states are provided, a default basis state (id 0, label "basis", probability 1) is created with a warning. If no target states are provided, an equilibrium simulation (no sinks) is performed.
+
+The command also supports optional start states, per-state segment counts, and an option to disable the weighted-ensemble (WE) bin/split/merge algorithm for newly created segments.
+
+## Key Components
+- entry_point: CLI entry point that defines the w_init command-line interface, parses arguments, and delegates to initialize.
+  - Defines options for:
+    - Basis states: --bstate-file / --bstates-from and --bstate
+    - Target states: --tstate-file / --tstates-from and --tstate
+    - Start states: --sstate-file / --sstates-from and --sstate
+    - Segments per state: --segs-per-state
+    - WE control: --no-we / --shotgun
+    - Force overwrite: --force
+  - Integrates with WESTPA’s environment and work manager.
+- initialize: Core routine that assembles the simulation’s initial state from supplied basis/target/start states and sets up the WESTPA runtime components.
+  - Creates a work manager instance (make_work_manager) and fetches system, sim, and data managers.
+  - Reads and parses:
+    - Target states (from file and/or CLI)
+    - Basis states (from file and/or CLI)
+    - Start states (from file and/or CLI)
+  - Builds lists of TargetState and BasisState objects accordingly and prepares start states as BasisState objects.
+
+## Usage
+- Basic invocation (with files):
+  - Initialize using basis and target states from files, and set segments per state:
+    - w_init --bstates-from BSTATE_FILE --tstates-from TSTATE_FILE --segs-per-state 4
+- Minimal inline definitions (examples of expected syntax):
+  - Basis state (inline): --bstate "label,probability[,auxref]"
+  - Target state (inline): --tstate "label,pcoord0[,pcoord1[,...]]"
+  - Start state (inline): --sstate "label,probability[,auxref]"
+- Combined example (CLI strings):
+  - w_init \
+      --bstate "basis,1.0" \
+      --tstate "target,0.0" \
+      --segs-per-state 2
+- Files and inline combinations:
+  - Target states: read from file (--tstate-file / --tstates-from) and/or appended via CLI (--tstate).
+    - When both are provided, CLI states are appended after those from the file.
+  - Basis states: read from file (--bstate-file / --bstates-from) and/or appended via CLI (--bstate).
+  - Start states: read from file (--sstate-file / --sstates-from) and/or appended via CLI (--sstate).
+
+- Default behaviors:
+  - If no basis states are provided (no --bstates-from / --bstate), a default basis state with label "basis" and probability 1 is created (id 0). A warning is emitted to remind you of this behavior.
+  - If no target states are provided (no --tstates-from / --tstate), an equilibrium simulation (no sinks) is performed.
+
+- WE control:
+  - By default, the WE algorithm runs on newly created segments.
+  - Use --no-we or --shotgun to disable WE for the newly created segments.
+
+Code references (highlights):
+- CLI definition and argument parsing:
+  - entry_point defines all relevant arguments, including:
+    - --force
+    - --bstate-file / --bstates-from
+    - --bstate
+    - --tstate-file / --tstates-from
+    - --tstate
+    - --sstate-file / --sstates-from
+    - --sstate
+    - --segs-per-state
+    - --no-we / --shotgun
+  - It reads and processes arguments via westpa.rc and work_managers.environment.
+
+- Initialization flow:
+  - initialize creates the work manager and obtains system, sim_manager, and data_manager.
+  - With the master work manager, it builds:
+    - target_states from tstate_file and/or tstates
+    - basis_states from bstate_file and/or bstates
+    - start_states from sstate_file and/or sstates
+  - Inline states are parsed by splitting the string on commas:
+    - BasisState: label, probability, [auxref]
+    - StartState: label, probability, [auxref]
+    - TargetState: label, pcoords (list of pcoord values)
+
+Example snippets from the code (for reference):
+- Processing target states from file and CLI:
+  - if tstate_file:
+      target_states.extend(TargetState.states_from_file(tstate_file, system.pcoord_dtype))
+  - if tstates:
+      tstates_strio = io.StringIO('\n'.join(tstates).replace(',',''))
+      target_states.extend(TargetState.states_from_file(tstates_strio, system.pcoord_dtype))
+
+- Processing basis states from file and CLI:
+  - if bstate_file:
+      basis_states.extend(BasisState.states_from_file(bstate_file))
+  - if bstates:
+      for bstate_str in bstates:
+          fields = bstate_str.split(',')
+          label = fields[0]
+          probability = float(fields[1])
+          try:
+              auxref = fields[2]
+          except IndexError:
+              auxref = None
+          basis_states.append(BasisState(label=label, probability=probability, auxref=auxref))
+
+- Processing start states from file and CLI:
+  - if sstate_file:
+      start_states.extend(BasisState.states_from_file(sstate_file))
+  - if sstates:
+      for sstate_str in sstates:
+          fields = sstate_str.split(',')
+          label = fields[0]
+          probability = float(fields[1])
+          try:
+              auxref = fields[2]
+          except IndexError:
+              auxref = None
+          start_states.append(BasisState(label=label, probability=probability, auxref=auxref))
+
+Note: The documentation reflects the behavior and interfaces exposed by the w_init command as implemented in the provided source. The actual persistence to the WEST HDF5 file and creation of initial segments proceed after the state collection steps shown above, within the remainder of the initialization logic.

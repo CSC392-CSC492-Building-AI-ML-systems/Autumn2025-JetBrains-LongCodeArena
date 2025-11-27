@@ -1,0 +1,221 @@
+# Model usage
+
+This document explains how to define and use models with the ORM. It covers defining models, declaring fields and relationships, configuring meta options, and performing common operations. The examples are based on the internal model structure shown in the code, but reflect typical usage patterns.
+
+## Prerequisites
+
+- Import the base Model class and field types
+  - from tortoise.models import Model
+  - from tortoise import fields
+
+- Models are declared by subclassing Model and defining fields as class attributes.
+
+## Defining a Model
+
+A model represents a database table. Each attribute is a field, with a specific data type and constraints.
+
+Example:
+
+```python
+from tortoise.models import Model
+from tortoise import fields
+
+class User(Model):
+    id = fields.IntField(pk=True)          # primary key (optional if you want default auto-increment id)
+    username = fields.CharField(max_length=32, unique=True)
+    email = fields.CharField(max_length=255, null=True)
+
+    created_at = fields.DatetimeField(auto_now_add=True)
+```
+
+Notes:
+- If you don’t specify a field with `pk=True`, an auto-incrementing `id` field is used by default.
+- Fields support common constraints (e.g., `max_length`, `null`, `unique`).
+
+## Meta options
+
+You can customize model behavior and mapping through a nested `Meta` class.
+
+Example:
+
+```python
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=32, unique=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "auth_user"   # database table name
+        app = "myapp"         # app name for organization
+        abstract = False
+
+        # Default ordering (string forms are parsed by the ORM)
+        ordering = ("-created_at",)
+
+        # Unique constraints across one or more fields
+        unique_together = (("username", "email"),)
+
+        # Additional composite indexes
+        indexes = (("username",), ("email",))
+```
+
+Key options:
+- `table` (or `db_table`): explicit table name.
+- `app`: logical grouping for apps.
+- `abstract`: if `True`, the model is not created as a table (useful for base classes).
+- `ordering`: default ordering. Strings like `"-field"` are supported and parsed by the ORM.
+- `unique_together`: one or more groups of fields that must be unique together.
+- `indexes`: one or more field groups to index for faster queries.
+
+## Fields and data types
+
+The ORM supports a variety of field types. Common examples:
+
+- Integer and numeric:
+  - `IntField`, `BigIntField`, `SmallIntField`, etc.
+- Strings:
+  - `CharField`, `TextField`
+- Dates and times:
+  - `DatetimeField`, `DateField`, `TimeField`
+- Booleans:
+  - `BooleanField`
+- Others:
+  - `FloatField`, `DecimalField`, … and more depending on the backend
+
+Example with common fields:
+
+```python
+class Post(Model):
+    id = fields.IntField(pk=True)
+    title = fields.CharField(max_length=200)
+    body = fields.TextField()
+    published = fields.BooleanField(default=False)
+    published_at = fields.DatetimeField(null=True)
+```
+
+## Relationships
+
+The ORM supports relational fields and reverse relations:
+
+- ForeignKey (many-to-one)
+- OneToOne
+- ManyToMany
+
+Example:
+
+```python
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=32, unique=True)
+
+class Article(Model):
+    id = fields.IntField(pk=True)
+    title = fields.CharField(max_length=200)
+    content = fields.TextField()
+    author = fields.ForeignKeyField('models.User', related_name='articles')  # many Articles to one User
+
+class Tag(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=50)
+
+class ArticleTag(Model):
+    # Example of an explicit through model for M2M if needed
+    article = fields.ForeignKeyField('models.Article', related_name='article_tags')
+    tag = fields.ForeignKeyField('models.Tag', related_name='tag_articles')
+
+# Many-to-many (simple usage)
+class Article(Model):
+    # ...
+    tags = fields.ManyToManyField('models.Tag', related_name='articles')
+```
+
+Reverse and related-name behavior:
+- Access a user’s articles via `user.articles` (a QuerySet).
+- Access an article’s author via `article.author`.
+
+## Field documentation comments
+
+The code provides a mechanism to extract comments for fields from the model source. You can document fields using a special comment syntax:
+
+```python
+class Product(Model):
+    #: The unique product code
+    code = fields.CharField(max_length=20, unique=True)
+
+    #: The human-friendly product name
+    name = fields.CharField(max_length=100)
+```
+
+Notes:
+- The special comments use a `#:` pattern and are captured by the `_get_comments` logic.
+- The placeholder `{model}` in comments will be replaced with the class name when used in documentation generation.
+
+## Examples: a small data model graph
+
+```python
+from tortoise.models import Model
+from tortoise import fields
+
+class User(Model):
+    id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=32, unique=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "auth_user"
+        ordering = ("-created_at",)
+
+class Tag(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=50)
+
+class Article(Model):
+    id = fields.IntField(pk=True)
+    title = fields.CharField(max_length=200)
+    content = fields.TextField()
+    author = fields.ForeignKeyField('models.User', related_name='articles')
+    tags = fields.ManyToManyField('models.Tag', related_name='articles')
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = (('author_id', 'created_at'),)
+```
+
+Usage notes:
+- Create and fetch data asynchronously in an async context:
+  - `user = await User.create(username="alice")`
+  - `article = await Article.create(title="Hello", content="...", author=user)`
+  - `author_articles = await user.articles.all()`
+
+- Use reverse relations via `related_name` to navigate relationships.
+
+## Abstract models
+
+Abstract models are useful for sharing common fields among multiple models.
+
+```python
+class BaseModel(Model):
+    id = fields.IntField(pk=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        abstract = True
+
+class User(BaseModel):
+    username = fields.CharField(max_length=32, unique=True)
+
+class Post(BaseModel):
+    title = fields.CharField(max_length=200)
+    author = fields.ForeignKeyField('models.User', related_name='posts')
+```
+
+In this example, `BaseModel` is not created as a table, but its fields are inherited by `User` and `Post`.
+
+## Practical guidance
+
+- Use `ordering` in `Meta` to define sensible default query orderings; override in queries when needed.
+- Use `unique_together` and `indexes` to enforce constraints and improve query performance.
+- Document important fields with the special `#:` comments to improve generated documentation.
+- Leverage reverse relations (via `related_name`) to traverse the graph efficiently without additional queries.
+
+If you need more advanced usage (custom query building, signals, transactions), refer to the related modules (queries, signals, transactions) to complement model usage.

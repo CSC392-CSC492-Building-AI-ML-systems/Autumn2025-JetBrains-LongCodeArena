@@ -1,0 +1,120 @@
+Developing scikit-learn estimators
+===================================
+
+Overview
+--------
+
+Estimators in scikit-learn expose a common interface (fit, predict) and, for meta-estimators, wrap a base estimator to extend or modify behavior. This guide explains how to develop new estimators, with a focus on multi-output estimators such as those built in scikit-learn (e.g., MultiOutputRegressor, MultiOutputClassifier, ClassifierChain, RegressorChain). It covers design principles, API considerations, and a minimal skeleton for implementing a custom multi-output estimator.
+
+Key concepts
+------------
+
+- Meta-estimators: estimators that take another estimator as a parameter (the base estimator) and apply it to multiple targets or in chained/combined ways.
+- Multi-output estimators: wrap a base estimator and train separate sub-estimators for each target dimension.
+- Consistent API: follow the scikit-learn estimator interface (fit, predict, and, if applicable, partial_fit; plus get_params/set_params for nesting and hyperparameter tuning).
+- Parallelization: with n_jobs, sub-estimators can be trained in parallel to improve performance.
+- Validation and typing: enforce that the base estimator provides necessary methods (fit, predict) and that parameters have sensible constraints.
+
+Multi-output estimators in scikit-learn
+---------------------------------------
+
+- Purpose: apply a base estimator to each target variable independently (or with a coordinated strategy), returning a combined prediction with the correct shape.
+- Core helpers (from the implementation):
+  - _fit_estimator and _partial_fit_estimator: clone and fit sub-estimators, handling sample_weight and partial_fit when available.
+  - _available_if_estimator_has: create parameter gating that enables options only when the base estimator supports the required method.
+  - _MultiOutputEstimator (internal base): a common scaffold for multi-output meta-estimators, defining parameter constraints (e.g., estimator must have fit/predict; n_jobs can be an int or None).
+- Public examples: MultiOutputRegressor, MultiOutputClassifier, ClassifierChain, RegressorChain.
+
+Design and implementation guidance
+----------------------------------
+
+- Base API
+  - __init__(self, estimator, *, n_jobs=None): store the base estimator and number of parallel jobs.
+  - fit(X, y): train a separate sub-estimator for each output dimension; store sub-estimators_ for reuse in predict.
+  - predict(X): generate predictions for each output dimension by calling each sub-estimator’s predict and assembling the results with the correct shape.
+  - If applicable, implement partial_fit to update sub-estimators incrementally when the base estimator supports partial_fit.
+- Sub-estimators management
+  - Use clone(estimator) to create fresh sub-estimators for fitting.
+  - Optionally parallelize per-output fits using joblib/Parallel and delayed, respecting n_jobs.
+  - Validate input shapes (e.g., y should be 2D with shape (n_samples, n_outputs)).
+- Validation and constraints
+  - Enforce that the base estimator provides fit and predict (and other required attributes) using parameter constraints (e.g., HasMethods(["fit", "predict"])).
+  - Expose _parameter_constraints for static type and compatibility checks (as seen in the internal _MultiOutputEstimator).
+- Gating and metaparameters
+  - Use _available_if_estimator_has to enable/disable parameters conditionally based on the capabilities of the base estimator.
+- Testing considerations
+  - Verify per-output behavior matches expectations (correct shape, correctness of per-target predictions).
+  - Test both single-output and multi-output cases, including edge cases (e.g., empty inputs, different n_outputs).
+  - Ensure compatibility with check_random_state, cross-validation workflows, and persistence (get_params/set_params).
+
+Skeleton: implementing a new multi-output estimator
+--------------------------------------------------
+
+Below is a minimal, illustrative skeleton (conceptual; adapt as needed) for a custom multi-output estimator. This follows the approach used by the public multi-output estimators and the internal helpers described above.
+
+.. code-block:: python
+
+   from sklearn.base import BaseEstimator, MetaEstimatorMixin, clone
+   import numpy as np
+   from sklearn.utils.validation import check_X_y
+   from sklearn.utils import check_array
+
+   class MyMultiEstimator(MetaEstimatorMixin, BaseEstimator):
+       def __init__(self, estimator, *, n_jobs=None):
+           self.estimator = estimator
+           self.n_jobs = n_jobs
+
+       def fit(self, X, y):
+           X, y = check_X_y(X, y, multi_output=True)
+           self.estimators_ = []
+           n_outputs = y.shape[1]
+           for i in range(n_outputs):
+               est = clone(self.estimator)
+               est.fit(X, y[:, i])
+               self.estimators_.append(est)
+           return self
+
+       def predict(self, X):
+           X = check_array(X)
+           preds = [est.predict(X) for est in self.estimators_]
+           return np.column_stack(preds)
+
+       # Optional: implement partial_fit if the base estimator supports it
+       def partial_fit(self, X, y, classes=None, sample_weight=None):
+           if not hasattr(self.estimator, "partial_fit"):
+               raise AttributeError("Base estimator does not support partial_fit")
+           X, y = check_X_y(X, y, multi_output=True)
+           if not hasattr(self, "estimators_"):
+               self.estimators_ = [clone(self.estimator) for _ in range(y.shape[1])]
+           for i, est in enumerate(self.estimators_):
+               if classes is not None:
+                   est.partial_fit(X, y[:, i], classes=classes, sample_weight=sample_weight)
+               else:
+                   est.partial_fit(X, y[:, i], sample_weight=sample_weight)
+           return self
+
+Notes
+-----
+
+- This skeleton demonstrates per-output training and aggregation of predictions. In a production implementation you would incorporate more robust input validation, parallelization, and integration with scikit-learn’s testing and serialization utilities.
+- For standard multi-output functionality, consider using the existing public estimators (MultiOutputRegressor, MultiOutputClassifier, ClassifierChain, RegressorChain) or extend the internal _MultiOutputEstimator scaffolding with appropriate error handling and features.
+
+Public multi-output estimators
+-----------------------------
+
+- MultiOutputRegressor: trains one regressor per target variable.
+- MultiOutputClassifier: trains one classifier per target variable.
+- ClassifierChain: sequentially trains classifiers, each using previous predictions as additional features.
+- RegressorChain: analogous to ClassifierChain for regression tasks.
+
+Dependencies and environment
+----------------------------
+
+- These estimators rely on core scikit-learn interfaces and utilities (check_X_y, clone, BaseEstimator, MetaEstimatorMixin, etc.).
+- They are designed to work with standard numerical libraries (NumPy, SciPy) and align with scikit-learn’s parameter and testing conventions.
+
+Further reading
+--------------
+
+- Look at the implementation and tests for MultiOutputRegressor, MultiOutputClassifier, ClassifierChain, and RegressorChain in the codebase for concrete examples and best practices.
+- Review helper utilities such as _fit_estimator, _partial_fit_estimator, and _available_if_estimator_has to understand patterns for composing sub-estimators in meta-estimators.

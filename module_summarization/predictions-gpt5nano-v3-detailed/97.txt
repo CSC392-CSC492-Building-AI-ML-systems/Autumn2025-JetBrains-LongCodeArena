@@ -1,0 +1,151 @@
+howitworks.rst
+==============
+
+Introduction
+------------
+This tutorial explains the core messaging protocol and bootstrap mechanism used by Mitogen. It documents how the internal bootstrap module is sent to new slave contexts, the purpose of the built-in message types, and how routing, loading, and remote function invocation are coordinated between the master and remote contexts.
+
+Architecture and Roles
+----------------------
+Mitogen relies on a small, well-defined messaging substrate to communicate between a controlling process (the master) and a remote slave context. The following conceptual roles are involved:
+
+- Broker: Orchestrates IO and dispatches messages between endpoints. It handles delivery, routing, and lifecycle events.
+- Router: Maintains mappings from message routes to handlers or remote endpoints. It responds to ADD_ROUTE, DEL_ROUTE, and related lifecycle messages.
+- Side: Abstracts the I/O side of a connection (read/write) and provides buffering for message payloads.
+- Bootstrap: A minimal piece of code shipped to every new slave context, responsible for initializing the remote environment and wiring up the routing to the master.
+
+Key Message Types
+-----------------
+The module defines a compact integer-based protocol. Each message begins with a command code, followed by a payload. The following codes are of particular importance:
+
+- GET_MODULE (100): Request a module from the remote environment.
+- CALL_FUNCTION (101): Invoke a function on the remote side.
+- FORWARD_LOG (102): Forward log messages from the remote side to the master.
+- ADD_ROUTE (103): Establish a new route so a message can be delivered to a specific endpoint.
+- DEL_ROUTE (104): Remove an existing route.
+- ALLOCATE_ID (105): Allocate a new unique identifier for a route or resource.
+- SHUTDOWN (106): Request a graceful shutdown of the remote context.
+- LOAD_MODULE (107): Send a module (or its bytecode) to the remote side for loading.
+- FORWARD_MODULE (108): Forward a module to another endpoint (useful for proxying module availability).
+- DETACHING (109): Signal that a router or endpoint is detaching; used to trigger cleanup.
+- CALL_SERVICE (110): Invoke a service exposed by the remote context.
+- STUB_CALL_SERVICE (111): A lightweight or proxy-based service call path.
+
+Important: The IS_DEAD sentinel (value 999) is used to signal disconnection or inability to route a message. It can appear in the reply_to field and indicates that the sender did not know how to process the message or wishes no further messages to be delivered.
+
+Message Format and Semantics
+----------------------------
+- Messages are encoded as triplets in practice: (command_code, payload, optional_metadata). The payload is typically a pickled structure that carries all necessary information for the requested operation.
+- The reply to a request may contain either a success payload or an error description. If a receiver cannot process a message or the route is missing, the protocol propagates an IS_DEAD indicator to trigger cleanup or a ChannelError on the caller.
+- The bootstrap module sent to a new slave context is intentionally small. It establishes the initial routing and IO plumbing so that the master can begin issuing the higher-level protocol messages.
+
+Compatibility and Bootstrapping
+-------------------------------
+- The module includes compatibility shims for Python 2.4/2.5-era environments and for Python 3+. Key flags include PY24 and PY3, used to adjust type handling, buffering, and codec behavior.
+- LATIN1_CODEC is defined to ensure consistent text-byte handling across contexts, which is important for cross-process communication.
+- The bootstrap is purpose-built to be minimal, since it is shipped to every new slave context to reestablish the necessary communication primitives without pulling in non-essential code.
+
+Parameters and Return Values
+----------------------------
+- Command codes (e.g., GET_MODULE, CALL_FUNCTION) determine the high-level operation to perform on the remote side.
+- Payloads are opaque to the transport layer and carry operation-specific data (module names, function call arguments, module code, route identifiers, etc.).
+- Returns are structured payloads with either a result or error information. On errors or missing routes, the IS_DEAD sentinel may be propagated to indicate cleanup is required.
+
+Usage Scenarios
+---------------
+- Loading and using a remote module:
+  - Master sends LOAD_MODULE with the module’s bytecode or source.
+  - Remote context loads the module and acknowledges.
+  - Master can then POST GET_MODULE or CALL_FUNCTION to invoke functions from the loaded module.
+
+- Invoking a remote function:
+  - Master issues CALL_FUNCTION with a function reference (or module and symbol) and arguments.
+  - Remote side executes the function and returns the result, or an exception description if something goes wrong.
+
+- Route management:
+  - ADD_ROUTE creates a path for messages to reach a specific remote endpoint.
+  - DEL_ROUTE removes it, enabling cleanup of resources when a context detaches.
+
+Edge Cases and Considerations
+-----------------------------
+- Disconnection handling: If a node disconnects or a route cannot be delivered, IS_DEAD is used to signal the condition, often resulting in a ChannelError on the caller side.
+- Large messages and buffering: The default buffer size (128KiB) is a balancing point for performance and memory usage. Large messages may require multiple IO iterations.
+- Cross-version concerns: The code contains Python-version checks to adapt to differing type systems and import semantics. Be mindful when extending the protocol to ensure compatibility across supported Python versions.
+- Bootstrap limitations: The bootstrap path must stay minimal to reduce startup time and the surface area of remote environments. Avoid introducing non-essential dependencies into the bootstrap path.
+
+Code Snippet: Typical Message Flow (Pseudo-Code)
+------------------------------------------------
+Below is a high-level, language-agnostic illustration of the master-to-remote flow using the defined message codes. This is illustrative; actual Mitogen usage may differ.
+
+```python
+# Master side (pseudo)
+GET_MODULE = 100
+LOAD_MODULE = 107
+CALL_FUNCTION = 101
+ALLOCATE_ID = 105
+IS_DEAD = 999
+
+# Request a module named 'os'
+msg = (GET_MODULE, {'name': 'os'})
+reply = broker.send(msg)
+
+# If not dead, load the module on the remote side
+if reply and not reply.get('dead'):
+    module_data = reply['module_data']
+    broker.send((LOAD_MODULE, {'name': 'os', 'code': module_data}))
+
+# Invoke a function remote-side
+func_call = {
+    'module': 'os',
+    'function': 'getpid',
+    'args': [],
+    'kwargs': {}
+}
+result = broker.send((CALL_FUNCTION, func_call))
+
+# Routing example
+route_id = broker.send((ALLOCATE_ID, {'purpose': 'remote-endpoint'}))
+broker.send((ADD_ROUTE, {'route_id': route_id, 'endpoint': 'remote-ctx'}))
+```
+
+Code Snippet: Bootstrap Concept
+-------------------------------
+```python
+# On the remote (slave) side, the bootstrap module initializes routing
+# and wires up the master as the primary endpoint.
+
+def bootstrap_setup(broker):
+    # Establish initial route to master
+    master_route = broker.allocate_id(purpose='master')
+    broker.add_route(master_route, endpoint='master')
+
+    # Prepare to receive and execute further commands
+    broker.enable_command_dispatch()
+```
+
+Usage Examples
+--------------
+- Minimal remote function call sequence (conceptual):
+
+```python
+# Master: request a module and call a function remotely
+module_info = broker.send((GET_MODULE, {'name': 'math'}))
+remote_module = module_info['module']
+
+# Remote: ensure module is loaded
+broker.send((LOAD_MODULE, {'name': 'math', 'code': remote_module['code']}))
+
+# Master: call a function in the loaded module
+result = broker.send((CALL_FUNCTION, {
+    'module': 'math',
+    'function': 'sqrt',
+    'args': [16],
+    'kwargs': {}
+}))
+
+print("Remote sqrt(16) =", result)
+```
+
+Conclusion
+----------
+This document outlines the core concepts behind Mitogen’s internal howitworks mechanism: the message-based protocol, the role of the bootstrap process, and how routing, module loading, and remote invocation are coordinated. Understanding these primitives helps in extending or debugging the low-level communication pathway that powers Mitogen’s remote execution capabilities.

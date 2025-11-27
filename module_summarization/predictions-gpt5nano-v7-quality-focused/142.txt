@@ -1,0 +1,152 @@
+Delayed API
+===========
+
+Overview
+--------
+The dask.delayed interface provides lazy, task-graph-backed objects that represent
+computations. You create Delayed objects, compose them with Python operations and
+functions, and then trigger execution with compute (or by persisting as part of a
+larger workflow). The core public pieces are the Delayed class and the delayed
+factory, exposed as Delayed and delayed.
+
+Public API
+----------
+
+Delayed (class)
+-------------
+- Represents a single lazy computation or a composition of computations.
+- Instances participate in Dask task graphs and can be combined with Python
+  operators and functions to build new tasks.
+- Internals expose the underlying task graph and keys (e.g., __dask_keys__,
+  __dask_graph__, __dask_postcompute__), but users typically interact through
+  Delayed objects and the delayed factory.
+
+delayed (factory)
+------------------
+- A factory that wraps a Python object into a Delayed object.
+- Supports providing an explicit key/name for the delayed task to influence how
+  the task is identified in the graph.
+
+Example
+-------
+.. code-block:: python
+
+   from dask import delayed
+
+   a = delayed(1, "a")
+   b = delayed(2, "b")
+   c = a + b  # creates a new Delayed representing (a + b)
+
+   # Trigger computation
+   result = c.compute()
+
+Unpack_collections
+------------------
+Helper: Normalizes Python objects and merges sub-graphs into a single task plus a
+set of sub-collections. This is central to how nested Python structures are turned
+into a single, executable task graph.
+
+Behavior
+- If the input is a Delayed, returns its key and a collection containing that Delayed.
+- If the input is a dask collection, finalizes it and returns the finalized key with the
+  finalized Delayed in the collections.
+- If the input is a sequence (list/tuple/set), recursively unpacks elements, flattens
+  nested collections, and preserves the input type.
+- If the input is a dict, converts to a (dict, ...) form with key/value pairs unpacked.
+- If the input is a slice, dataclass, or namedtuple, handles reconstruction after
+  computing contained values.
+- Otherwise, returns the input as-is with an empty collection.
+
+Examples
+--------
+.. code-block:: python
+
+   >>> import dask
+   >>> a = delayed(1, 'a')
+   >>> b = delayed(2, 'b')
+   >>> task, collections = unpack_collections([a, b, 3])
+   >>> task
+   ['a', 'b', 3]
+   >>> collections
+   (Delayed('a'), Delayed('b'))
+
+   >>> task, collections = unpack_collections({a: 1, b: 2})
+   >>> task
+   (<class 'dict'>, [['a', 1], ['b', 2]])
+   >>> collections
+   (Delayed('a'), Delayed('b'))
+
+Finalize
+--------
+Internal helper that wraps a collection into a Delayed task which computes the
+collection after its constituent elements are computed. It constructs a HighLevelGraph
+that depends on the original collection.
+
+Example
+-------
+.. code-block:: python
+
+   >>> from dask.delayed import finalize
+   >>> a = delayed(1, 'a')
+   >>> finalized = finalize(a)
+   >>> finalized.compute()
+   1
+
+to_task_dask (deprecated)
+-------------------------
+- Deprecated helper that mirrors the behavior of unpack_collections but returns a
+  (task, dask) pair and issues a deprecation warning.
+- The deprecation message directs users to prefer unpack_collections for the
+  same normalization purpose.
+
+Example
+-------
+.. code-block:: python
+
+   >>> from dask.delayed import to_task_dask
+   >>> a = delayed(1, 'a')
+   >>> task, dask = to_task_dask([a, 2])
+   ...  # doctest: +SKIP
+
+   Note: This function is deprecated. Use unpack_collections instead.
+
+Implementation notes
+--------------------
+- The Delayed interface relies on operator overloading (via OperatorMethodMixin) to
+  enable natural composition of tasks using Python operators and standard functions.
+- The public surface is designed to be stable for typical Python workflows:
+  creating delayed values, combining them, and triggering computation.
+- Internal helpers like __dask_keys__ / __dask_graph__ / __dask_postcompute__
+  are used to integrate with Dask’s scheduling and computation model.
+
+Quickstart examples
+-------------------
+- Create delayed values and compose them
+  .. code-block:: python
+
+     from dask import delayed
+
+     a = delayed(1, "a")
+     b = delayed(2, "b")
+     c = a + b
+     print(c.compute())  # 3
+
+- Normalize nested structures into a single task
+  .. code-block:: python
+
+     from dask import delayed
+
+     a = delayed(1, "a")
+     b = delayed(2, "b")
+     task, collections = unpack_collections([a, {"x": b}, 3])
+     print(task)           # ['a', {'x': 'b'}, 3]
+     print(collections)    # (Delayed('a'), Delayed('b'))
+
+Notes for practitioners
+-----------------------
+- Delayed objects are intended for building complex computations lazily and
+  composing them into graphs. Execution is triggered by compute or persisted via
+  a scheduler.
+- When working with nested Python containers, prefer unpack_collections to turn
+  the structure into a single executable task plus references to the contained
+  Delayed objects.

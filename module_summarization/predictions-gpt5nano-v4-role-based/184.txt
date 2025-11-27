@@ -1,0 +1,138 @@
+Gaussian Processes
+==================
+
+Overview
+--------
+
+Gaussian processes (GPs) provide a principled, probabilistic approach to regression and classification. In this implementation, a GP is fully specified by a mean function (often assumed to be zero) and a covariance function (kernel). The kernel encodes assumptions about function smoothness, amplitude, and other properties through a set of hyperparameters.
+
+Key ideas:
+
+- Kernel as covariance: defines how function values correlate across inputs.
+- Kernel engineering: kernels can be combined to form rich covariance structures.
+- Analytic gradients: hyperparameters can be tuned using gradient-based optimization.
+- Hyperparameter search space: defined by bounds; can mark hyperparameters as fixed for optimization-free configurations.
+
+Kernel composition and arithmetic
+---------------------------------
+
+Kernels in this module support algebraic composition to flexibly model complex phenomena:
+
+- Addition: kernel1 + kernel2 creates a kernel that models the sum of independent processes.
+- Multiplication: kernel1 * kernel2 creates a kernel that models the product of processes, enabling interactions.
+- Exponentiation: kernel ** scalar allows scaling the kernel by a scalar factor (or a user-defined exponent) in expressions.
+
+Scalar terms in kernel expressions are automatically converted to a ConstantKernel, ensuring uniform treatment of mixed kernel expressions.
+
+Example
+
+- Simple composite kernel:
+  ConstantKernel(constant_value=1.0, constant_value_bounds=(0.0, 10.0)) + RBF(length_scale=1.0, length_scale_bounds=(0.1, 10.0))
+
+- Anisotropic length-scales (per-dimension) example:
+  RBF(length_scale=[1.0, 0.5], length_scale_bounds=(0.1, 10.0))  # if data is 2D
+
+Hyperparameters
+---------------
+
+Each kernel exposes a set of hyperparameters that control its behavior. The hyperparameters can be tuned analytically using gradient-based optimization.
+
+Hyperparameter data structure
+- Hyperparameter: a namedtuple with fields:
+  - name: parameter name (e.g., "length_scale" or "constant_value")
+  - value_type: type of the parameter (currently "numeric")
+  - bounds: lower/upper bounds as a 2D array, or the string "fixed"
+  - n_elements: number of elements (defaults to 1; >1 indicates a vector-valued parameter)
+  - fixed: boolean indicating whether the parameter is fixed (excluded from optimization)
+
+Bounds handling
+- If bounds is a numeric pair, it defines the rectangular search space for the parameter.
+- If bounds is "fixed", the parameter is fixed and not optimized.
+- For vector-valued hyperparameters (n_elements > 1), bounds can be provided as:
+  - a 2D array with shape (n_elements, 2)
+  - or a single bound row that will be replicated to form the full bounds.
+
+Accessing hyperparameters
+- Each kernel provides a hyperparameters attribute (an iterable of Hyperparameter instances).
+- Example usage (conceptual, mirroring typical kernel usage in tests):
+  for hyperparameter in kernel.hyperparameters:
+      print(hyperparameter)
+
+Optimization assumptions
+- All kernels support analytic gradient-based optimization of their hyperparameters.
+- The space of hyperparameters is defined by the provided bounds, creating a rectangular search space.
+- Hyperparameters can be fixed to disable optimization (e.g., to keep a kernel parameter constant).
+
+Kernel base class
+-----------------
+
+The base class for all kernels provides common functionality:
+
+- get_params(deep=True): Returns a dictionary of this kernel's parameters and those of contained subobjects (if any). This follows the scikit-learn estimator convention, enabling integration with parameter search utilities.
+- Internal validation helpers (e.g., _check_length_scale) ensure consistency between data dimensionality and kernel parameters (notably anisotropic length-scales).
+
+Example: hyperparameter introspection (conceptual)
+- A kernel exposing a "length_scale" hyperparameter will have:
+  - length_scale: the current value
+  - length_scale_bounds: the bounds for optimization
+  - hyperparameters: a list containing a Hyperparameter named "length_scale"
+
+Practical usage with GaussianProcessRegressor and GaussianProcessClassifier
+-------------------------------------------------------------------------
+
+- The kernel defines the prior covariance between function values. The GP regressor/classifier uses this covariance to perform Bayesian inference.
+- Hyperparameters are optimized (by default) using gradient-based methods to maximize the marginal likelihood, subject to the defined bounds.
+- You can fix certain hyperparameters to reduce the optimization space or to impose prior knowledge.
+
+Example (typical usage with scikit-learn style API)
+- Import kernels and estimator:
+  - from sklearn.gaussian_process.kernels import ConstantKernel, RBF
+  - from sklearn.gaussian_process import GaussianProcessRegressor
+- Define a kernel with bounds:
+  kernel = ConstantKernel(1.0, (0.0, 10.0)) * RBF(length_scale=1.0, length_scale_bounds=(0.1, 10.0))
+- Create and fit the model:
+  gp = GaussianProcessRegressor(kernel=kernel, alpha=1e-10)  # alpha may be tuned or fixed
+  gp.fit(X_train, y_train)
+- Predict with uncertainty:
+  y_mean, y_std = gp.predict(X_test, return_std=True)
+
+Notes and implementation details
+-------------------------------
+
+- Length-scale handling:
+  - _check_length_scale(X, length_scale) ensures that anisotropic length-scales (per-dimension) have the correct dimensionality relative to the input data X.
+  - If length_scale is 1D, it must match the feature dimension of X.
+- Parameter discovery:
+  - Kernel.get_params is designed to mirror scikit-learn’s estimator parameter introspection, enabling compatibility with hyperparameter optimization tools.
+- Design goals:
+  - Modularity: kernels can be composed to express complex priors.
+  - Flexibility: scalar values in kernel expressions automatically convert to ConstantKernel.
+  - Optimization-friendly: analytic gradients allow efficient hyperparameter tuning.
+
+Implementation notes
+--------------------
+
+- This module is inspired by kernel architectures from the george package and follows a similar philosophy of composable kernels and analytic gradients.
+- The design emphasizes clear hyperparameter semantics, explicit bounds, and the ability to fix parameters to guide the learning process.
+
+References
+----------
+
+- Kernel composition and hyperparameter design as described in the codebase.
+- Similarity to scikit-learn’s kernel and hyperparameter interfaces for compatibility and usability.
+
+Practical tips
+------------
+
+- Start with simple kernels (e.g., ConstantKernel × RBF) and gradually add components (e.g., WhiteKernel, Matern) to capture noise and varying smoothness.
+- Use meaningful bounds to reflect prior knowledge about the scale of function values and length-scales.
+- Consider fixing parameters to constrain the model when data is noisy or scarce.
+- Examine hyperparameter values after fitting to gain insight into the inferred function characteristics.
+
+Appendix: Common Kernels (conceptual)
+- ConstantKernel: models a constant offset in the covariance.
+- RBF (Squared Exponential): smooth, infinitely differentiable functions with a single length-scale (or per-dimension for anisotropic cases).
+- Matern: controls roughness via the nu parameter (often with common values like 3/2 or 5/2).
+- WhiteKernel: models Gaussian noise in observations (nugget).
+
+This documentation provides guidance on using and understanding Gaussian process kernels, their hyperparameters, and how they integrate with GP regression and classification workflows.

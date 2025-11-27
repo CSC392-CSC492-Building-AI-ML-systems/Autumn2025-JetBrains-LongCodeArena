@@ -1,0 +1,226 @@
+# compose.rst
+
+Introduction
+------------
+The pipeline module provides utilities to build composite estimators by chaining a sequence of transforms and a final estimator. It enables you to apply multiple data processing steps in a single object, while supporting parameter access and tuning through a consistent naming convention.
+
+Overview
+--------
+- A Pipeline is a sequence of steps: each step is a (name, transform/estimator) pair.
+- All steps except the final one must implement fit and transform (they are transformers).
+- The final step must implement fit (it is typically a predictor/estimator).
+- Parameters of steps can be set using a hierarchical naming convention, e.g., pipeline__scaler__with_mean.
+- You can cache fitted transformers with memory to speed up repeated fits.
+- You can replace or remove steps by using a name mapped to another estimator, or to "passthrough"/None.
+- FeatureUnion can be used within a Pipeline to apply parallel transformations whose outputs are concatenated.
+
+Key classes and functions
+-------------------------
+- Pipeline: Core class to chain transforms and a final estimator.
+- FeatureUnion: Combines multiple transformer outputs in parallel and concatenates features.
+- make_pipeline: Convenience function to construct a Pipeline without naming each step.
+- make_union: Convenience function to construct a FeatureUnion without naming each transformer.
+
+Relationships
+-------------
+- Pipeline composes multiple transformers and a final estimator into a single estimator.
+- FeatureUnion can be used as a step inside Pipeline to merge features from multiple transformations.
+- make_pipeline and make_union are sugar helpers that assign automatic step names.
+
+Important parameters and return values
+-------------------------------------
+Pipeline.__init__(steps, *, memory=None, verbose=False)
+- steps: list of (name, transform) tuples. All except the last must implement fit and transform.
+- memory: None or str or object with joblib.Memory interface. Caches fitted transformers (last step is never cached).
+- verbose: bool, print timing information when fitting steps if True.
+
+Methods of interest
+- set_output(transform=None)
+  - Sets the output configuration for all steps in the pipeline.
+  - transform options: "default", "pandas", or None to leave unchanged.
+  - Returns self.
+- get_params(deep=True)
+  - Returns a dictionary-like object with constructor parameters and nested parameters of contained steps.
+  - deep controls whether to retrieve parameters of sub-estimators.
+- Named access
+  - After fitting, access individual steps via pipeline.named_steps[name].
+
+Usage patterns
+--------------
+- Parameter tuning with grid search or randomized search:
+  - Use hierarchical parameter names, e.g., 'scaler__with_mean' or 'clf__C'.
+- Replacing or removing steps:
+  - To remove a step, set its value to None or "passthrough".
+  - To replace a step, set the corresponding parameter to a new estimator.
+- Output formatting:
+  - Use set_output(transform="pandas") to get DataFrame outputs from transforms when available.
+
+Code examples
+-------------
+
+Basic pipeline with a transformer and a final estimator
+```python
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+
+X, y = make_classification(n_samples=200, random_state=0)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', LogisticRegression())
+])
+
+pipe.fit(X_train, y_train)
+score = pipe.score(X_test, y_test)
+print("Test score:", score)
+```
+
+Convenience construction with make_pipeline
+```python
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+
+pipe = make_pipeline(StandardScaler(), LogisticRegression())
+pipe.fit(X_train, y_train)
+```
+
+Accessing and inspecting steps
+```python
+pipe.named_steps['scaler']  # access the transformer
+pipe.named_steps['clf']     # access the estimator
+```
+
+Grid search with pipelines
+```python
+from sklearn.model_selection import GridSearchCV
+
+param_grid = {
+    'scaler__with_mean': [True, False],
+    'clf__C': [0.1, 1.0, 10.0]
+}
+grid = GridSearchCV(pipe, param_grid, cv=5)
+grid.fit(X, y)
+
+print("Best params:", grid.best_params_)
+print("Best score:", grid.best_score_)
+```
+
+Using Memory for caching
+```python
+from joblib import Memory
+from sklearn.pipeline import Pipeline
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+import os
+
+memory = Memory(location=os.path.join('.', 'pipe_cache'), verbose=0)
+
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('pca', PCA(n_components=2)),
+    ('clf', LogisticRegression())
+], memory=memory)
+
+pipe.fit(X_train, y_train)
+```
+Notes:
+- The last step is never cached even if it is a transformer.
+- Caching helps when fitting is time-consuming.
+
+Using FeatureUnion inside a Pipeline
+```python
+from sklearn.pipeline import Pipeline, FeatureUnion
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+
+union = FeatureUnion([
+    ('pca', PCA(n_components=2)),
+    ('scaler', StandardScaler())
+])
+
+pipe = Pipeline([
+    ('features', union),
+    ('clf', LogisticRegression())
+])
+
+pipe.fit(X_train, y_train)
+```
+
+Replacing or removing steps
+```python
+# Remove a step by replacing with 'passthrough'
+pipe_with_passthrough = Pipeline([
+    ('scaler', StandardScaler()),
+    ('passthrough', 'passthrough'),
+    ('clf', LogisticRegression())
+])
+
+# Replace a step
+pipe_replaced = Pipeline([
+    ('scaler', StandardScaler(with_mean=False)),
+    ('clf', LogisticRegression(C=2.0))
+])
+```
+
+Output configuration
+```python
+# Configure outputs to pandas DataFrame-like structures when available
+pipe.set_output(transform="pandas")
+pipe.fit(X_train, y_train)
+Xt = pipe.transform(X_test)  # may return a pandas-friendly structure if supported
+```
+
+Important considerations and edge cases
+---------------------------------------
+- Step roles: All steps except the last must implement fit and transform; the last step must implement fit (often a classifier or regressor).
+- Parameter naming: Use the exact step name when setting or querying parameters (e.g., 'scaler__with_mean').
+- Memory: When memory is provided, a clone of the transformers is used during fitting. The pipeline object itself cannot be inspected directly for the cached transformers.
+- Removing steps: Use None or 'passthrough' to drop a step from the pipeline.
+- Output format: set_output affects outputs produced by transform/fit_transform; not all transformers support pandas output.
+- Feature names and feature counts: If the first estimator in steps exposes n_features_in_ or feature_names_in_ during fit, these attributes will be available on the pipeline after fit (e.g., pipe.n_features_in_, pipe.feature_names_in_).
+
+Edge cases
+- If the final estimator raises NotFittedError, ensure you call fit on the pipeline first or use proper cross-validation flow.
+- If a transformer or estimator raises an error due to input shape changes, verify the interface conforms to scikit-learn expectations (fit/transform signature and output shapes).
+
+Usage overview
+--------------
+- Use Pipeline to chain preprocessing and modeling steps, enabling clean, repeatable workflows.
+- Employ GridSearchCV or similar to optimize parameters across steps with a single parameter space.
+- Utilize FeatureUnion for parallel feature extraction and combination prior to modeling.
+- Leverage memory and set_output for performance and formatting needs.
+
+End-to-end example: classification workflow with caching and pandas output
+```python
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+from joblib import Memory
+import os
+
+X, y = load_iris(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+memory = Memory(location=os.path.join('.', 'iris_pipe_cache'), verbose=0)
+
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('pca', PCA(n_components=2)),
+    ('clf', LogisticRegression())
+], memory=memory)
+
+pipe.set_output(transform="pandas")
+pipe.fit(X_train, y_train)
+score = pipe.score(X_test, y_test)
+print("Test score:", score)
+```

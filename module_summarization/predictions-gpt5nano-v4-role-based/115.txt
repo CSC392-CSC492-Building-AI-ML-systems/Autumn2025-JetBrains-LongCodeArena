@@ -1,0 +1,150 @@
+Configuration API Documentation (config.rst)
+
+Overview
+- This module provides the ASDF global configuration system.
+- Exposes the AsdfConfig container and two helper functions: get_config and config_context.
+- Central concepts:
+  - Resource mappings: mappings of resource URIs to byte content, with precedence rules for runtime additions.
+  - Resource manager: merges resource mappings and provides access to resources.
+  - Extensions: ASDF extensions, with precedence rules for runtime additions.
+  - Default ASDF Standard version and I/O block size.
+- Configuration is lazy-loaded and thread-safe via a reentrant lock (threading.RLock).
+
+Constants and Defaults
+- DEFAULT_VALIDATE_ON_READ = True
+  - Default behavior for validating data when reading ASDF files.
+- DEFAULT_DEFAULT_VERSION = str(versioning.default_version)
+  - Default ASDF Standard version used for new files.
+- DEFAULT_LEGACY_FILL_SCHEMA_DEFAULTS = True
+  - Default behavior related to legacy schema defaults (historical/default behavior).
+- DEFAULT_IO_BLOCK_SIZE = -1
+  - Block size used when reading/writing files; -1 indicates auto-selection by the filesystem.
+- DEFAULT_ARRAY_INLINE_THRESHOLD = None
+  - Threshold controlling inlining of arrays; behavior is configurable.
+
+AsdfConfig class
+Purpose
+- Container for ASDF configuration options.
+- Users should not construct this object directly; use get_config() to access the global instance or config_context to modify configuration temporarily.
+
+Initialization and State
+- __init__ initializes internal state:
+  - _resource_mappings: cached list of resource mappings (or None to lazy-load from entry points).
+  - _resource_manager: cached ResourceManager instance (or None to lazy-create).
+  - _extensions: cached list of extensions (or None to lazy-load from entry points).
+  - _validate_on_read: defaults to DEFAULT_VALIDATE_ON_READ.
+  - _default_version: defaults to DEFAULT_DEFAULT_VERSION.
+  - _legacy_fill_schema_defaults: defaults to DEFAULT_LEGACY_FILL_SCHEMA_DEFAULTS.
+  - _io_block_size: defaults to DEFAULT_IO_BLOCK_SIZE.
+  - _array_inline_threshold: defaults to DEFAULT_ARRAY_INLINE_THRESHOLD.
+  - _lock: threading.RLock() to guard access and mutations.
+
+Resource Mappings
+- resource_mappings property
+  - Returns the list of registered resource mapping instances.
+  - If not yet loaded, it is initialized from entry_points.get_resource_mappings() under a lock.
+  - Returns a list of ResourceMappingProxy objects.
+  - By default, contains all mappings registered via entry points.
+- add_resource_mapping(mapping)
+  - Registers a new resource mapping and gives it precedence over all previously registered mappings.
+  - Steps:
+    - Wraps the provided mapping with ResourceMappingProxy.maybe_wrap(mapping).
+    - Prepends it to the existing mappings, removing duplicates.
+    - Invalidates the cached _resource_manager to force re-creation with the updated mappings.
+  - Precedence: the new mapping is used first by ResourceManager.
+- remove_resource_mapping(mapping=None, *, package=None)
+  - Removes a registered resource mapping.
+  - At least one of mapping or package must be provided.
+  - If mapping is provided, it is wrapped with ResourceMappingProxy.maybe_wrap.
+  - If package is provided, removal is restricted to mappings whose package_name matches.
+  - Updates the internal list and invalidates _resource_manager.
+- reset_resources()
+  - Resets resource mappings to the default state provided by entry points.
+  - Clears both _resource_mappings and _resource_manager to force reloading on next access.
+
+Resource Manager
+- resource_manager property
+  - Returns the asdf.resource.ResourceManager instance.
+  - Combines resources from registered resource mappings and any runtime-added mappings.
+  - Lazy-initialized under the lock; created with ResourceManager(self.resource_mappings).
+  - Cache invalidation occurs when resource mappings are modified.
+
+Extensions
+- extensions property
+  - Returns the list of registered extensions.
+  - Lazily loaded from entry_points.get_extensions() if not already loaded.
+- add_extension(extension)
+  - Registers a new extension and gives it precedence over previously registered extensions.
+  - Extension objects are wrapped with ExtensionProxy.maybe_wrap(extension).
+  - Prepends the new extension to the existing list, removing duplicates.
+- remove_extension(extension=None, *, package=None)
+  - Removes a registered extension.
+  - Must specify at least one of extension or package.
+  - If extension is a string, it is treated as a URI pattern and matched against e.extension_uri using util.uri_match(extension, e.extension_uri).
+  - If extension is an ExtensionProxy instance, it is matched by equality.
+  - If package is provided, removal is restricted to extensions with a matching package_name.
+  - Updates the internal list of extensions accordingly.
+- reset_extensions()
+  - Resets extensions to the default list provided by entry points (by clearing the cached list).
+
+Default Version
+- default_version property
+  - Getter returns the default ASDF Standard version used for new files.
+  - Setter validates the provided version string via validate_version(value) before storing.
+
+IO Block Size
+- io_block_size property
+  - Getter returns the configured I/O block size.
+  - Setter updates the block size (block size is an integer; -1 means filesystem’s preferred block size).
+
+Notes on Internal Helpers and Proxies
+- ResourceMappingProxy
+  - A proxy/wrapper used to normalize and manage resource mappings.
+  - may_wrap(mapping) is used to ensure a proper mapping proxy instance.
+- ExtensionProxy
+  - A proxy/wrapper used for ASDF extensions.
+  - may_wrap(extension) is used to ensure a proper extension proxy instance.
+- entry_points
+  - Used to discover default resource mappings and extensions registered via entry points.
+- ResourceManager
+  - Combines resource mappings and facilitates resource retrieval.
+- util.uri_match
+  - Used to match URI patterns when removing extensions by URI string.
+
+Usage Examples
+- Accessing the global config
+  - from asdf import get_config
+  - cfg = get_config()
+  - current_version = cfg.default_version
+- Adding a runtime resource mapping (precedence over existing mappings)
+  - new_mapping = {"custom/resource.io": b"..."}  # mapping of URI to bytes
+  - cfg.add_resource_mapping(new_mapping)
+- Removing a resource mapping by package
+  - cfg.remove_resource_mapping(package="my.package")
+- Adding a runtime extension (precedence over existing extensions)
+  - cfg.add_extension(my_extension)
+- Removing an extension by URI pattern
+  - cfg.remove_extension(extension="asdf.extensions.*")
+- Temporarily override config values (context manager usage)
+  - from asdf import config_context
+  - with config_context() as cfg_ctx:
+  -     cfg_ctx.default_version = "2020.0"
+  -     # operations within the context use the overridden config
+- Accessing the resource manager
+  - rm = cfg.resource_manager
+  - resource = rm.get_resource("some/uri")
+
+Related Concepts and Modules
+- entry_points: discovers default resource mappings and extensions registered via entry points.
+- ResourceManager: provides access to resources based on resource mappings.
+- ResourceMappingProxy: wraps raw mappings for uniform handling.
+- ExtensionProxy: wraps extension objects for uniform handling.
+- validate_version (from ._helpers): validates and normalizes version strings.
+
+See Also
+- get_config: returns the global AsdfConfig instance.
+- config_context: context manager to temporarily override configuration.
+- util.uri_match: for URI pattern matching when filtering extensions.
+- versioning, entry_points: to understand defaults and discovery mechanisms.
+
+This documentation covers the public surface and core behavior exposed by the provided code in config.rst.

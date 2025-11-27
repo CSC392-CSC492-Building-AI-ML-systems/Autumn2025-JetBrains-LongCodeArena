@@ -1,0 +1,193 @@
+PyTables File Format
+======================
+
+This document describes the on-disk file format used by PyTables for storing
+tables, groups and especially the indexing structures that accelerate queries.
+It focuses on the internal representation of index objects as implemented in
+the provided code (Index class and related utilities).
+
+Overview
+--------
+
+- PyTables stores data in a hierarchical structure consisting of Groups and
+  Tables. Each table column can be associated with an index to speed up lookups.
+- Indexes are persisted as part of the PyTables file format and are managed by
+  the indexing extension (indexesextension) and related Python-side classes.
+- The on-disk representation of an Index is exposed through a dedicated
+  dataset/group structure, identified by a class id of "INDEX" and manipulated
+  by the Index class in Python.
+
+Key concepts and terminology
+-----------------------------
+
+- Index object: an internal entity attached to a single column of a Table that
+  keeps the information needed to accelerate searches. The Python class
+  Index is a thin wrapper around a persistent on-disk representation.
+- Kinds: the index can encode the row position in different precisions. The
+  available kinds map to bit-widths as follows:
+  - ultralight (1)
+  - light (2)
+  - medium (4)
+  - full (8)
+  These determine whether the index tracks only the chunk containing the row,
+  or the full 64-bit row position for exact lookups.
+- Path conventions: the on-disk path for an index contains a marker segment
+  starting with "_i_". A helper converts this path into the corresponding
+  table path and the column path.
+
+Versioning and defaults
+-----------------------
+
+- obversion: "2.1"  
+  Version of index objects used by PyTables Pro 2.1 and newer. This version
+  helps maintain compatibility across releases.
+- defsort: "mergesort"  
+  Default sorting algorithm used when performing indexed operations.
+- default_auto_index: True  
+  By default, PyTables will automatically update indexes after table appends or
+  operations that invalidate the index.
+- default_index_filters: see the Filters defaults (complevel=1, complib='zlib',
+  shuffle=True, fletcher32=False). These filters apply to index data on disk.
+- opt_search_types: a list of data types that have optimized search
+  implementations in Cython/C for index lookups:
+  int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64.
+
+On-disk structure and data types
+--------------------------------
+
+- Index object class and persistence
+  - _c_classid = 'INDEX' indicates the on-disk class for the index object.
+  - The actual implementation is split between Python (Index class) and the
+    cython/extension layer (indexesextension).
+- Index-related data containers
+  - EArray, CArray: arrays used for storing growable or fixed-size index data.
+  - IndexArray: core on-disk array type used to store the index’s internal
+    data.
+  - CacheArray, LastRowArray: auxiliary structures used to service fast
+    lookups and last-row optimizations.
+- Filters
+  - The default_index_filters object encapsulates I/O compression and metadata
+    options applied to index storage (complevel, complib, shuffle, and
+    fletcher32).
+
+Index class: API overview
+-------------------------
+
+The Python class Index represents an on-disk index attached to a single column
+in a Table. It provides properties and methods to query and manage the index.
+
+- kind (read-only)
+  - Returns one of: 'ultralight', 'light', 'medium', 'full'
+  - Mapped from self.indsize (1, 2, 4, 8 respectively).
+- filters (read-only)
+  - Returns the Filters instance associated with this index (controls I/O
+    filtering for the stored index data).
+- dirty (read/write)
+  - Indicates whether the index is out-of-sync with the underlying table data.
+  - Setting dirty triggers a notification to the condition cache via nail/unnail
+    when the status changes.
+- column (read-only)
+  - The Column object corresponding to the indexed column. The path is resolved
+    using _table_column_pathname_of_index.
+- table (read-only)
+  - The Table object that owns the indexed column.
+- nblockssuperblock, nslicesblock, nchunkslice
+  - Metrics describing the on-disk layout:
+    - nblockssuperblock: number of blocks per superblock.
+    - nslicesblock: number of slices per block.
+    - nchunkslice: number of chunks per slice.
+- nsuperblocks
+  - Total number of superblocks for the index (partial excerpt in the
+    provided code).
+
+Path semantics for indexes
+--------------------------
+
+PyTables encodes the association between a table and its indexed column using a
+path pattern that includes a synthetic segment starting with "_i_". A helper
+function extracts the corresponding table path and column path from the on-disk
+path of the index:
+
+- _table_column_pathname_of_index(indexpathname)
+  - Locates the first component that starts with "_i_".
+  - tablepathname = join(parts up to that segment, then replace "_i_<name>" with
+    the column name extracted from that segment).
+  - colpathname = join(remaining components after the "_i_" segment).
+  - Returns (tablepathname, colpathname).
+
+Example (conceptual):
+- Given an index path like: ".../SomeGroup/_i_mycol/column/part"
+  - tablepathname becomes ".../SomeGroup/mycol"
+  - colpathname becomes "column/part"
+
+This convention ensures a robust mapping between the on-disk index data and the
+in-memory table/column objects.
+
+Usage and lifecycle
+-------------------
+
+- Auto-indexing
+  - By default, PyTables enables automatic indexing updates after table growth
+    or operations that invalidate indexes. This behavior is controlled by
+    default_auto_index.
+- Dirty state
+  - The dirty flag indicates the index is out of sync with the table’s data.
+  - Changing the dirty flag will nail or unnail the condition cache to ensure
+    dependent operations re-evaluate conditions correctly during queries.
+
+Practical implications for file format design
+---------------------------------------------
+
+- Index data is stored in a dedicated, compressed dataset structure within the
+  PyTables file, with a type and layout chosen to balance memory usage and
+  lookup speed. The exact storage is mediated by the combination of
+  IndexArray, CacheArray, LastRowArray and the Filters configuration.
+- The index kind determines the granularity of information stored and the
+  precision of lookups. The full kind tracks exact 64-bit row positions; the
+  lighter kinds track the block/segment location, reducing per-item storage
+  but still enabling fast lookups under certain patterns.
+- Path-based linkage between tables and their indexes is central to how PyTables
+  organizes and retrieves index data, enabling consistent mapping from in-file
+  structures to in-memory representations.
+
+References to code-level concepts (for developers)
+--------------------------------------------------
+
+- Index class (Python interface): represents a single column index attached to a
+  Table and exposes properties such as kind, filters, dirty, column, and table.
+- Index kinds: ultralight (1), light (2), medium (4), full (8) via indsize.
+- Path helper: _table_column_pathname_of_index(indexpathname) to derive
+  tablepath and colpathname from the on-disk index path.
+- Defaults and configuration:
+  - obversion = "2.1"
+  - defsort = "mergesort"
+  - default_auto_index = True
+  - default_index_filters = Filters(complevel=1, complib='zlib', shuffle=True, fletcher32=False)
+  - opt_search_types = ("int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64")
+
+Notes
+-----
+
+- This documentation reflects the internal structure as implemented in the provided
+  code snippet. End-user documentation may abstract some of these details while
+  preserving the practical implications for performance and storage behavior.
+- The actual on-disk layout relies on the extension modules (indexesextension)
+  and data containers (EArray, CArray, IndexArray, CacheArray, LastRowArray)
+  to implement the persistent storage and fast lookups.
+
+Appendix: example usage snippet
+-------------------------------
+
+- Accessing the kind for an index:
+  - index_kind = index.kind  # returns 'ultralight', 'light', 'medium', or 'full'
+
+- Inspecting the index path mapping:
+  - tablepath, colpath = _table_column_pathname_of_index(index._v_pathname)
+
+- Checking and toggling dirtiness:
+  - if index.dirty:
+        perform_reindex_if_needed()
+  - index.dirty = True  # mark as dirty and notify condition cache if state changes
+
+This completes a concise overview of the PyTables File Format as it pertains to index
+objects, their on-disk representation, and the Python API used to interact with them.

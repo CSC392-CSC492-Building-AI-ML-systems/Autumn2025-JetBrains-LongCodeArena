@@ -1,0 +1,253 @@
+# Working with assignments and allocations
+
+## Overview
+This module provides a session-based interface for interacting with an ftrack server, enabling operations related to assignments and allocations through the ftrack API. The core components are a Session class for managing server connections, authentication handling, and optional features such as auto-populated entities, caching, event hub integration, and plugin support. While the sample code focuses on session management and authentication, it underpins working with assignments and allocations by providing authenticated, stateful access to the ftrack server where such resources are managed.
+
+Key capabilities include:
+- Secure HTTP authentication via headers injected automatically into requests
+- Configurable server connection using explicit arguments or environment variables
+- Lazy loading of entity attributes (auto_populate)
+- Caching support with pluggable key makers
+- Optional embedded event hub connection for non-local events
+- Schema caching and plugin argument handling
+
+## Key Components
+
+- SessionAuthentication
+  - Attaches ftrack authentication information to HTTP requests.
+  - Example from the source:
+
+    ```
+    class SessionAuthentication(requests.auth.AuthBase):
+        '''Attach ftrack session authentication information to requests.'''
+
+        def __init__(self, api_key, api_user):
+            '''Initialise with *api_key* and *api_user*.'''
+            self.api_key = api_key
+            self.api_user = api_user
+            super(SessionAuthentication, self).__init__()
+
+        def __call__(self, request):
+            '''Modify *request* to have appropriate headers.'''
+            request.headers.update({
+                'ftrack-api-key': self.api_key,
+                'ftrack-user': self.api_user
+            })
+            return request
+    ```
+
+- Session
+  - An isolated session for interaction with an ftrack server.
+  - Core features:
+    - Server URL resolution
+      - If *server_url* is not provided, the value is read from the environment variable FTRACK_SERVER.
+      - If still not provided, a TypeError is raised.
+    - API credentials
+      - *api_key* and *api_user* can be provided directly or sourced from environment variables FTRACK_API_KEY (or FTRACK_APIKEY for backward compatibility) and FTRACK_API_USER.
+      - If not provided, a TypeError is raised.
+    - Auto-population of entities
+      - If *auto_populate* is True (default), accessing an entity’s attribute will trigger a fetch from the server if not already loaded.
+    - Cache support
+      - Accepts a cache instance or a callable that returns a cache; uses a top-level MemoryCache internally.
+      - Uses a *cache_key_maker* (default: StringKeyMaker) to generate cache keys.
+    - Event hub
+      - If *auto_connect_event_hub* is True, an embedded event hub can publish/subscribe to non-local events. The hub runs in a background thread to improve startup time.
+    - Schema caching
+      - Optional schema caching controlled by *schema_cache_path*. If not set, environment variable FTRACK_API_SCHEMA_CACHE_PATH is used. Set to False to disable schema caching.
+    - Plugin arguments
+      - *plugin_arguments* allows passing keyword arguments to plugin discovery; compatibility handling is provided for plugins with differing signatures.
+
+  - Constructor signature (summary):
+
+    ```
+    def __init__(
+        self, server_url=None, api_key=None, api_user=None, auto_populate=True,
+        plugin_paths=None, cache=None, cache_key_maker=None,
+        auto_connect_event_hub=None, schema_cache_path=None,
+        plugin_arguments=None
+    ):
+        '''Initialise session.
+
+        *server_url* should be the URL of the ftrack server to connect to
+        including any port number. If not specified attempt to look up from
+        :envvar:`FTRACK_SERVER`.
+
+        *api_key* should be the API key to use for authentication whilst
+        *api_user* should be the username of the user in ftrack to record
+        operations against. If not specified, *api_key* should be retrieved
+        from :envvar:`FTRACK_API_KEY` and *api_user* from
+        :envvar:`FTRACK_API_USER`.
+
+        If *auto_populate* is True (the default), then accessing entity
+        attributes will cause them to be automatically fetched from the server
+        if they are not already. This flag can be changed on the session
+        directly at any time.
+
+        *plugin_paths* should be a list of paths to search for plugins. If not
+        specified, default to looking up :envvar:`FTRACK_EVENT_PLUGIN_PATH`.
+
+        *cache* should be an instance of a cache that fulfils the
+        :class:`ftrack_api.cache.Cache` interface and will be used as the cache
+        for the session. It can also be a callable that will be called with the
+        session instance as sole argument. The callable should return ``None``
+        if a suitable cache could not be configured, but session instantiation
+        can continue safely.
+
+       .. note::
+
+            The session will add the specified cache to a pre-configured layered
+            cache that specifies the top level cache as a
+            :class:`ftrack_api.cache.MemoryCache`. Therefore, it is unnecessary
+            to construct a separate memory cache for typical behaviour. Working
+            around this behaviour or removing the memory cache can lead to
+            unexpected behaviour.
+
+        *cache_key_maker* should be an instance of a key maker that fulfils the
+        :class:`ftrack_api.cache.KeyMaker` interface and will be used to
+        generate keys for objects being stored in the *cache*. If not specified,
+        a :class:`~ftrack_api.cache.StringKeyMaker` will be used.
+
+        If *auto_connect_event_hub* is True then embedded event hub will be
+        automatically connected to the event server and allow for publishing and
+        subscribing to **non-local** events. If False, then only publishing and
+        subscribing to **local** events will be possible until the hub is
+        manually connected using :meth:`EventHub.connect
+        <ftrack_api.event.hub.EventHub.connect>`.
+
+       .. note::
+
+            The event hub connection is performed in a background thread to
+            improve session startup time. If a registered plugin requires a
+            connected event hub then it should check the event hub connection
+            status explicitly. Subscribing to events does *not* require a
+            connected event hub.
+
+        Enable schema caching by setting *schema_cache_path* to a folder path.
+        If not set, :envvar:`FTRACK_API_SCHEMA_CACHE_PATH` will be used to
+        determine the path to store cache in. If the environment variable is
+        also not specified then a temporary directory will be used. Set to
+        `False` to disable schema caching entirely.
+
+        *plugin_arguments* should be an optional mapping (dict) of keyword
+        arguments to pass to plugin register functions upon discovery. If a
+        discovered plugin has a signature that is incompatible with the passed
+        arguments, the discovery mechanism will attempt to reduce the passed
+        arguments to only those that the plugin accepts. Note that a warning
+        will be logged in this case.
+
+        '''
+        ...
+        self.logger = logging.getLogger(
+            __name__ + '.' + self.__class__.__name__
+        )
+        self._closed = False
+
+        if server_url is None:
+            server_url = os.environ.get('FTRACK_SERVER')
+
+        if not server_url:
+            raise TypeError(
+                'Required "server_url" not specified. Pass as argument or set '
+                'in environment variable FTRACK_SERVER.'
+            )
+
+        self._server_url = server_url
+
+        if api_key is None:
+            api_key = os.environ.get(
+                'FTRACK_API_KEY',
+                # Backwards compatibility
+                os.environ.get('FTRACK_APIKEY')
+            )
+
+        if not api_key:
+            raise TypeError(
+                'Required "api_key" not specified. Pass as argument or set in '
+                'environment variable FTRACK_API_KEY.'
+            )
+
+        self._api_key = api_key
+
+        if api_user is None:
+            api_user = os.environ.get('FTRACK_API_USER')
+            if not api_user:
+                try:
+                    api_user = getpass.getuser()
+                except Exception:
+                    pass
+
+        if not api_user:
+            raise TypeError(
+                'Required "api_user" not specified. Pass as argument, set in '
+                'environment variable FTRACK_API_USER or one of the standard '
+                'environment variables used by Python\'s getpass module.'
+            )
+
+        self._api_user = api_user
+
+        # Currently pending operations.
+        self.recorded_operations = ftrack_api.operation.Operations()
+        self.record_operations = True
+
+        self.cache_key_maker = cache_key_maker
+        if self.cache_key_maker is None:
+            self.cache_key_maker = ftrack_api.cache.StringKeyMaker()
+
+        # Enforce always having a memory cache at top level so that the same
+        # ...
+    ```
+
+## Usage
+
+- Create a session with explicit credentials:
+
+  ```
+  from ftrack_api.assignments_and_allocations import Session
+  session = Session(
+      server_url='https://ftrack.example.com',
+      api_key='YOUR_API_KEY',
+      api_user='your.username'
+  )
+  ```
+
+- Or rely on environment variables:
+
+  - FTRACK_SERVER for server_url
+  - FTRACK_API_KEY (or FTRACK_APIKEY) for api_key
+  - FTRACK_API_USER for api_user
+
+  ```
+  session = Session()
+  ```
+
+- Working with the session
+  - Accessing entities will auto-populate when auto_populate is True (default).
+  - Use the session to perform operations related to assignments and allocations via the underlying ftrack API (the module provides the session scaffold and authentication mechanism; exact resource access is performed through the API exposed by the session).
+
+- Authentication in HTTP requests
+  - The SessionAuthentication class can be used to attach credentials to requests:
+
+    ```
+    auth = SessionAuthentication('my_api_key', 'my_user')
+    response = requests.get('https://server/endpoint', auth=auth)
+    ```
+
+- Event hub
+  - If auto_connect_event_hub is True, the session will connect to the event hub in the background, enabling non-local event publishing/subscribing when supported by plugins.
+
+## Details
+
+- Environment and authentication
+  - If required values are missing, the session raises TypeError with guidance on how to supply them.
+  - The session uses a layered caching approach with a MemoryCache at the top level to optimize repeated access to assignments and allocations-related data.
+
+- Extensibility
+  - Plugin paths and arguments support dynamic extension of the session capabilities as new features (potentially including enhanced handling for assignments and allocations) are discovered and registered.
+
+- Schema caching
+  - Optional for performance; controlled via schema_cache_path or FTRACK_API_SCHEMA_CACHE_PATH. Disable by setting to False.
+
+- Notes
+  - The code relies on internal ftrack_api subsystems (operations, cache, event hub, etc.). This documentation focuses on the surface features visible in the provided implementation and how they underpin working with assignments and allocations via authenticated sessions.
+
+If you need more concrete examples tied to specific assignments/allocations endpoints or object models, please provide the relevant API surface or usage patterns, and I can expand the documentation accordingly.

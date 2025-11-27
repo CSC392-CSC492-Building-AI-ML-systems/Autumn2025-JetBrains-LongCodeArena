@@ -1,0 +1,121 @@
+Dataset loading utilities
+=========================
+
+This section documents the dataset loading utilities used to fetch and cache OpenML datasets for convenient downstream use. The primary user-facing entry point is fetch_openml, which downloads datasets from OpenML, caches them locally, handles transient network failures, and decompresses data as needed. The utilities are designed to be robust, resilient to network errors, and to minimize redundant downloads via caching.
+
+Overview
+--------
+
+- Fetch OpenML datasets programmatically with caching and retry support.
+- Transparent handling of gzip-compressed OpenML resources.
+- Local cache is managed in a dedicated data home directory (via get_data_home).
+- Automatic cache invalidation and redownload on invalid cached data.
+- Specialized handling for OpenML-specific errors (e.g., HTTP 412).
+
+Public API (high level)
+-----------------------
+
+- fetch_openml: Retrieve a dataset from OpenML with caching, returning a dataset object (commonly a Bunch) that contains data and target attributes, among other metadata.
+
+Usage example
+-------------
+
+Basic usage (retrieve a dataset by name and version):
+
+.. code-block:: python
+
+    from sklearn.datasets import fetch_openml
+
+    # Retrieve the dataset named "iris" (example; version may vary)
+    ds = fetch_openml(name="iris", version=1)
+    X = ds.data
+    y = ds.target
+
+Advanced usage (control cache location and retry behavior is supported via internal helpers):
+.. code-block:: python
+
+    ds = fetch_openml(name="adult", version=2, data_home="/path/to/cache")
+    X = ds.data
+    y = ds.target
+
+Notes
+-----
+
+- The dataset loading utilities cache downloaded files under the data_home path (by default, the location returned by get_data_home) in a structured subdirectory (openml.org/...), with the raw content stored as a gzipped file for efficient reuse.
+- When a network error occurs, the download is retried automatically according to the configured retry policy. If the error persists or the cached file is invalid, the cache is cleaned and the download is retried.
+- OpenML-specific HTTP 412 errors are treated as non-retriable (these indicate a generic OpenML issue and will raise immediately).
+
+Key components (implementation/helpers)
+---------------------------------------
+
+The following internal helpers implement caching, retries, and OpenML integration. They are intended for maintainers and advanced users who wish to understand the robustness of the loading process.
+
+- _get_local_path(openml_path: str, data_home: str) -> str
+  - Computes the local cache path for a given OpenML resource.
+
+- _retry_with_clean_cache(
+    openml_path: str,
+    data_home: Optional[str],
+    no_retry_exception: Optional[Exception] = None,
+) -> Callable
+  - Decorator that, on failure of the wrapped function, removes the local cached file and retries. If data_home is None, no retry is performed.
+
+- _retry_on_network_error(
+    n_retries: int = 3, delay: float = 1.0, url: str = ""
+) -> Callable
+  - Decorator that retries a function upon network-related errors (URLError, TimeoutError), with a configurable delay between attempts. HTTP 412 is treated as non-retriable.
+
+- _open_openml_url(
+    openml_path: str, data_home: Optional[str], n_retries: int = 3, delay: float = 1.0
+  ) -> stream
+  - Core utility that fetches a resource from OpenML.org, with optional local caching. It supports gzip-encoded responses and returns a stream suitable for downstream parsing.
+
+- OpenMLError
+  - Custom exception type used to represent OpenML-specific HTTP 412 errors (a generic OpenML error).
+
+- _get_json_content_from_openml_api(
+    url: str,
+    error_message: Optional[str],
+    data_home: Optional[str],
+    n_retries: int = 3,
+    delay: float = 1.0,
+) -> Dict
+  - Helper to load and validate JSON content from the OpenML API with retry and error handling.
+
+Recommended reading
+-------------------
+
+- get_data_home: Location on disk where datasets are cached (imported from the same package).
+- load_arff_from_gzip_file: Helper used to parse ARFF data when needed (imported from the module’s ARFF parser).
+
+Developer notes
+---------------
+
+- The caching mechanism uses an atomic move strategy to ensure concurrency safety when multiple processes access the cache simultaneously.
+- When a network or HTTP error occurs, informative warnings are issued to help diagnose download issues.
+- The OpenML endpoints used cover listing, data info, data features, data qualities, and downloads, as indicated by the internal endpoint constants:
+  - _OPENML_PREFIX
+  - _SEARCH_NAME
+  - _DATA_INFO
+  - _DATA_FEATURES
+  - _DATA_QUALITIES
+  - _DATA_FILE
+
+Example: Understanding the flow (high level)
+--------------------------------------------
+
+1. fetch_openml is called with a dataset name (and optional version or data_id).
+2. The loader constructs the OpenML URL and uses _open_openml_url to fetch the resource, caching it if data_home is provided.
+3. If a cached file exists, it may be used directly; otherwise, the file is downloaded atomically and stored.
+4. If a network error occurs, _retry_on_network_error reissues the request up to the configured number of retries.
+5. If the cached file is invalid or an error occurs, the cache is cleaned via _retry_with_clean_cache and a fresh download is attempted.
+6. The downloaded content (potentially gzip-compressed) is decompressed and parsed, returning a dataset object (with data, target, and metadata).
+
+See also
+--------
+
+- fetch_openml (public API entry point)
+- get_data_home (cache location helper)
+- load_arff_from_gzip_file (ARFF parsing utility used for certain OpenML data formats)
+
+This documentation focuses on the dataset loading utilities provided for OpenML datasets, including caching, retry logic, and integration details that affect how datasets are retrieved and reused in subsequent runs.

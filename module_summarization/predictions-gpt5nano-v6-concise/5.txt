@@ -1,0 +1,207 @@
+Publishing versions
+==================
+
+This document describes how the publishing versioning workflow is modeled and used in the publishing subsystem. It covers the data model, core operations, event hooks, examples, and extension points. The goal is to provide a robust, auditable way to create, publish, query, and rollback discrete versions of items (assets, configurations, or any trackable objects) within a project/workflow.
+
+Overview
+--------
+
+- Purpose: Maintain a history of evolutions of an item and expose a stable, published state that downstream users and environments can rely on.
+- Key concepts:
+  - Version: a discrete snapshot associated with a source item (e.g., asset, configuration, publishable object).
+  - Draft vs. Published: a version may exist in draft form before being published to a target context (e.g., production, review).
+  - Publication: the act of linking a version to a target context and marking it as the active or published state for that context.
+  - Lineage: versions form a history, enabling rollbacks and comparison between successive versions.
+
+Core data model (conceptual)
+----------------------------
+
+- VersionRecord
+  - id: unique identifier
+  - source_item_id: identifier of the item being versioned
+  - version_number: increasing integer (1, 2, 3, ...)
+  - created_at: timestamp
+  - author: user who created the version
+  - message: optional description of the changes
+  - status: enum { draft, published, archived }
+
+- PublicationRecord
+  - id: unique identifier
+  - version_id: reference to the VersionRecord
+  - published_at: timestamp
+  - target_context: where the version is published (e.g., production, staging)
+  - notes: optional publication notes
+  - environment: optional environment or scope for the publish
+
+- VersionGraph (optional)
+  - parent_version_id, child_version_id: to represent lineage
+  - diff/summary: high-level description of changes between versions
+
+Public API surface (design overview)
+------------------------------------
+
+Note: The concrete API names may be adapted to fit your existing codebase. The following outlines a clean, developer-friendly interface for working with publishing versions.
+
+- create_version(source_item, author=None, message=None) -> VersionRecord
+  - Creates a new draft version for the given source item.
+  - Increments the version_number based on existing versions for the item.
+- publish_version(version, target_context, environment=None, notes=None) -> PublicationRecord
+  - Validates that the version is in draft state.
+  - Creates a PublicationRecord linking the version to the target context and marks the version as Published.
+  - Optionally records environment and notes.
+- list_versions(source_item, include_drafts=False) -> List[VersionRecord]
+  - Returns versions for the item, optionally including drafts.
+- get_published_version(source_item, target_context) -> VersionRecord or None
+  - Returns the currently published version for the given target context, if any.
+- rollback_to_version(source_item, version_number, target_context) -> VersionRecord
+  - Creates a new draft version representing a rollback to the specified version in the target context.
+  - Can optionally publish immediately or leave as draft depending on workflow.
+- archive_version(version) -> None
+  - Archives a version (soft delete from active use but kept for history).
+
+- Event hooks (optional but recommended)
+  - on_version_created(version): fired after a new draft version is created.
+  - on_version_published(publication): fired after a version is published.
+  - on_version_rolled_back(new_version): fired after a rollback version is created.
+  - on_version_archived(version): fired after a version is archived.
+
+Usage pattern
+-------------
+
+- Create a draft version when changes are ready for review.
+- Publish the draft when it is approved and required by downstream environments.
+- Retrieve the currently published version for a given context to determine what is live in that context.
+- Rollback when a published version needs to be deprecated in favor of a prior version.
+- Archive drafts or obsolete versions to reduce clutter while preserving history.
+
+Examples
+--------
+
+Example 1: Create a new draft version for an item
+
+.. code-block:: python
+
+   # Assume `source_item` is a reference to the item being versioned
+   # and `session` is an active session (as in the provided codebase).
+   from datetime import datetime
+
+   author = session._api_user  # or any user identifier
+   version = publishing.create_version(
+       source_item=source_item,
+       author=author,
+       message="Initial draft for review"
+   )
+   print("Created version:", version.version_number)
+
+Example 2: Publish the draft version to a target context
+
+.. code-block:: python
+
+   target_context = "production"  # or a context object if your model uses one
+   publication = publishing.publish_version(
+       version=version,
+       target_context=target_context,
+       environment="staging",  # optional
+       notes="Approved in QA"
+   )
+   print("Published version", version.version_number, "to", target_context)
+
+Example 3: List all versions for a source item
+
+.. code-block:: python
+
+   versions = publishing.list_versions(source_item, include_drafts=True)
+   for v in versions:
+       status = v.status
+       print("Version", v.version_number, "-", status, "created at", v.created_at)
+
+Example 4: Rollback to a previous version
+
+.. code-block:: python
+
+   target_context = "production"
+   rollback_version = publishing.rollback_to_version(
+       source_item=source_item,
+       version_number=2,
+       target_context=target_context
+   )
+   # Optionally publish the rollback draft
+   rollback_publication = publishing.publish_version(
+       version=rollback_version,
+       target_context=target_context,
+       environment="production",
+       notes="Rollback to v2 due to critical bug"
+   )
+   print("Rollback draft created as version", rollback_version.version_number)
+
+Example 5: Retrieve the currently published version for a context
+
+.. code-block:: python
+
+   current_published = publishing.get_published_version(
+       source_item=source_item,
+       target_context="production"
+   )
+   if current_published:
+       print("Currently published version:", current_published.version_number)
+   else:
+       print("No version published yet for this context")
+
+Security and permissions
+------------------------
+
+- Writers and reviewers should have appropriate permissions to create and modify VersionRecord entities.
+- Publishing should enforce that only draft versions can be published, to prevent accidental publishing of finalized or archived editions.
+- Consider role-based access control around rollback and archive operations.
+
+Performance and caching considerations
+--------------------------------------
+
+- Version history can grow large; consider paging results when listing versions.
+- If schema caching or session caching is part of your stack, ensure that version and publication records invalidate relevant caches on changes.
+- Use index(es) on source_item_id and version_number for efficient retrieval.
+
+Events and extensibility
+------------------------
+
+- The publishing system should emit events such as version_created, version_published, and version_rolled_back to allow plugins to react (e.g., triggering downstream CI/CD, notifying users, or updating dashboards).
+- Provide extension points to hook into the lifecycle:
+  - on_version_created(version)
+  - on_version_published(publication)
+  - on_version_rolled_back(new_version)
+  - on_version_archived(version)
+
+Testing
+-------
+
+- Unit tests for:
+  - Creating versions increments correctly per source item.
+  - Publishing a version creates a valid PublicationRecord and updates version state.
+  - Listing versions returns correct slices (including/excluding drafts).
+  - Rollbacks generate a new draft version linked to the target context.
+  - Archiving a version preserves history and prevents future publishes.
+- Integration tests with a mock or test server to validate end-to-end publish flow across contexts.
+
+Extending and plugin development
+-------------------------------
+
+- Implementors can add new fields to VersionRecord or PublicationRecord to support extended metadata (e.g., review status, approval user, tags).
+- Plugins can listen to version and publication events to:
+  - Notify external systems (e.g., messaging, ticketing)
+  - Trigger automated validation or checks
+  - Update dashboards or reports
+
+Notes for implementers
+----------------------
+
+- Align with the existing session architecture shown in the codebase: use the same session/user identity for authoring and publishing operations.
+- Consider using a top-level cache for frequently queried publication states to minimize repeated server hits.
+- Keep the model backwards-compatible; when introducing new fields, provide defaults and migrations as needed.
+
+References
+----------
+
+- Version management concepts: version numbering, draft vs. published states, and rollback semantics.
+- Event-driven integration points within the ftrack-style session and event hub patterns, as evidenced by the repository’s Session and EventHub usage.
+
+If you have a concrete class design or existing module names for your project’s publishing feature, I can tailor this documentation to reflect exact API names and code examples.

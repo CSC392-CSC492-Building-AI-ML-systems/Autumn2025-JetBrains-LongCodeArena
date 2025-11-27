@@ -1,0 +1,125 @@
+hdf5_parser.md
+
+General HDF5 file reader – Transformations registry and utilities
+
+Overview
+- This module provides a collection of predefined transformation functions for the HDF5Reader class in Masci-tools.
+- Transformations are registered at import time via a decorator and stored in HDF5Reader._transforms. Some transformations can operate on already-processed attributes (registered in HDF5Reader._attribute_transforms).
+- Each transformation is designed to gracefully handle three kinds of input:
+  1) a raw h5py.Dataset that may need conversion to a NumPy array
+  2) a NumPy array
+  3) a dict of datasets (useful for reading multiple datasets whose keys are not known in advance)
+
+Key concepts
+- Decorator: hdf5_transformation(attribute_needed) registers a function as a transformation. It wraps the function to convert any exception into an HDF5TransformationError and stores the wrapper in HDF5Reader._transforms under the function name. If attribute_needed is True, the function name is also added to HDF5Reader._attribute_transforms.
+- Input handling: Each transformation checks whether the input is a single h5py.Dataset or a dict of datasets, and processes accordingly. This enables uniform handling when reading either a single dataset or a group containing multiple datasets.
+
+Registered transformations and what they do
+- get_first_element(dataset)
+  - Returns the first element of the dataset.
+  - Behavior: if dataset is a dict, returns {key: data[0]} for each item; otherwise returns dataset[0].
+
+- index_dataset(dataset, index)
+  - Returns the n-th element (index) of the dataset.
+  - Behavior: if dataset is a dict, returns {key: data[index]} for each item; otherwise returns dataset[index].
+
+- slice_dataset(dataset, slice_arg)
+  - Applies a Python slice to the dataset.
+  - Behavior: if dataset is a dict, returns {key: data[slice_arg]} for each item; otherwise returns dataset[slice_arg].
+
+- get_shape(dataset)
+  - Retrieves the shape of the dataset.
+  - Behavior: if dataset is a dict, returns {key: data.shape} for each item; otherwise returns dataset.shape.
+
+- get_name(dataset, full_path=False)
+  - Gets the name of the dataset.
+  - Behavior:
+    - If dataset is a dict: returns {key: data.name or data.name.split('/')[-1]} depending on full_path.
+    - If dataset is a single h5py.Dataset: returns dataset.name or the last path component depending on full_path.
+    - If input is a list or NumPy array: raises ValueError (requires an h5py.Dataset).
+  - full_path controls whether the full path (dataset.name) is returned or just the final path component.
+
+- tile_array(dataset, n_repeats)
+  - Repeats the array using numpy.tile.
+  - Behavior: if dataset is a dict, returns {key: np.tile(dataset, n_repeats)} for each item; otherwise returns np.tile(dataset, n_repeats).
+  - Note: In the dict branch, the implementation uses np.tile(dataset, n_repeats) instead of using the per-item data, which appears to be a bug (should be np.tile(data, n_repeats)).
+
+- repeat_array(dataset, n_repeats)
+  - Repeats each element of the array using numpy.repeat.
+  - Behavior: if dataset is a dict, returns {key: np.repeat(dataset, n_repeats)} for each item; otherwise returns np.repeat(dataset, n_repeats).
+  - Note: Similar to tile_array, the dict branch uses the whole dataset instead of per-item data (np.repeat(data, n_repeats) is likely intended).
+
+- get_all_child_datasets(group, ignore=None, contains=None)
+  - Collects all immediate child datasets from an h5py.Group.
+  - Parameters:
+    - group: the parent group to inspect
+    - ignore: a string or iterable of strings; keys matching any of these phrases are ignored
+    - contains: a string or iterable of strings; only keys containing all specified phrases are included
+  - Behavior: returns a dict mapping child dataset names to the corresponding h5py.Dataset objects for every immediate dataset child that passes the filters.
+
+Usage patterns
+- Accessing the registered transforms:
+  - Each transformation is registered under its function name in HDF5Reader._transforms.
+  - You can apply a transformation by name, passing the dataset (and any required additional arguments) as parameters.
+  - Example: shape = HDF5Reader._transforms['get_shape'](dataset)
+- Handling different input forms:
+  - For a single h5py.Dataset: transformation operates directly on the dataset.
+  - For a dict of datasets: transformation applies to each value in the dict and returns a dict with the same keys.
+
+Practical examples (derived from the code)
+- Get the first element of a dataset
+  - first = HDF5Reader._transforms['get_first_element'](dset)
+
+- Get the n-th element (e.g., index=5) from a dict of datasets
+  - subset = HDF5Reader._transforms['index_dataset'](dset_dict, 5)
+
+- Slice a dataset (e.g., dset[2:10])
+  - sliced = HDF5Reader._transforms['slice_dataset'](dset, slice(2, 10))
+
+- Get shapes
+  - shape = HDF5Reader._transforms['get_shape'](dset)
+  - shapes = HDF5Reader._transforms['get_shape'](dset_dict)
+
+- Get names
+  - name = HDF5Reader._transforms['get_name'](dset, full_path=False)
+  - full = HDF5Reader._transforms['get_name'](dset, full_path=True)
+  - dict form: names = HDF5Reader._transforms['get_name'](dset_dict, full_path=False)
+
+- Tile or repeat (note the potential dict bug)
+  - tiled = HDF5Reader._transforms['tile_array'](dset, 3)
+  - repeated = HDF5Reader._transforms['repeat_array'](dset, 2)
+  - For dict inputs, be aware of the current implementation issue where per-item data is not used in dict comprehension (see code note above).
+
+- Get all child datasets from a group
+  - children = HDF5Reader._transforms['get_all_child_datasets'](grp, ignore=['tmp', 'backup'], contains='data')
+
+Error handling and robustness
+- All transformations are wrapped by a try-except inside the decorator. If any transformation raises an exception, it is converted to HDF5TransformationError with a descriptive message including the function name.
+- get_name explicitly raises ValueError for unsupported input types (e.g., lists or NumPy arrays).
+
+Design notes and extensibility
+- The transformation registry approach decouples the HDF5Reader’s core parsing logic from a set of reusable, composable operations. This makes it easy to add new transformations by simply decorating a function with @hdf5_transformation(attribute_needed=[True|False]).
+- If a transformation requires information from a previously processed attribute, set attribute_needed to True so the function name is tracked in HDF5Reader._attribute_transforms.
+- The current set of transformations demonstrates common patterns when dealing with:
+  - raw h5py.Dataset objects
+  - nested structures like dicts of datasets (e.g., multiple datasets read from a group)
+  - basic NumPy array operations (tile, repeat)
+
+Caveats and known issues
+- tile_array and repeat_array: dict handling currently uses the outer dataset variable rather than per-item values (data). This likely results in incorrect behavior for dict inputs. If you rely on these for dict inputs, consider patching to use data (i.e., np.tile(data, n_repeats) and np.repeat(data, n_repeats)).
+
+API at a glance
+- Decorator: hdf5_transformation(attribute_needed: bool) -> Callable
+- Core registry: HDF5Reader._transforms (mapping from name to callable)
+- Optional attribute tracking: HDF5Reader._attribute_transforms (set of transformation names that operate on processed attributes)
+
+For developers
+- To extend the reader with a new transformation:
+  - Define a function with the same convention as the existing ones (input could be a dataset or dict of datasets)
+  - Annotate with @hdf5_transformation(attribute_needed=<True|False>)
+  - Implement the logic for both single dataset and dict cases if needed
+  - The function will automatically be registered and wrapped to raise HDF5TransformationError on failure
+
+Notes
+- The documentation here focuses on the general purpose and usage of the HDF5Reader transformations for a General HDF5 file reader within Masci-tools.
+- When integrating into your codebase, use the named transforms via HDF5Reader._transforms and ensure tests cover both single-dataset and dict-dataset inputs, especially for edge cases like get_name and get_all_child_datasets.

@@ -1,0 +1,202 @@
+# cubes.rst — Generate documentation for the MapPlot module
+
+This document provides a developer-focused reference for the MapPlotter component in the cubes package, along with guidance on generating user-facing documentation via Sphinx autodoc. It covers the API surface, usage patterns, interactive features, and how to build the documentation itself.
+
+---
+
+## Overview
+
+The MapPlotter class provides an interactive way to visualize a 3D data cube (a Cube) as a 2D map and to connect that map to spectrum plotting. It leverages:
+- Matplotlib for plotting
+- Astropy (WCS and FITS headers) when available
+- APLpy for publication-quality plotting when available
+- Interactive event handling to plot spectra, overplot additional spectra, and define circular regions
+
+Notes:
+- The module is designed as an interactive helper rather than a publication-quality default plotter.
+- If APLpy is available, the plot can be rendered with APLpy’s FITSFigure interface; otherwise, a standard Matplotlib imshow is used.
+- The class relies on an external Cube object (imported from the cubes package) and a helper cubes.flatten_header to construct the WCS header.
+
+---
+
+## API Reference
+
+### MapPlotter
+
+Constructor
+- __init__(self, Cube=None, figure=None, doplot=False, **kwargs)
+
+  - Cube: The Cube-like object to plot. If provided, its header is flattened via cubes.flatten_header to obtain a 2D header for WCS.
+  - figure: A matplotlib Figure object, an integer figure number, or None (create a new figure).
+  - doplot: If True, immediately render the plot by calling mapplot.
+  - **kwargs: Passed to mapplot when doplot is True.
+
+  Behaviour:
+  - Initializes plotting state, event-handling hooks, and color/line style cycles.
+  - If pywcs is available, constructs a WCS object from the header.
+  - Stores references to internal state such as axis, plane data, and the figure.
+
+- __call__(self, **kwargs)
+
+  - Alias for mapplot; enables calling an instance to render a map with given options.
+
+- mapplot(self, convention='calabretta', colorbar=True, useaplpy=True,
+            vmin=None, vmax=None, cmap=None, plotkwargs={}, **kwargs)
+
+  - Primary API for generating the map from the Cube.
+  - convention: WCS projection convention to use (default: 'calabretta').
+  - colorbar: Show a colorbar alongside the map.
+  - useaplpy: If True and a valid FITS header is available, use APLpy to render the map; otherwise fall back to Matplotlib.
+  - vmin, vmax: Pixel value range for color scaling. If None, computed from the data.
+  - cmap: Colormap to use for the map.
+  - plotkwargs: Additional keyword arguments passed to the underlying plotting function (APLpy show_colorscale or Matplotlib imshow).
+  - **kwargs: Additional keyword arguments; may include 'estimator' used by makeplane (removed before plotting).
+
+  Behaviour:
+  - Creates or reuses a Figure and Axes.
+  - Calls makeplane(...) to extract the 2D plane from the Cube (implementation not shown in the excerpt).
+  - Displays the plane using APLpy (FITSFigure) if available and requested; otherwise uses axis.imshow.
+  - Sets up or updates a colorbar if requested.
+  - Configures interaction by wiring event handlers (via _connect).
+
+- _connect(self)
+
+  - Connects event callbacks:
+    - 'button_press_event' → self.click
+    - 'button_release_event' → self.plot_spectrum
+    - 'key_press_event' → self.plot_spectrum
+
+- _disconnect(self)
+
+  - Disconnects the event callbacks established by _connect to disable interactivity.
+
+Notes:
+- The class interacts with several internal attributes:
+  - self.Cube, self.header, self.wcs
+  - self.fitsfile, self.FITSFigure (APLpy path)
+  - self.axis (Matplotlib axis or APLpy axis)
+  - self.plane (2D data extracted from the Cube)
+  - self.figure, self.canvas (for event binding)
+  - self._origin (FITS convention or normal)
+
+- The code gracefully degrades if APLpy is not available (icanhasaplpy flag).
+
+---
+
+## Usage
+
+Basic workflow
+
+1) Construct the MapPlotter with a Cube and render immediately:
+
+```python
+from cubes import MapPlotter
+# Obtain a Cube-like object from the cubes package (implementation-specific)
+cube = obtain_cube_somehow()  # Cube with .header attribute
+
+mp = MapPlotter(Cube=cube, doplot=True)
+```
+
+2) Create a map without plotting immediately, then render later:
+
+```python
+mp = MapPlotter(Cube=cube)
+mp.mapplot()
+```
+
+3) Customize interactivity and plotting:
+
+```python
+mp = MapPlotter(Cube=cube, figure=42)  # place in an existing figure by number
+mp.mapplot(convention='calabretta', colorbar=True, useaplpy=True)
+```
+
+4) Interacting with the map (in the interactive window):
+- Button 1 or key '1': plot the selected pixel’s spectrum in a new window and mark the pixel.
+- Button 2 or key 'o': overplot a second spectrum in the external plot window.
+- Button 3: disconnect the interactive viewer.
+- Drag with Button 1 to average over a circular region; or use keys to define circle center and radius.
+
+---
+
+## Dependencies and Environment
+
+- Optional: aplpy (for publication-quality plots) and a FITS header to drive WCS via astropy.wcs.
+- Optional: astropy.io.fits for FITS handling.
+- Optional: pywcs or the legacy pyfits + pywcs imports (fallback supported).
+- Always requires matplotlib.
+- The interactive features rely on the environment supporting GUI backends (e.g., X11, Qt).
+
+---
+
+## Development and Extensibility
+
+- The MapPlotter is designed as an interactive helper rather than a final plotting product.
+- To extend plotting targets, you can implement or override:
+  - makeplane(...) to produce the 2D plane from a Cube (the code assumes this exists elsewhere in the module).
+  - click and plot_spectrum handlers for custom interactive behavior.
+- Adding new projection schemes or color-mapping options can be done by extending mapplot parameters and the underlying plotting calls (APLpy vs Matplotlib paths).
+
+---
+
+## Generating Documentation (Sphinx)
+
+This section describes how to generate API documentation for the MapPlotter module and the cubes package using Sphinx autodoc.
+
+Prerequisites
+- Python packages: sphinx, sphinx-autodoc (via sphinx-install), and optional extensions such as sphinx.ext.napoleon if you use NumPy/SciPy style docstrings.
+- A Sphinx project already initialized (docs/ directory).
+
+Steps
+
+1) Install Sphinx (and optional napoleon)
+- pip install sphinx
+- (optional) pip install sphinx.ext.napoleon
+
+2) Create/update the docs skeleton
+- sphinx-apidoc -o docs/source cubes
+- This generates reST source files for the cubes package, including modules and classes.
+
+3) Configure autodoc
+- In docs/conf.py, enable:
+  - extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon']
+- Ensure the Python path includes the project root, e.g.:
+  import sys
+  import os
+  sys.path.insert(0, os.path.abspath('..'))
+
+4) Include module documentation in your index
+- In docs/source/index.rst or a dedicated cubes.rst, add:
+  - .. automodule:: cubes
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+  - Or for a more granular view:
+    - .. autoclass:: cubes.mapplot.MapPlotter
+      :members:
+      :undoc-members:
+
+5) Build the HTML docs
+- sphinx-build -b html docs/source docs/build
+- Open docs/build/index.html in a browser to view.
+
+Tips
+- Use NumPy/SciPy style docstrings to maximize autodoc quality; if you use the NumPy doc style, consider enabling napoleon.
+- For large packages, pin the version of dependencies used by the docs to reproduce builds.
+
+6) Testing docs
+- Ensure the docstrings are importable in the environment where docs are built.
+- If the code relies on optional dependencies (APLpy, Astropy), consider documenting conditional imports or providing stub notes in the docstrings for clarity.
+
+---
+
+## Notes
+
+- The MapPlotter relies on the Cube interface provided by the cubes package. Ensure that Cube.headers and related data structures conform to the expectations (e.g., Cube.header exists and is compatible with cubes.flatten_header).
+- The documentation above assumes the presence of a makeplane method (not shown in the excerpt). If implementing this class in a new environment, provide or adapt makeplane to extract a 2D plane from the 3D cube for plotting.
+- If you want to surface runtime behavior (e.g., how the interactive circle region is calculated), extend the API documentation with a dedicated section detailing these interactive features and expected user events.
+
+--- 
+
+This documentation aims to help developers understand, use, and extend the MapPlotter component in cubes, and to provide a concrete, repeatable path for generating up-to-date API docs via Sphinx.

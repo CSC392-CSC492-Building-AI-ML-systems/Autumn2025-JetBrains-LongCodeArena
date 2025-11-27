@@ -1,0 +1,176 @@
+feature_extraction.rst
+
+Overview
+--------
+
+This module provides utilities to build feature extractors from arbitrary PyTorch models using Torch FX tracing. It introduces a specialized tracer that records human-friendly, hierarchical names for nodes (NodePathTracer) and supports marking certain submodules as leaves (LeafModuleAwareTracer). The primary public API consists of:
+
+- create_feature_extractor(model, return_nodes, ...) -> nn.Module
+- get_graph_node_names(model, return_nodes) -> mapping
+
+Key concepts
+------------
+
+- Node naming
+  - As the model is traced, each operation is assigned a node. The NodePathTracer records a dot-separated, hierarchical “node name” that reflects the path from the top-level module to the leaf operation.
+  - Node names are stored in a mapping node_to_qualname: fx.Node -> str.
+  - To avoid name collisions, repeated node names receive a local postfix _{int} (e.g., layer1.relu_1).
+
+- Leaves vs. traced modules
+  - LeafModuleAwareTracer allows you to designate modules that should not be traced into. Instead, their forward calls are recorded as single proxy nodes, enabling efficient extraction of features from submodules without expanding them.
+
+- Feature extraction wiring
+  - create_feature_extractor wraps a given model so that, when you run a forward pass, a dictionary of requested intermediate features is returned. Keys in this dictionary are user-defined names, and values are the corresponding tensors produced by the specified graph nodes.
+
+Public API
+----------
+
+Note: The following signatures reflect the documented usage in this module. Some details may be specific to the torchvision feature_extraction package and its current implementation.
+
+- create_feature_extractor(model: torch.nn.Module, return_nodes: Union[Dict[str, str], List[str], str], ...) -> torch.nn.Module
+  - Purpose:
+    - Wrap a base model so that the forward pass returns a dictionary containing outputs of selected graph nodes.
+  - Parameters:
+    - model: The neural network module to wrap.
+    - return_nodes: Specifies which graph nodes to extract and the names to assign to the produced outputs. This can be a mapping from graph node names to output keys or a list of node names depending on the API variant.
+  - Returns:
+    - A new module that, when called with an input, returns a dictionary of {output_key: tensor} for the requested nodes.
+
+- get_graph_node_names(model: torch.nn.Module, ...) -> Dict[str, str] | List[str]
+  - Purpose:
+    - Retrieve the graph node names produced by tracing the given model. This helps you identify which nodes you can request in return_nodes when creating a feature extractor.
+  - Returns:
+    - A collection (typically a mapping or list) of graph node names that can be used with return_nodes.
+
+- LeafModuleAwareTracer
+  - Purpose:
+    - FX Tracer variant that allows specifying leaf modules that should not be traced through. Leaf modules are kept as single nodes, with their forward methods invoked directly.
+  - Key behavior:
+    - is_leaf_module(m, module_qualname) returns True for modules present in the provided leaf_modules collection.
+
+- NodePathTracer (extends LeafModuleAwareTracer)
+  - Purpose:
+    - An FX tracer that records, for every operation, the name (node name) from which the operation originated.
+  - Key data:
+    - current_module_qualname: The qualified name of the module currently being traced.
+    - node_to_qualname: Ordered mapping from fx.Node to a human-friendly node name.
+  - Important methods:
+    - call_module(m, forward, args, kwargs): Overrides tracing of module calls. Maintains current module qualname, handles leaf modules, and records proxies.
+    - create_proxy(kind, target, args, kwargs, name=None, type_expr=None, *_): Creates proxies and records their node’s qualname.
+    - _get_node_qualname(module_qualname, node): Computes the final node name, accounting for nesting and duplicate names by appending indices.
+
+- Internal helpers
+  - _is_subseq(x, y): Returns True if y is a subsequence of x. Used to compare node name sequences.
+  - _warn_graph_differences(train_tracer, eval_tracer): Emits a warning if train and eval graphs differ in the names of traced nodes, and suggests using distinct output node specifications for train and eval.
+
+Usage
+-----
+
+Basic workflow
+
+- Step 1: Define or obtain a PyTorch model.
+- Step 2: Identify the graph nodes from which you want to extract features.
+  - Use get_graph_node_names to inspect candidate node names (helpful when working with complex models).
+- Step 3: Create a feature extractor.
+  - Provide a mapping (return_nodes) from graph node names to desired output keys.
+- Step 4: Run a forward pass with your input tensor.
+- Step 5: Read the returned dictionary of intermediate features.
+
+Example: Small custom model
+
+This example demonstrates wrapping a tiny model to extract features from a convolution and a subsequent activation.
+
+Code:
+
+.. code-block:: python
+
+  import torch
+  import torch.nn as nn
+  from torchvision.models.feature_extraction import create_feature_extractor
+
+  class TinyNet(nn.Module):
+      def __init__(self):
+          super().__init__()
+          self.conv = nn.Conv2d(1, 4, kernel_size=3, padding=1)
+          self.relu = nn.ReLU()
+          self.pool = nn.AdaptiveAvgPool2d((1, 1))
+          self.fc = nn.Linear(4, 2)
+
+      def forward(self, x):
+          x = self.conv(x)
+          x = self.relu(x)
+          x = self.pool(x)
+          x = x.view(x.size(0), -1)
+          x = self.fc(x)
+          return x
+
+  model = TinyNet()
+  # Suppose these are the graph nodes you care about.
+  # These strings should correspond to actual node names produced by tracing.
+  # In practice you would query get_graph_node_names(model) to obtain valid keys.
+  return_nodes = {
+      "conv": "conv_out",
+      "relu": "relu_out",
+  }
+
+  feature_extractor = create_feature_extractor(model, return_nodes=return_nodes)
+
+  x = torch.randn(1, 1, 28, 28)
+  features = feature_extractor(x)
+
+  # features is a dict like:
+  # {
+  #   'conv_out': <Tensor ...>,
+  #   'relu_out': <Tensor ...>,
+  # }
+
+Notes and advanced usage
+------------------------
+
+- Naming and duplicates
+  - Node names are derived from the graph traversal order and are made unique with local postfixes (e.g., _1, _2). This helps disambiguate repeated structural nodes in the same parent scope.
+
+- Leaf modules
+  - Use LeafModuleAwareTracer(leaves) if you want to extract features from a submodule without tracing into it. This can reduce graph complexity and allow targeted feature extraction from nested components.
+
+- Graph differences and warnings
+  - If you trace the model in train vs. eval mode and the graph node names diverge, you may need to specify separate return_nodes for train and eval or adjust which nodes you extract in each mode. The _warn_graph_differences helper assists with this by issuing a helpful warning.
+
+- Practical tips
+  - Start by running get_graph_node_names(model) to discover valid node names for your architecture.
+  - When you’re unsure about exact node paths, begin with broader modules (e.g., a whole block) and gradually tighten down to specific ops.
+  - If you modify the model architecture, re-run tracing to refresh the graph node names.
+
+Internal implementation notes
+-----------------------------
+
+- The tracing core relies on Torch FX to record a computational graph, but NodePathTracer augments this with a stable, human-friendly naming scheme for nodes.
+- The LeafModuleAwareTracer enables controlling the granularity of tracing by allowing certain submodules to be treated as opaque “leaves.”
+- The internal node_to_qualname mapping preserves the execution order of nodes, which is important for deterministic feature extraction and for establishing reproducible mappings between inputs and extracted features.
+
+Compatibility and requirements
+------------------------------
+
+- PyTorch with FX support (torch >= 1.8 recommended; FX has matured in later versions).
+- torchvision (feature_extraction module) for the public API create_feature_extractor and get_graph_node_names.
+- Python 3.6+.
+
+Changelog (conceptual)
+----------------------
+
+- Initial design introduces NodePathTracer and LeafModuleAwareTracer for stable, named feature extraction.
+- Provides create_feature_extractor to wrap models and return a dict of requested intermediate features.
+- Adds utilities to compare train/eval traces and warn about graph differences.
+
+References
+----------
+
+- Torch FX: https://pytorch.org/docs/stable/fx.html
+- torchvision.feature_extraction (module implementing these utilities)
+- get_graph_node_names and create_feature_extractor usage patterns in torchvision documentation and tutorials
+
+Appendix: Quick sanity check
+----------------------------
+
+- After wrapping a model with create_feature_extractor, call it with a sample input and ensure the returned dictionary contains all requested feature keys.
+- If some keys are missing, verify that the graph node names in return_nodes are correct for the current model structure (re-run get_graph_node_names if the model was modified).

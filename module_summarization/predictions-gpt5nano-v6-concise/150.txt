@@ -1,0 +1,287 @@
+# plot_data.md — Supporting data to plotting functions in multiple ways
+
+This document describes how to use PlotData to provide flexible, multi-source input to plotting functions. It supports data from dictionaries, Pandas DataFrames, and optional Bokeh ColumnDataSource, and it can expose one or multiple “plot sets” in a uniform, iteration-friendly interface.
+
+## Overview
+
+- PlotData wraps various data sources so they can be consumed by plotting routines in a consistent way.
+- It enables multiple plot sets from a single call by expanding list-valued mappings into several sets.
+- It works with standard Python mappings (dict), Pandas DataFrames, and (when available) Bokeh ColumnDataSource.
+- You can copy data safely, enforce data length constraints, and gradually extend the set of data keys after initialization (depending on flags).
+
+Key design goals:
+- Flexibility: plot data can originate from different data containers.
+- Convenience: multiple plots can be defined with a single PlotData instance.
+- Safety: optional length checks and strict key policies help avoid silent errors.
+
+---
+
+## Supported data sources
+
+- With Bokeh installed:
+  - dict
+  - pandas.DataFrame
+  - bokeh.models.ColumnDataSource
+- Without Bokeh installed:
+  - dict
+  - pandas.DataFrame
+
+When copying, ColumnDataSource objects are handled specially to ensure a proper independent copy.
+
+---
+
+## Initialization API
+
+PlotData is initialized as:
+
+- __init__(data, use_column_source=False, same_length=False, strict_data_keys=False, copy_data=False, **kwargs)
+
+Parameters:
+
+- data: The data source or a list of data sources.
+  - If a list is provided, every element must be a valid data holder (dict, DataFrame, or ColumnDataSource if available).
+  - If a single data source is provided, it must be one of the valid data holders.
+
+- use_column_source (bool): If True, plotting code can consume a ColumnDataSource directly. (Behavior depends on downstream plotting code; this flag is intended to enable columnar data usage when available.)
+
+- same_length (bool): If True and any source is a dict, check that all entries have the same length across all keys. This helps ensure consistent shapes when plotting multiple series together.
+
+- strict_data_keys (bool): If True, no new data keys may be introduced via copy_data() after initialization.
+
+- copy_data (bool): If True, data is copied on initialization.
+  - If a data source is a Bokeh ColumnDataSource, a dedicated copy path is used.
+  - For other data holders, a standard shallow copy is performed (and deep copy is avoided for performance).
+
+- kwargs: Mappings from plotting-key names to data keys or lists of keys that will be exposed to the plotting code.
+  - Each key in kwargs becomes a field in the resulting per-set namedtuple.
+  - If a value in kwargs is a list, multiple plot sets are created (see “Multi-set expansion” below).
+  - If a value is scalar, it is replicated for all sets.
+
+Notes:
+- ALLOWED_DATA_HOLDERS depends on Bokeh availability:
+  - With Bokeh: (dict, pd.DataFrame, ColumnDataSource)
+  - Without Bokeh: (dict, pd.DataFrame)
+
+---
+
+## How multi-set expansion works
+
+If any value in kwargs is a list, PlotData treats this as a request to create multiple plot sets. The number of sets is the maximum length among all list values in kwargs.
+
+- For each key, if its value is a list, that list is used to populate that key for each set.
+- If a value is not a list, it is replicated to every set.
+- The result is a list of namedtuples (self.columns), each representing a plot set with fields named after the kwargs keys.
+
+Example:
+
+- data = {'x': x_values, 'y1': y1_values, 'y2': y2_values, 'y3': y3_values}
+- PlotData(data, x='x', y=['y1', 'y2', 'y3'])
+
+This yields 3 plot sets:
+- Set 0: x from 'x', y from 'y1'
+- Set 1: x from 'x', y from 'y2'
+- Set 2: x from 'x', y from 'y3'
+
+Iteration over PlotData yields a sequence of objects (namedtuples) with attributes corresponding to the keys in kwargs (e.g., entry.x, entry.y). In this design, entry.x and entry.y provide the data for the current set.
+
+If all kwargs values are scalars (no lists), there is a single plot set.
+
+---
+
+## Iteration semantics
+
+- PlotData is iterable.
+- Each iteration yields a simple object (a namedtuple) where attributes correspond to the kwargs keys.
+- Access patterns:
+  - entry.x accesses the data-aligned x-series for the current set.
+  - entry.y (or entry.<other_key>) accesses the corresponding data for the current set.
+- This structure is designed to integrate with plotting code that expects per-set data in a uniform shape, enabling compact definition of “families” of plots.
+
+Note: If you supplied a list-valued key (e.g., y=['y1','y2','y3']), the value of entry.y will be the specific chosen key for that set (e.g., 'y1'), while the actual numeric data for plotting would be taken from the underlying data source using the key selection downstream. The exact behavior depends on downstream plotting integration (see use_case examples).
+
+---
+
+## Data keys and dynamic expansion
+
+- data_keys property: returns the registered data keys for this instance (the fields exposed via the current kwargs).
+- add_data_key(data_key, keys=None):
+  - Adds a new data key to the existing set of keys.
+  - If strict_data_keys is True, this operation is disallowed.
+  - If data_key already exists, an error is raised.
+  - If keys is provided, it can be a single key or a list of keys to initialize values for the new field across sets.
+  - This method enables dynamic extension of the plotting data keys without recreating the PlotData object.
+
+Note: The exact behavior of add_data_key depends on the internal state and the provided keys argument. See the code for detailed validation.
+
+---
+
+## Data alignment and normalization
+
+- same_length can be used to enforce that all entries share the same length, which is particularly important when combining multiple keys into a single plot (e.g., multiple y-keys plotted against a common x-key).
+- When same_length is True and data is a dictionary:
+  - Each dictionary entry is normalized via _normalize_dict_entries (internal helper) to ensure consistent lengths.
+- This helps avoid runtime errors in plotting due to mismatched array lengths across keys.
+
+---
+
+## Copying and Bokeh integration
+
+- copy_data:
+  - When True, the input data is copied to avoid accidental mutation of original data.
+  - If a source is a Bokeh ColumnDataSource, a dedicated copy routine is used to preserve the CDS semantics.
+- use_column_source:
+  - Intended to enable or influence the use of ColumnDataSource semantics in downstream plotting code.
+  - This is particularly relevant when integrating with Bokeh-based plots that consume ColumnDataSource objects.
+
+---
+
+## Examples
+
+### Example 1 — Simple single set from dict
+
+- Data source: dict
+- Plot: a single set with x and y
+- No multi-set expansion (no lists in kwargs)
+
+Code:
+```python
+import numpy as np
+from masci_tools.vis.data import PlotData
+
+x = np.linspace(-5, 5, 100)
+data = {'x': x, 'y': np.sin(x)}
+
+p = PlotData(data, x='x', y='y')
+for entry in p:
+    # entry.x and entry.y represent the corresponding data for this single set
+    print(type(entry.x), type(entry.y))
+```
+
+### Example 2 — Multi-set expansion with y lists
+
+- Data source: dict
+- Multiple y-series, same x
+- y is expanded into 3 sets
+
+Code:
+```python
+import numpy as np
+from masci_tools.vis.data import PlotData
+
+x = np.linspace(-10, 10, 100)
+data = {'x': x,
+        'y1': np.sin(x),
+        'y2': np.cos(x),
+        'y3': x**2}
+
+p = PlotData(data, x='x', y=['y1', 'y2', 'y3'])
+for i, entry in enumerate(p):
+    print(f"Set {i}: x mean={np.mean(entry.x):.3f}, y key={entry.y}")
+```
+
+### Example 3 — Enforcing same length
+
+- Data source: dict with multiple lists of potentially different lengths
+- Enable same_length to normalize/validate lengths
+
+Code:
+```python
+import numpy as np
+from masci_tools.vis.data import PlotData
+
+data = {
+    'x': np.linspace(0, 1, 50),
+    'y1': np.sin(np.linspace(0, 1, 50)),
+    'y2': np.cos(np.linspace(0, 1, 40))  # shorter length
+}
+
+# This will raise or normalize error if lengths differ (depending on implementation)
+p = PlotData(data, x='x', y=['y1','y2'], same_length=True)
+for entry in p:
+    print(entry.x, entry.y)
+```
+
+### Example 4 — Copying data and Bokeh integration
+
+- Data source: dict
+- Copy data on initialization
+- Use ColumnDataSource semantics (if Bokeh is installed)
+
+Code:
+```python
+import numpy as np
+from masci_tools.vis.data import PlotData
+
+x = np.linspace(0, 2*np.pi, 100)
+data = {'x': x, 'sinx': np.sin(x), 'cosx': np.cos(x)}
+
+p = PlotData(data, x='x', y=['sinx','cosx'], copy_data=True, use_column_source=True)
+for entry in p:
+    print(entry.x, entry.y)
+```
+
+### Example 5 — Adding a new data key after initialization
+
+- Start with a basic plot
+- Extend with a new key via add_data_key
+
+Code:
+```python
+from masci_tools.vis.data import PlotData
+
+data = {'x': np.arange(5), 'y': np.arange(5)}
+p = PlotData(data, x='x', y=['y'])
+
+# Allow adding a new key (depends on strict_data_keys)
+p.add_data_key('color', keys=[['red'], ['blue']])
+```
+
+### Example 6 — Pandas DataFrame
+
+- Data source: DataFrame
+- Access via keys mapped in kwargs
+
+Code:
+```python
+import pandas as pd
+import numpy as np
+from masci_tools.vis.data import PlotData
+
+df = pd.DataFrame({'x': np.linspace(-1, 1, 50),
+                   'y1': np.sin(np.linspace(-1, 1, 50)),
+                   'y2': np.cos(np.linspace(-1, 1, 50))})
+
+p = PlotData(df, x='x', y=['y1','y2'])
+for entry in p:
+    print(entry.x, entry.y)
+```
+
+---
+
+## Practical guidance
+
+- Use multi-set expansion to plot multiple series that share a common x-axis (e.g., several y-keys plotted against the same x).
+- Use same_length when combining keys that must align in length to avoid plotting errors.
+- Use copy_data when you want to preserve the original data sources from unintended mutations.
+- If integrating with Bokeh, enable use_column_source and provide ColumnDataSource-compatible inputs when possible.
+
+---
+
+## API reference (summary)
+
+- PlotData(data, use_column_source=False, same_length=False, strict_data_keys=False, copy_data=False, **kwargs)
+  - data: single data source or list of sources (dict, DataFrame, or CDS if available)
+  - use_column_source: enable CDS-oriented usage in downstream code
+  - same_length: enforce uniform lengths across dict entries
+  - strict_data_keys: forbid adding new data keys after init
+  - copy_data: copy sources on initialization
+  - kwargs: mapping of output field names to data keys (scalars or lists)
+- data_keys property
+  - Returns the registered keys for the current instance
+- add_data_key(data_key, keys=None)
+  - Add a new data key; respects strict_data_keys
+  - Optional keys parameter to initialize values for new key across sets
+
+---
+
+ If you need adjustments to the behavior or additional examples for a particular plotting backend, I can tailor this documentation to your exact usage patterns.

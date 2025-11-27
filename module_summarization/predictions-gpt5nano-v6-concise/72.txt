@@ -1,0 +1,205 @@
+# Metrics Module Documentation
+
+This document covers the metrics utilities implemented in the metrics module. It explains how the core helpers work, how to use them to validate inputs for pairwise distance computations, and provides practical examples. The utilities are designed to support robust, flexible handling of dense and sparse inputs, with careful dtype management and finite-value validation.
+
+---
+
+## Overview
+
+The metrics module provides low-level utilities used by pairwise distance metrics. Key responsibilities include:
+
+- Determining an appropriate floating-point dtype for inputs X and Y.
+- Validating and standardizing inputs for pairwise distance computations.
+- Handling both dense arrays and sparse matrices, with support for precomputed distance matrices.
+- Providing clear, consistent error messages for invalid inputs.
+
+Public helpers include:
+- `_return_float_dtype(X, Y)`
+- `check_pairwise_arrays(X, Y, *, precomputed=False, dtype=None, accept_sparse='csr', force_all_finite=True, copy=False)`
+- `check_paired_arrays(X, Y)`
+
+These helpers are intended for use by developers implementing or calling pairwise distance metrics, ensuring consistent preconditions before performing the actual distance calculations.
+
+---
+
+## Public API
+
+### `_return_float_dtype(X, Y)`
+
+Determine a suitable floating-point dtype given inputs X and Y.
+
+Signature:
+- `_return_float_dtype(X, Y) -> (X, Y, dtype)`
+
+Behavior:
+- Converts non-array inputs to NumPy arrays when necessary.
+- If both X and Y are float32, returns `dtype=np.float32`, otherwise returns a standard Python `float` (i.e., `np.float64` in NumPy’s default).
+- If `Y` is `None`, uses `X.dtype` as the target dtype.
+- If `Y` is present and not a NumPy array or is a sparse matrix, uses its dtype or converts to an array to determine the dtype.
+
+Return:
+- `(X, Y, dtype)` where `X` and `Y` are possibly converted to arrays, and `dtype` is the chosen floating-point dtype (either `np.float32` or the default float type).
+
+Usage example:
+```python
+from metrics import _return_float_dtype
+X = np.random.randn(10, 5).astype(np.float32)
+Y = None
+X2, Y2, dtype = _return_float_dtype(X, Y)
+# dtype should be np.float32
+```
+
+---
+
+### `check_pairwise_arrays(X, Y, *, precomputed=False, dtype=None, accept_sparse='csr', force_all_finite=True, copy=False)`
+
+Validate and standardize inputs for pairwise distance computations.
+
+Signature:
+- `check_pairwise_arrays(X, Y, *, precomputed=False, dtype=None, accept_sparse="csr", force_all_finite=True, copy=False) -> (safe_X, safe_Y)`
+
+Behavior:
+- Uses `_return_float_dtype` to determine a target dtype when `dtype` is not explicitly provided.
+- If `Y is X` or `Y is None`, both `X` and `Y` are processed and converted via `check_array` with the provided options.
+- If `Y` is provided and distinct from `X`, both `X` and `Y` are independently validated and converted via `check_array` with the same dtype and options.
+- If `precomputed` is `True`, validates that the shapes are compatible for a precomputed distance matrix (i.e., `X.shape[1]` must equal `Y.shape[0]`).
+- If `precomputed` is `False`, verifies that `X.shape[1] == Y.shape[1]` (i.e., the number of features must match).
+- Accepts sparse inputs according to `accept_sparse`. If inputs are sparse but not in an allowed format, they will be converted to the first allowed format (or handled according to the provided settings).
+- Validates finiteness of values according to `force_all_finite`:
+  - `True`: all values must be finite.
+  - `False`: accepts NaN, Inf, etc.
+  - `'allow-nan'`: accepts NaN values but disallows infinite values.
+- Returns:
+  - `safe_X`: a dense array or sparse matrix representation of `X` (converted to a NumPy array where appropriate).
+  - `safe_Y`: a dense array or sparse matrix representation of `Y` (or a pointer to `X` if `Y is None` or `Y is X`).
+
+Notes:
+- If `Y` is `None`, `safe_Y` will be a pointer to `safe_X` (no copy incurred for this case).
+- When converting to dense arrays, memory usage should be considered for large inputs, especially with high-dimensional sparse data.
+
+Usage example:
+```python
+from metrics import check_pairwise_arrays
+X = np.random.randn(100, 20)
+Y = np.random.randn(80, 20)
+X_safe, Y_safe = check_pairwise_arrays(X, Y, precomputed=False, dtype=None, accept_sparse='csr', force_all_finite=True, copy=False)
+# X_safe and Y_safe are validated ready for a pairwise distance computation
+```
+
+Precomputed distances example:
+```python
+# If you already have a distance matrix between queries and indexed samples:
+D = np.random.rand(50, 200)  # 50 queries, 200 indexed samples
+X_safe, Y_safe = check_pairwise_arrays(D, D, precomputed=True, dtype=None, accept_sparse='csr', force_all_finite=True, copy=False)
+# Ensures D is treated as a precomputed distance matrix with compatible shapes
+```
+
+---
+
+### `check_paired_arrays(X, Y)`
+
+Validate inputs for paired distance metrics that require X and Y inputs with matching feature dimensions.
+
+Signature:
+- `check_paired_arrays(X, Y) -> (X_checked, Y_checked)`
+
+Behavior:
+- Ensures that both `X` and `Y` are array-like (and converts as needed).
+- Ensures they are at least 2-dimensional and that their elements are numeric.
+- Validates that the feature dimensions match between `X` and `Y`.
+- Returns validated (and possibly converted) `X` and `Y`.
+
+Usage example:
+```python
+from metrics import check_paired_arrays
+X = np.random.randn(100, 20)
+Y = np.random.randn(80, 20)
+X_check, Y_check = check_paired_arrays(X, Y)
+# X_check, Y_check are validated and ready for a paired distance computation
+```
+
+Note:
+- The exact behavior depends on the implementation details in the underlying utilities. This API is intended to standardize paired-distance inputs across distance functions.
+
+---
+
+## Examples
+
+1) Validating inputs for a standard dense pairwise distance computation
+
+```python
+import numpy as np
+from metrics import check_pairwise_arrays
+
+X = np.random.randn(50, 10)
+Y = np.random.randn(40, 10)
+
+X_safe, Y_safe = check_pairwise_arrays(X, Y, precomputed=False, dtype=None, accept_sparse='csr', force_all_finite=True, copy=False)
+# X_safe.shape == (50, 10)
+# Y_safe.shape == (40, 10)
+```
+
+2) Handling precomputed distances
+
+```python
+import numpy as np
+from metrics import check_pairwise_arrays
+
+D = np.random.rand(60, 75)  # precomputed distances between 60 queries and 75 indexed samples
+
+X_safe, Y_safe = check_pairwise_arrays(D, D, precomputed=True, dtype=None, accept_sparse='csr', force_all_finite=True, copy=False)
+# Both X_safe and Y_safe refer to the precomputed distance matrix with compatible shapes
+```
+
+3) Using sparse inputs
+
+```python
+import numpy as np
+from scipy.sparse import csr_matrix
+from metrics import check_pairwise_arrays
+
+X = csr_matrix(np.random.rand(100, 200))
+Y = csr_matrix(np.random.rand(80, 200))
+
+X_safe, Y_safe = check_pairwise_arrays(X, Y, precomputed=False, dtype=None, accept_sparse='csr', force_all_finite=True, copy=False)
+# X_safe and Y_safe are validated sparse inputs converted to suitable internal representation
+```
+
+---
+
+## Design and Implementation Notes
+
+- Type Robustness: The helpers intentionally handle a mix of dense NumPy arrays and sparse matrices, carefully selecting a common floating-point dtype to prevent precision loss.
+- Input Validation: Comprehensive checks on shapes and feature dimensions prevent misalignment in downstream distance computations.
+- Sparse Support: Accepts sparse formats and can convert inputs to a supported canonical format when needed, aiding performance on large, sparse datasets.
+- Finite Value Handling: The `force_all_finite` parameter allows control over how NaN/Inf values are treated, aligning with downstream distance computations that may or may not support such values.
+- Safety: Returns either dense arrays or pointers to inputs as appropriate to minimize unnecessary copies when possible.
+
+---
+
+## Testing and Validation
+
+- These helpers are typically covered by unit tests that validate:
+  - Correct dtype selection for various input combinations.
+  - Proper handling when `Y` is `None`, equal to `X`, or a distinct matrix.
+  - Correct behavior for precomputed vs non-precomputed inputs.
+  - Proper responses to non-finite values under different `force_all_finite` settings.
+  - Correct handling of sparse inputs and required conversions.
+
+---
+
+## Developer Notes
+
+- When adding new pairwise distance metrics, prefer routing input validation through `check_pairwise_arrays` or `check_paired_arrays` to ensure consistency.
+- Maintain consistent error messages to aid users in debugging input shape or dtype issues.
+- Consider performance implications when dealing with very large matrices; opt for in-place checks and minimal copies where possible.
+
+---
+
+## See Also
+
+- Pairwise distance implementations that rely on these utilities
+- `scipy.spatial.distance` for reference distance computations
+- Other utility modules for array validation and preprocessing
+
+If you need further customization or a different format (e.g., Sphinx reStructuredText specific sections for autodoc), let me know and I can adapt the content.

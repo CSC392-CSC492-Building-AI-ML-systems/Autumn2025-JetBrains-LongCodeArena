@@ -1,0 +1,137 @@
+Stochastic Gradient Descent (SGD)
+=================================
+
+Overview
+--------
+
+This module implements high-performance components used by stochastic gradient descent optimizers, including SAG (Stochastic Average Gradient) and SAGA. It provides fused-type implementations to support both 32-bit and 64-bit floating point data, enabling efficient and numerically stable gradient computations for large-scale multinomial logistic regression tasks.
+
+Key components
+--------------
+
+- MultinomialLogLoss (two fused-type variants): computes per-sample loss and its gradient with respect to the model’s prediction vector.
+- _logsumexp: numerically stable computation of log(sum(exp(prediction))). This stabilizes the multinomial loss and gradients by operating in the log domain.
+- _soft_thresholding: proximal operator for L1 regularization, enabling sparse solutions.
+- Small helper: skl_isfinite{{name_suffix}} checks finiteness of values (used for numerical safety).
+
+Fused types
+-----------
+
+The code duplicates implementations for:
+- 64-bit: c_type = double, np_type = np.float64
+- 32-bit: c_type = float,  np_type = np.float32
+
+This ensures optimal performance on both single- and double-precision workloads without sacrificing numerical correctness.
+
+Core ideas and formulas
+-----------------------
+
+Multinomial logistic loss (per-sample)
+- Given a prediction vector p of length n_classes, a true class y, and a sample weight sw:
+  loss = (logsumexp(p) - p[y]) * sw
+
+Where logsumexp(p) is computed in a numerically stable way (via _logsumexp).
+
+Gradient with respect to the prediction vector (per-sample)
+- For each class c:
+  gradient_p[c] = exp(p[c] - logsumexp(p)) * sw
+- If c == y, subtract 1 from the gradient before scaling by sw:
+  gradient_p[c] -= 1 when c == y
+- The per-class gradient is then scaled by the sample’s feature vector to obtain the weight gradient:
+  grad_w = (gradient_p ∘ x) * sw
+
+Numerical stability
+-------------------
+
+- logsumexp uses a maximum subtraction trick to avoid overflow/underflow.
+- All computations are performed in the log domain where appropriate to maintain precision.
+
+Soft-thresholding (L1 regularization)
+-------------------------------------
+
+- _soft_thresholding(x, shrinkage) implements the proximal operator for L1:
+  max(x - shrinkage, 0) - max(-x - shrinkage, 0)
+- This enables sparse solutions when L1 regularization is desired.
+
+API surface (internal)
+----------------------
+
+- MultinomialLogLoss{{name_suffix}}:
+  - _loss(prediction, y, n_classes, sample_weight) -> loss (scalar)
+  - dloss(prediction, y, n_classes, sample_weight, gradient_ptr) -> fills gradient_ptr[0..n_classes-1]
+  - __reduce__() for pickling support
+- _logsumexp{{name_suffix}}(prediction_ptr, n_classes) -> logsumexp value
+- _soft_thresholding{{name_suffix}}(x, shrinkage) -> thresholded value
+
+Usage patterns
+--------------
+
+The loss and gradient interfaces are intended to be integrated by SGD-based optimizers (SAG/SAGA). A typical per-sample update proceeds as follows:
+
+- Compute the prediction p for the current sample:
+  p = dot(x_i, W) + b  (W are class weights, b is bias)
+- Compute the loss:
+  L_i = logsumexp(p) - p[y_i]
+  L_i is scaled by sample_weight if provided
+- Compute the gradient with respect to the prediction:
+  g_p[c] = exp(p[c] - logsumexp(p)) for all c
+  g_p[y_i] -= 1
+  g_p[c] *= sample_weight
+- Transform to weight-space gradient with the input features:
+  grad_W[c, :] += g_p[c] * x_i
+- Update the weights using the learning rate eta:
+  W := W - eta * grad_W
+
+If L1 regularization is used, apply proximal updates via soft-thresholding:
+- w := _soft_thresholding(w, eta * lambda1)
+
+Notes on SAG/SAGA
+-----------------
+
+- SAG maintains and updates an average gradient over past samples, reducing variance and accelerating convergence on large datasets.
+- SAGA uses a memory of past gradients with a correction term to further stabilize updates and often improves convergence speed over plain SGD.
+- The fused-type implementations enable a single codebase to operate efficiently with both 32-bit and 64-bit data.
+
+Practical considerations
+------------------------
+
+- Learning rate and scheduling: choose an appropriate learning rate schedule for convergence (e.g., fixed, diminishing, or adaptive schemes).
+- Regularization: combine L2 regularization (weight decay) with the provided L1 proximal step when sparsity is desired.
+- Numerical safety: rely on the logsumexp implementation to keep computations stable during training.
+
+Example (pseudo-code)
+-----------------------
+
+- Given a single sample (x, y) and current weights W (one row per class):
+
+  prediction = dot(x, W)                  # shape: (n_classes,)
+  logsum = logsumexp(prediction)          # scalar
+  loss = (logsum - prediction[y])         # scalar
+  sw = sample_weight (default 1)
+
+  # Gradient w.r.t. prediction
+  pg = exp(prediction - logsum)             # shape: (n_classes,)
+  pg[y] -= 1
+  pg *= sw
+
+  # Gradient w.r.t. weights
+  grad_W += outer(pg, x)                    # update each class row
+
+  # Proximal step if L1 is used
+  W = _soft_thresholding(W, eta * lambda1)
+
+Build and integration
+---------------------
+
+- This code is designed to be compiled with Cython to produce a fast, fused-type SAG/SAGA backend.
+- Typical workflow:
+  - Run the project’s build process to generate sag_fast.pyx from the templates.
+  - Compile with a C/C++ compiler and link against NumPy.
+- Requires a C compiler and NumPy headers; consult the project’s build guide for exact commands.
+
+References
+----------
+
+- Bishop, C. M. (2006). Pattern recognition and machine learning. Springer. (Chapter 4.3.4)
+- logsumexp trick for numerical stability
+

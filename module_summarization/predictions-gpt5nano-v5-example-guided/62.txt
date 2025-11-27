@@ -1,0 +1,141 @@
+# Visitor and Traversal Interface (SQLAlchemy)
+
+## Overview
+sql/visitors.py provides the visitor/traversal interface used by SQLAlchemy to traverse and compile SQL expressions and other internal structures. It defines:
+- a Visitable base class for objects that participate in a visitor-driven traversal/compilation,
+- an InternalTraversal enum for describing internal traversal state,
+- external/traversal helpers such as iterate, traverse_using, traverse, cloned_traverse, and replacement_traverse (exported in `__all__`),
+- support for optional C extensions (anon_map/prefix_anon_map) to optimize anonymous name handling.
+
+This module enables dynamic, name-based dispatch (visit_<visit_name>) from visitors without requiring a fixed method table on each class.
+
+## Key Components
+
+- Visitable
+  - Base class for visitable objects. Subclasses declare a __visit_name__ which determines how the dispatcher calls visitor methods.
+  - Dynamic compiler dispatch generation:
+    - When a subclass defines __visit_name__, the class method _generate_compiler_dispatch creates a _compiler_dispatch method that delegates to visitor.visit_<visit_name>.
+    - If the visitor lacks the appropriate method, it falls back to visitor.visit_unsupported_compilation(self, err, **kw).
+  - Generic class support via __class_getitem__ (for py3.9+).
+  - The mechanism is wired in __init_subclass__ so every subclass with a __visit_name__ gets its dispatcher automatically.
+
+  Example (conceptual):
+  - Subclass:
+    class MyNode(Visitable):
+        __visit_name__ = "my_node"
+  - Visitor:
+    class MyVisitor:
+        def visit_my_node(self, node, **kw):
+            return "processed"
+
+  - Usage:
+    node = MyNode()
+    visitor = MyVisitor()
+    result = node._compiler_dispatch(visitor, extra=1)  # calls visitor.visit_my_node(node, extra=1)
+
+  Code excerpt (illustrative):
+  ```python
+  @classmethod
+  def _generate_compiler_dispatch(cls) -> None:
+      visit_name = cls.__visit_name__
+      if "_compiler_dispatch" in cls.__dict__:
+          cls._original_compiler_dispatch = cls._compiler_dispatch
+          return
+      if not isinstance(visit_name, str):
+          raise exc.InvalidRequestError(...)
+      name = "visit_%s" % visit_name
+      getter = operator.attrgetter(name)
+
+      def _compiler_dispatch(self: Visitable, visitor: Any, **kw: Any) -> str:
+          try:
+              meth = getter(visitor)
+          except AttributeError as err:
+              return visitor.visit_unsupported_compilation(self, err, **kw)
+          else:
+              return meth(self, **kw)
+
+      cls._compiler_dispatch = (cls._original_compiler_dispatch) = _compiler_dispatch
+  ```
+  - __class_getitem__ for generics:
+  ```python
+  def __class_getitem__(cls, key: Any) -> Any:
+      return cls
+  ```
+
+- InternalTraversal
+  - Enum used to describe how to traverse internal state structures.
+  - Examples of members (with intended meaning):
+    - dp_has_cache_key = "HC" — Visit a HasCacheKey object.
+    - dp_has_cache_key_list = "HL" — Visit a list of HasCacheKey objects.
+    - dp_clauseelement = "CE" — Visit a ClauseElement object.
+    - dp_fromclause_canonical_column_collection = "FC" — Visit a FromClause context for canonical column collection.
+    - dp_clauseelement_tuples = "CTS" — Visit a list/tuples of ClauseElements.
+
+  Example showing internal traversal linkage:
+  ```python
+  class Case(Visitable):
+      _traverse_internals = [
+          ("value", InternalTraversal.dp_clauseelement),
+          ("whens", InternalTraversal.dp_clauseelement_tuples),
+          ("else_", InternalTraversal.dp_clauseelement),
+      ]
+  ```
+
+- ExternalTraversal, anon_map, prefix_anon_map
+  - ExternalTraversal is another facet of traversal (not shown in full here) for external traversal logic.
+  - anon_map / prefix_anon_map are caches/helpers used for mapping anonymous identifiers, with C-extension optimizations when available.
+
+- Top-level traversal helpers
+  - iterate, traverse_using, traverse, cloned_traverse, replacement_traverse
+  - These utilities provide higher-level traversal and cloning capabilities used by SQLAlchemy’s compiler and traversal subsystems.
+
+## Usage
+
+- Define visitable node types by subclassing Visitable and providing __visit_name__.
+- Implement corresponding visit_<visit_name> methods on a visitor object.
+- Rely on the dynamic _compiler_dispatch to route to the correct visitor method or handle unsupported cases.
+
+Minimal example:
+```python
+from sql.visitors import Visitable
+
+class MyNode(Visitable):
+    __visit_name__ = "my_node"
+
+class MyVisitor:
+    def visit_my_node(self, node, **kw):
+        return f"visited {node}, extra={kw.get('extra')}"
+
+node = MyNode()
+visitor = MyVisitor()
+print(node._compiler_dispatch(visitor, extra=1))
+```
+
+Output:
+- Calls visitor.visit_my_node(node, extra=1)
+
+## Details
+
+- Automatic dispatcher generation
+  - __init_subclass__ triggers _generate_compiler_dispatch when __visit_name__ exists.
+  - If a class already defines its own _compiler_dispatch, it is preserved as _original_compiler_dispatch.
+  - The dispatcher looks up visit_<visit_name> on the visitor and invokes it with the same keyword arguments provided to the dispatcher.
+
+- Fallback for missing visitor methods
+  - If the visitor lacks visit_<visit_name>, the dispatcher calls visitor.visit_unsupported_compilation(self, err, **kw) to allow controlled handling.
+
+- Generics support
+  - __class_getitem__ is implemented to enable generic instantiation in Python 3.9+.
+
+- Internal traversal primitives
+  - InternalTraversal defines tokens used by the internal traversal machinery to walk HasCacheKey, ClauseElement, and related structures.
+  - The _traverse_internals mapping (as shown in the Case example) connects object attributes to traversal tokens.
+
+- CY extension interop
+  - The module uses conditional imports for anon_map and prefix_anon_map depending on HAS_CYEXTENSION, providing a performance path when a C extension is available.
+
+- Public API
+  - iterate, traverse_using, traverse, cloned_traverse, replacement_traverse
+  - Visitable, InternalTraversal, ExternalTraversal, anon_map
+
+This module underpins the dynamic, extensible traversal and compilation architecture that SQLAlchemy uses to process SQL expressions and related AST-like structures.

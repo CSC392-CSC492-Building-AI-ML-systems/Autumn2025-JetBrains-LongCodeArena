@@ -1,0 +1,106 @@
+The one-parameter exponential family distributions used by GLM
+
+This module defines the base class for one-parameter exponential family distributions used in generalized linear models (GLMs). It provides the integration point between a variance function and a link function, and exposes utilities commonly used by IRLS (Iteratively Reweighted Least Squares) fitting, such as starting values, weights for IRLS steps, and deviance calculations.
+
+Overview
+- Core concept: A GLM distribution is specified by a variance function Var(mu) and a link function g, with mu = E[y].
+- The central class, Family, binds a link instance and a variance function. Subclasses (for concrete families) typically implement the _resid_dev method to provide distribution-specific deviance contributions.
+- Key responsibilities:
+  - Manage the link for the family and ensure it is valid for the family.
+  - Provide a starting value for mu used by IRLS.
+  - Compute IRLS weights from the current mu.
+  - Compute deviance and deviance residuals (where implemented by concrete families).
+  - Compute fitted values from linear predictors via the inverse link.
+
+API and relationships
+- Class: Family
+  - Attributes
+    - link: a Link instance (must be an instance of L.Link)
+    - variance: a variance function object (must be callable: Var(mu))
+  - Methods
+    - __init__(link, variance): initialize with a link and a variance function
+      - If link is a class, a deprecation warning is emitted; prefer passing a Link instance.
+    - starting_mu(y): starting mu for IRLS (default: (y + y.mean())/2. For Binomial, a different initialization may be used in derived implementations)
+    - weights(mu): IRLS weights w = 1 / (g'(mu)^2 * Var(mu))
+    - deviance(endog, mu, var_weights=1., freq_weights=1., scale=1.): compute the (scaled) deviance based on the distribution’s likelihood
+    - resid_dev(endog, mu, var_weights=1., scale=1.): raw deviance residuals (requires a distribution-specific _resid_dev implementation in subclasses)
+    - fitted(lin_pred): fitted values obtained by applying the inverse link to the linear predictor
+  - Internal:
+    - _setlink(link): store the link and validate that it is an allowed Link for this family
+    - _getlink(): return the stored link
+    - link property: getter/setter for the link
+- Key relationships
+  - Link: The link function relates the mean mu to the linear predictor eta via eta = g(mu). The inverse g^{-1} maps eta back to mu. The weights calculation uses g'(mu), the derivative of the link function with respect to mu.
+  - Variance: The variance function Var(mu) defines the distribution’s variance as a function of the mean.
+
+Important parameters and return values
+- link: a Link instance implementing at least deriv(mu) to return g'(mu)
+- variance: a callable variance function Var(mu) representing Var(y | mu)
+- mu: the mean parameter (E[y]), a non-negative quantity for appropriate families
+- endog: the observed response y
+- endog and mu shapes: array-like, broadcastable to a common shape
+- var_weights, freq_weights, scale: optional weighting and scaling parameters used in deviance calculations
+
+Usage example: Poisson with log link
+- Assumptions: You have a Poisson likelihood with a log link, i.e., eta = log(mu), so g(phi) = log(phi) and g'(phi) = 1/phi. The Poisson variance is Var(mu) = mu.
+- This example demonstrates how to construct a Poisson family and compute weights, deviance, and resid_dev (if the distribution-specific resid_dev is implemented in your concrete family).
+
+Code example
+```python
+import numpy as np
+# Assume the package exposes these modules as in the source
+# from your_package import Family
+# from your_package import links as L
+# from your_package import varfuncs as V
+
+# Poisson: variance Var(mu) = mu, link g(mu) = log(mu)
+poisson_link = L.Log()        # Log link: eta = log(mu)
+poisson_variance = V.Poisson()  # Var(mu) = mu
+
+# Create a Poisson family
+poisson_fam = Family(poisson_link, poisson_variance)
+
+# Example data
+y = np.array([0, 2, 3, 5, 1], dtype=float)
+mu = np.array([0.5, 1.2, 2.1, 3.0, 1.0], dtype=float)
+
+# IRLS weights (requires g'(mu) from the link and Var(mu))
+w = poisson_fam.weights(mu)
+print("IRLS weights:", w)
+
+# Deviance (requires distribution-specific _resid_dev in concrete family)
+# dev = poisson_fam.deviance(y, mu)
+
+# Deviance residuals (requires distribution-specific _resid_dev)
+# resid = poisson_fam.resid_dev(y, mu)
+
+# Fitted values from a linear predictor eta
+# For Poisson with log link, mu = exp(eta)
+eta = np.array([np.log(m) if m > 0 else -1.0 for m in mu])
+fitted_mu = poisson_fam.fitted(eta)
+print("Fitted mu from eta:", fitted_mu)
+
+# Starting mu for IRLS
+mu_start = poisson_fam.starting_mu(y)
+print("Starting mu:", mu_start)
+```
+
+Notes and edge cases
+- The base class assumes a valid Link instance for the given family. The Link must provide a derivative g'(mu). If an invalid link is supplied, a ValueError/TypeError will be raised by _setlink.
+- The default starting_mu is y-mean-based; Binomial-type families typically override this to a Binomial-appropriate initialization.
+- The weights calculation relies on the derivative of the link and the variance function. If Var(mu) is zero for any mu, weights will blow up; ensure mu stays in a valid range for the chosen family.
+- Deviance and deviance residuals are distribution-specific. The base class uses _resid_dev(endog, mu) which must be implemented by concrete subclasses for proper computation.
+- Fitted values rely on the inverse link function. Ensure that the Link implementation provides an inverse mapping from eta to mu.
+
+Edge cases to consider
+- mu values at or near zero for variance functions that require positive mu (e.g., Poisson). Some variance functions may require mu > 0.
+- Zero or near-zero derivatives g'(mu) in the weights calculation can lead to numerical instability.
+- Inconsistent shapes between endog, mu, weights, and other inputs can raise broadcasting errors; ensure inputs are properly aligned.
+
+See Also
+- Links: The module providing Link implementations (L) used to define g and g'.
+- Variance Functions: The module providing variance function objects (V) used to define Var(mu).
+
+Usage notes
+- The typical workflow in GLM fitting uses a concrete family (a subclass of Family) that implements distribution-specific methods (not shown in the base excerpt) such as _resid_dev. The base class provides the common scaffolding for linking mu, variance, IRLS weights, and fitted values.
+- For a complete example, pair the base Family with a concrete Poisson or Binomial subclass that implements the necessary distribution-specific components.

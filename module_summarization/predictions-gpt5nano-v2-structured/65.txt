@@ -1,0 +1,188 @@
+Probability calibration tutorial
+===============================
+
+This tutorial explains how probability calibration works in scikit-learn using CalibratedClassifierCV, and walks through practical steps to generate well-calibrated predicted probabilities for binary (and multiclass) classification problems.
+
+Introduction
+------------
+
+Classifiers often produce scores or decision values that are not well aligned with true probabilities. Calibration maps these scores to proper probability estimates, which is crucial for decision making under uncertainty, risk assessment, and downstream tasks that rely on calibrated probabilities (e.g., thresholding, ranking by probability, or Bayesian-style analyses).
+
+CalibratedClassifierCV provides a convenient way to calibrate an underlying estimator using cross-validation. It supports two calibration methods:
+
+- sigmoid (Platt scaling): fits a logistic regression model to map decision scores to probabilities.
+- isotonic: a non-parametric calibration method (monotonic isotonic regression).
+
+Key concepts
+------------
+
+- estimator: base classifier to calibrate. Defaults to a LinearSVC (a support-vector classifier without probability estimates).
+- method: calibration method ('sigmoid' or 'isotonic').
+- cv: cross-validation strategy for calibration. If 'prefit', uses a pre-fitted estimator and calibrates on provided data without cross-validation.
+- ensemble: when cv is not 'prefit', whether to train an ensemble of calibrated classifiers (one for each CV fold) and average their predicted probabilities.
+- n_jobs: parallelism control.
+- base_estimator: deprecated alias for estimator.
+
+What you will learn
+-------------------
+
+- How to calibrate a classifier that does not provide reliable probability estimates.
+- How to choose between sigmoid and isotonic calibration.
+- How to use cross-validated calibration (default) versus prefit calibration.
+- How to evaluate calibration quality via probabilities, reliability plots, and proper scoring rules.
+
+Step-by-step tutorial
+---------------------
+
+1) Prepare a synthetic binary dataset
+
+- Create a dataset with two classes.
+- Split into training and test sets.
+
+Code example:
+
+.. code-block:: python
+
+    from sklearn.datasets import make_classification
+    from sklearn.model_selection import train_test_split
+
+    X, y = make_classification(
+        n_samples=1000, n_features=20, n_informative=2, n_redundant=10,
+        random_state=42, n_classes=2
+    )
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+2) Calibrate a LinearSVC using sigmoid calibration
+
+- LinearSVC provides a decision function but not probabilities.
+- CalibratedClassifierCV can map that decision function to calibrated probabilities via Platt scaling (sigmoid).
+
+Code example:
+
+.. code-block:: python
+
+    from sklearn.svm import LinearSVC
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.metrics import brier_score_loss
+
+    base_clf = LinearSVC()
+    calib_clf = CalibratedClassifierCV(base_clf, method='sigmoid', cv=5)
+
+    calib_clf.fit(X_train, y_train)
+
+    # Predicted probabilities for the positive class
+    y_prob_test = calib_clf.predict_proba(X_test)[:, 1]
+
+    # Evaluation: Brier score (lower is better)
+    brier = brier_score_loss(y_test, y_prob_test)
+    print("Brier score (calibrated):", brier)
+
+3) Compare with isotonic calibration
+
+- Isotonic calibration is non-parametric and can overfit on small calibration sets.
+- Use isotonic if you have ample calibration data and the score-probability mapping is expected to be non-linear.
+
+Code example:
+
+.. code-block:: python
+
+    calib_iso = CalibratedClassifierCV(base_clf, method='isotonic', cv=5)
+    calib_iso.fit(X_train, y_train)
+
+    y_prob_iso = calib_iso.predict_proba(X_test)[:, 1]
+    brier_iso = brier_score_loss(y_test, y_prob_iso)
+    print("Brier score (isotonic):", brier_iso)
+
+4) Evaluate calibration quality
+
+- Use calibration curves (reliability plots) and proper scoring rules (e.g., Brier score, log loss) to compare calibration methods.
+- Reliability diagram (calibration curve) compares predicted probability bins to observed frequencies.
+
+Code example (reliability curve):
+
+.. code-block:: python
+
+    from sklearn.calibration import calibration_curve
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    prob_true, prob_pred = calibration_curve(y_test, y_prob_test, n_bins=10)
+
+    plt.plot(prob_pred, prob_true, marker='o', linewidth=1, label='calibrated (sigmoid)')
+    plt.plot([0, 1], [0, 1], linestyle='--', color='gray', label='perfectly calibrated')
+    plt.xlabel('Predicted probability')
+    plt.ylabel('True probability in bin')
+    plt.legend()
+    plt.title('Calibration curve')
+    plt.show()
+
+5) Using the prefit workflow (cv='prefit')
+
+- If you already fitted your estimator and want to calibrate on a separate dataset, use cv='prefit'.
+- Ensure that the data used for calibration is disjoint from the data used to train the base estimator.
+
+Code example:
+
+.. code-block:: python
+
+    # Train base estimator on training data
+    base_clf = LinearSVC()
+    base_clf.fit(X_train, y_train)
+
+    # Calibrate using a separate calibration set (X_calib, y_calib)
+    calib_prefit = CalibratedClassifierCV(base_clf, method='sigmoid', cv='prefit')
+    calib_prefit.fit(X_calib, y_calib)
+
+    y_prob_prefit = calib_prefit.predict_proba(X_test)[:, 1]
+    brier_prefit = brier_score_loss(y_test, y_prob_prefit)
+    print("Brier score (prefit):", brier_prefit)
+
+Notes on usage and behavior
+---------------------------
+
+- Default behavior uses cross-validation (cv=5 if not specified) and an ensemble of calibrated classifiers by default. The final probabilities are averaged across the calibrated classifiers.
+- If you set ensemble=False, cross-validated predictions are used to compute the calibration map, and the final prediction uses the base estimator trained on all data.
+- For estimators that provide predict_proba (instead of relying on decision_function), calibration can still be beneficial if the raw probabilities are miscalibrated.
+
+API reference (CalibratedClassifierCV)
+--------------------------------------
+
+- estimator: The classifier to calibrate. If not provided, defaults to LinearSVC.
+- method: {'sigmoid', 'isotonic'}. Calibration method to use.
+- cv: Cross-validation strategy. Integer, CV splitter, iterable of (train, test) indices, or 'prefit' for prefit calibration.
+- n_jobs: Number of jobs to run in parallel (None means 1 unless in a parallel backend).
+- ensemble: Whether to ensemble calibrated classifiers across CV folds (default: True).
+- base_estimator: Deprecated alias for estimator (use estimator instead).
+
+Attributes
+----------
+
+- classes_: ndarray of shape (n_classes,)
+- n_features_in_: int
+- feature_names_in_: ndarray of shape (n_features_in_,)
+- calibrated_classifiers_: list of fitted calibrated classifiers (length depends on cv/ensemble)
+
+Example: end-to-end workflow
+----------------------------
+
+- Load data
+- Split into train/test
+- Choose a base estimator (e.g., LinearSVC)
+- Create a CalibratedClassifierCV with the desired method
+- Fit on training data
+- Predict probabilities for test data
+- Evaluate calibration quality with Brier score and a calibration curve
+
+See also
+--------
+
+- sklearn.calibration.CalibratedClassifierCV (class reference)
+- sklearn.calibration.calibration_curve (reliability diagram helper)
+- sklearn.metrics.brier_score_loss, log_loss
+
+Further reading
+--------------
+
+- Platt, J. (1999). Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods.
+- Zadrozny, B., & Elkan, C. (2001). Gradient boosting and calibration of probabilities.
+- User Guide: Calibration of predicted probabilities in classification.

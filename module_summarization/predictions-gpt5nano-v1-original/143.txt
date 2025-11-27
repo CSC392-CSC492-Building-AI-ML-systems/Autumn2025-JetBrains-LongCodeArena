@@ -1,0 +1,50 @@
+Memory Management
+
+Overview
+- This system manages memory by avoiding unnecessary strong references, deferring work until needed, and keeping per-task context isolated.
+- Key strategies include use of weak references for global objects, per-task context variables, lazy binding of remote state, and careful handling of serialized payloads.
+- Memory footprint is tracked and can be inspected using provided utilities.
+
+Global state and lifecycle
+- Global client registry
+  - _global_clients is a weakly-referenced dictionary (weakref.WeakValueDictionary). This ensures that Client objects are not kept alive solely by being registered there.
+  - _global_client_index tracks a monotonically increasing identifier for registered clients.
+  - _get_global_client() returns a suitable existing client (preferably the most recently created non-closed one) or None if none are available.
+  - _set_global_client(c) registers a Client as a default/global client and increments the index.
+  - _del_global_client(c) removes a Client from the registry if present.
+- Per-task current client
+  - _current_client is a ContextVar that holds the current Client for the running task/coroutine, defaulting to None.
+  - This per-task context helps avoid keeping global references alive longer than necessary and reduces the risk of memory leaks across asynchronous boundaries.
+
+Futures and lazy binding
+- Core concept: Future represents a remotely running computation. It acts as a local proxy to a result on a remote worker.
+- Memory-friendly binding
+  - Futures store only a few pieces of information locally (key, client reference, inform flag, and state).
+  - _bind_late lazily attaches the Future to a Client when needed. If no client is bound yet, it attempts to obtain one via get_client().
+  - When bound, the Future updates the client's reference state by calling _inc_ref(self.key), and it ensures a corresponding entry exists in the client’s futures map (self._client.futures[self.key] = FutureState()).
+  - If inform is True, the Future sends a message to the scheduler to indicate that this client desires updates for the corresponding key.
+- State and lifecycle
+  - The Future holds a _state object that tracks the remote computation’s status, which is created and stored within the Client’s futures mapping.
+  - The design uses lazy binding and per-Future state to avoid circular references and to allow the Python GC to reclaim objects when they are no longer in use.
+
+Serialization and data movement
+- Data transfer uses serialization utilities (e.g., dumps, loads, _is_dumpable) to move data between workers and the client.
+- Serialization can impact memory usage because large payloads must be serialized and buffered during transfer.
+- The memory model benefits from careful serialization practices and avoiding retaining large serialized blobs longer than necessary.
+
+Sizing and diagnostics
+- sizeof provides a means to estimate the memory footprint of Python objects (useful for profiling memory usage of in-process objects and data structures).
+- Logging, timing, and diagnostic utilities (e.g., time, logger) assist in observing memory-related behavior and performance characteristics.
+- Diagnostics plugins and extensions (e.g., PubSubClientExtension, WorkerPlugin) can aid in understanding memory pressure in distributed contexts.
+
+Practical considerations
+- Favor short-lived global references: rely on the weak global registry and per-task context to minimize long-lived strong references that would prevent garbage collection.
+- Use lazy evaluation: defer binding and state creation until necessary to avoid capturing large objects in memory prematurely.
+- Be mindful of large data in futures: large keys or data results should be managed with care to avoid keeping big objects alive in memory longer than required.
+- Profile and size: leverage sizeof and memory profiling tools to understand where memory is allocated and retained, and adjust usage patterns accordingly.
+
+Tips and best practices
+- When creating Client objects, prefer letting the weak registry manage their lifetime to avoid inadvertent leaks.
+- Use the per-task ContextVar _current_client to scope client usage to the active execution context, reducing cross-task memory retention.
+- Avoid retaining large objects in Futures beyond what is needed for computation and result retrieval.
+- Regularly inspect memory footprints of objects using sizeof and related profiling utilities, especially in long-running distributed workloads.

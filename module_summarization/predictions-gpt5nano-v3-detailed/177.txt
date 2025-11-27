@@ -1,0 +1,186 @@
+Pipelines and composite estimators (compose.rst)
+===============================================
+
+Introduction
+------------
+This module provides utilities to build composite estimators by chaining
+transforms and estimators. The primary building block is a Pipeline, which
+applies a sequence of transforms to data, followed by a final estimator. The
+module also offers parallel feature construction via FeatureUnion, and convenient
+constructors make it easy to compose pipelines.
+
+Key concepts
+------------
+- Transforms vs estimators:
+  - Transforms implement fit and transform.
+  - The final estimator in a Pipeline implements fit (and typically predicts).
+- Parameter navigation:
+  - Parameters of steps can be set with the double-underscore syntax, e.g.,
+    pipe.set_params(scaler__with_mean=False).
+  - This enables rich hyperparameter tuning with tools like GridSearchCV.
+- Caching:
+  - The memory argument enables caching of fitted transformers to speed repeated fits.
+  - The final estimator is not cached, even if it is a transformer.
+- Composite estimators:
+  - FeatureUnion allows parallel feature extraction by combining several transformers.
+
+API overview
+------------
+The module exposes the following primary entities:
+
+- Pipeline
+  - A sequence of (name, transformer/estimator) tuples, where all but the final
+    step are transformers and the final step is an estimator.
+- FeatureUnion
+  - Combines several transformers in parallel and concatenates their outputs.
+- make_pipeline
+  - Convenience constructor to build a Pipeline from a list of estimators
+    without naming each step explicitly.
+- make_union
+  - Convenience constructor to build a FeatureUnion from a list of transformers.
+
+Pipeline
+--------
+The Pipeline class sequences a list of steps and an optional memory cache.
+
+Constructor
+- Pipeline(steps, *, memory=None, verbose=False)
+
+  - steps: List of (name, transformer/estimator) tuples.
+    - All steps except the last must implement fit and transform (i.e., be
+      transformers).
+    - The last step must implement fit (i.e., be an estimator).
+  - memory: Caching location or memory-like object (e.g., joblib.Memory). If a
+    string, it is treated as a path to a directory for caching. None disables
+    caching. The last step is never cached.
+  - verbose: When True, prints timing information for each step during fit.
+
+Attributes
+- named_steps: A dictionary-like object (Bunch) mapping step names to the
+  corresponding estimators. Enables parameter access via dot- or key-based syntax.
+- steps: The original list of (name, estimator) tuples.
+- memory: The configured memory/cache object (or None).
+
+Key methods
+- set_output(self, *, transform=None)
+  - Propagates a requested output configuration to all steps via _safe_set_output.
+  - transform can be:
+    - "default": use the transformer’s default output
+    - "pandas": request DataFrame-backed outputs
+    - None: leave transform configuration unchanged
+  - Returns self.
+
+- get_params(self, deep=True)
+  - Returns the parameters of the Pipeline and of its contained steps
+    (used by hyperparameter tuning tools). This enables nested parameter
+    exploration with names like "stepname__param".
+
+Usage examples
+--------------
+Basic pipeline with a scaler and a classifier
+```python
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', LogisticRegression())
+])
+
+# Fit and evaluate
+pipe.fit(X_train, y_train)
+score = pipe.score(X_test, y_test)
+
+# Parameter tuning
+pipe.set_params(clf__C=1.0, scaler__with_mean=False)
+```
+
+Accessing and inspecting steps
+```python
+# Access a specific step
+scaler = pipe.named_steps['scaler']
+
+# Easy parameter access:
+pipe.set_params(scaler__with_mean=True)
+```
+
+Caching with memory
+```python
+from joblib import Memory
+
+memory = Memory(location='/tmp/sklearn-cache', verbose=0)
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', LogisticRegression())
+], memory=memory)
+```
+
+Using set_output
+```python
+pipe.set_output(transform='pandas')
+# Now transform/fit_transform may return pandas.DataFrame where supported
+```
+
+FeatureUnion example
+--------------------------------
+FeatureUnion combines features from multiple transformers in parallel.
+
+```python
+from sklearn.pipeline import FeatureUnion
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import Normalizer
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+
+union = FeatureUnion([
+    ('pca', PCA(n_components=2)),
+    ('norm', Normalizer())
+])
+
+# Use union inside a Pipeline
+pipe = Pipeline([
+    ('features', union),
+    ('clf', LogisticRegression())
+])
+pipe.fit(X_train, y_train)
+```
+
+Convenience constructors
+------------------------
+- make_pipeline(...)
+  - Create a Pipeline without explicitly naming each step. Names are assigned
+    automatically (step_0, step_1, ...).
+
+- make_union(...)
+  - Create a FeatureUnion without explicit naming.
+
+Edge cases and considerations
+-----------------------------
+- Step compliance:
+  - All intermediate steps must implement fit and transform.
+  - The final estimator must implement fit.
+- Removing steps:
+  - To remove a step, you can replace it with 'passthrough' or None
+    in the steps list.
+- Parameter naming:
+  - Use the double-underscore syntax (stepname__param) to access
+    nested parameters for GridSearchCV or set_params.
+- Memory usage:
+  - Only transformers are cached; the final estimator is not cached.
+  - If a transformer is replaced with a different estimator, ensure
+    compatibility of input/output shapes between steps.
+- Output formats:
+  - The set_output method allows configuring outputs to default or pandas
+    DataFrame formats where supported by transformers.
+
+See Also
+--------
+- sklearn.model_selection.GridSearchCV for hyperparameter tuning across pipeline steps.
+- sklearn.compose.FeatureUnion for parallel feature construction.
+
+Notes
+-----
+This documentation reflects the core concepts of composing estimators via
+Pipeline and FeatureUnion, including parameter management, caching behavior, and
+common usage patterns to enable clean, testable machine learning workflows.

@@ -1,0 +1,173 @@
+BestEffortCallback
+==================
+
+Overview
+--------
+
+BestEffortCallback is a Qt-aware callback that provides lightweight, on-the-fly
+visualization and tabular summaries of live run data. It supports:
+
+- Printing a heading with timing and stream information at the start of a run
+- Maintaining a LiveTable of hinted readings from the primary stream
+- Plotting hinted fields from streams (via LivePlot, LiveGrid, and LiveScatter)
+- Handling peak statistics through a public peaks attribute
+- Flexible control over what gets plotted, displayed in a robust, best-effort manner
+
+Usage is driven by a few public switches and per-descriptor logic that attempts to
+plot independent variables against dependent variables, while accommodating old
+document formats and various hints supplied by the RunEngine.
+
+Key concepts
+------------
+
+- Streams: each document may belong to a named stream (e.g., 'primary', 'baseline').
+- Dimensions: independent variables used for plotting; derived from hints or default guesses.
+- Plot eligibility: plotting is enabled by default but can be disabled globally or per stream.
+
+API and Class
+--------------
+
+Class: BestEffortCallback
+------------------------
+
+Inherits from QtAwareCallback and is decorated with make_class_safe for robust logging and thread-safety integration.
+
+Constructor
+-----------
+
+BestEffortCallback(*, fig_factory=None, table_enabled=True, **kwargs)
+
+- fig_factory: Optional factory for creating figures/axes when plotting.
+- table_enabled: Enable the LiveTable printing of hinted readings (default: True).
+- kwargs: Additional keyword arguments passed to the superclass.
+
+Internal state initialized by __init__
+------------------------------------
+
+- _start_doc: Start document of the run (set in start()).
+- _descriptors: Mapping from descriptor UID to descriptor document.
+- _table: Reference to the LiveTable (if used).
+- _heading_enabled: Controls whether run headings are printed.
+- _table_enabled: Controls whether the table is produced.
+- _baseline_enabled: Controls whether baseline fields are printed/considered.
+- _plots_enabled: Controls whether plots are produced.
+- _fig_factory: Optional external figure factory.
+- _live_plots, _live_grids, _live_scatters: Mappings for live visualization objects per descriptor.
+- _peak_stats: Stores per-descriptor peak statistics.
+- _cleanup_motor_heuristic: Temporary flag used for backward-compatibility heuristics.
+- _stream_names_seen: Tracks streams encountered to print “New stream” messages.
+
+Public options (configurable at runtime)
+----------------------------------------
+
+- overplot: Enables overplotting across plots (default behavior).
+- noplot_streams: List of stream names to exclude from plotting (default: ['baseline']).
+- omit_single_point_plot: If True and a plot would only have a single point, skip plotting (default: True).
+
+Public data
+-----------
+
+- peaks: Stores peak statistics results (initialized as PeakResults()).
+
+Handoff and display helpers
+---------------------------
+
+- _buffer: Internal StringIO buffer used for bottom-border handling of the table.
+- _baseline_toggle: Internal flag used to manage baseline-related UI updates.
+
+Enabled/Disable helpers (public methods)
+----------------------------------------
+
+- enable_heading / disable_heading
+- enable_table / disable_table
+- enable_baseline / disable_baseline
+- enable_plots / disable_plots
+
+Behavior and Core Flow
+----------------------
+
+Triggering the callback
+- __call__(name, doc, *args, **kwargs) short-circuits if none of the display options (table, baseline, plots) are enabled.
+
+Start of a run
+- start(doc) clears internal state, stores the start document, and reads hints.
+- Attempts to guess dimensional structure for plotting:
+  - If motors are provided in the start document, GUESS is a list of ([motor], 'primary') for each motor.
+  - If not, GUESS defaults to time as the independent dimension.
+- plan_hints is read from doc['hints']; dimensions are finalized from hints if available.
+- If hints do not specify a consistent single-stream dimension, a fallback is used and a warning is issued:
+  - _cleanup_motor_heuristic is set to True to indicate we should recalibrate fields later when descriptors arrive.
+- self.dim_fields holds the chosen single field per dimension for plotting.
+- self.all_dim_fields holds all independent fields across dimensions (used to avoid duplicating independent variables in plots).
+- self.dim_stream records the stream corresponding to dimensions (from the first dimension).
+
+- If _heading_enabled, a header with Transient Scan ID, Time, and Persistent Unique Scan ID is printed.
+
+Descriptor handling
+- descriptor(doc) is called for each descriptor document. It:
+  - Stores the descriptor and determines the stream name (default 'primary').
+  - Prints “New stream: 'stream_name'” when a new stream is seen and table output is enabled.
+  - Computes columns using hinted_fields(doc) (pulls fields available for plotting).
+  - For primary stream with _cleanup_motor_heuristic, expands dimension fields from object_keys or hints to actual field names, and resets the flag.
+  - Removes any dimension fields from columns to avoid treating them as plotting variables.
+  - Decides whether to plot data (plot_data):
+    - Plotting disabled globally via _plots_enabled or if stream is in noplot_streams.
+    - If there are no columns to plot, plot_data is False.
+    - If there is only a single point and omit_single_point_plot is True, plot_data is False.
+  - If plot_data remains True, proceeds to set up plots (LivePlot, LiveGrid, LiveScatter) for the descriptor (logic beyond this excerpt).
+
+Plotting and tables (what you can expect)
+- When enabled, the callback populates live plots and grids for eligible fields, often keyed by descriptor UID.
+- LiveTable is used to print hinted readings from the primary stream.
+- Peak statistics support (self.peaks) via the PeakResults structure, and per-descriptor peak data (self._peak_stats) can be populated as data arrives.
+
+Examples
+--------
+
+Basic usage (pseudo):
+- Instantiate the callback with desired options.
+- Attach to a RunEngine as a callback/Subscriber.
+
+Example:
+- from mypackage.callbacks import BestEffortCallback
+- cb = BestEffortCallback(table_enabled=True, figure_factory=None)
+- RE.subscribe(cb)
+
+Tests and testing hints
+-----------------------
+
+- For instructions on testing in a simulated environment, see:
+  tests/interactive/best_effort_cb.py
+
+Related concepts
+----------------
+
+- LivePlot, LiveGrid, LiveScatter: visualization helpers used by the callback.
+- QtAwareCallback: base class to integrate with Qt event loops for responsive plotting.
+- LiveTable: tabular display for readings.
+- PeakStats / PeakResults: structures used to store peak-related statistics (imported from the package).
+
+Notes
+-----
+
+- The callback is designed to be robust with legacy documents and varying hints.
+- A dedicated testing example exists to illustrate interactive behavior in a simulated environment.
+
+See Also
+--------
+
+- live plotting and table utilities in the same package:
+  - mpl_plotting.LivePlot
+  - mpl_plotting.LiveGrid
+  - mpl_plotting.LiveScatter
+  - core.LiveTable
+- Callback framework:
+  - callbacks.QtAwareCallback
+  - callbacks.make_class_safe
+- Fitting and peak statistics:
+  - fitting.PeakStats
+
+Test Instructions (quick)
+-------------------------
+
+- Run the interactive test example at tests/interactive/best_effort_cb.py to exercise the BestEffortCallback in a simulated environment.

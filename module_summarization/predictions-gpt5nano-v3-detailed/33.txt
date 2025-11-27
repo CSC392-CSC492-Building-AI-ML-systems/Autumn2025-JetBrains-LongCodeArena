@@ -1,0 +1,162 @@
+w_select
+========
+
+Overview
+--------
+w_select is a WESTPA tool that selects dynamics segments from an HDF5 WESTPA data file based on a user-supplied predicate function. For each iteration in a specified range, it computes the set of matching segments and writes an output HDF5 file containing, per iteration, the iteration number, the number of matching segments, the segment IDs, and their associated weights. By default, only the matching segments are stored; with -a/--include-ancestors, ancestors of the matching segments can also be included.
+
+Key concepts
+- Predicate-driven selection: The predicate(n_iter, iter_group) function determines which segments in iteration n_iter match the criterion.
+- Parallel processing: The tool processes iterations concurrently to leverage multiple cores.
+- Output format: The output HDF5 file contains datasets n_iter, n_segs, seg_ids, and weights, describing, for each iteration, the matching segments and their weights.
+- Ancestors option: When enabled, the ancestors of matched segments are included in the output (implementation detail may depend on the predicate and data structure).
+
+Core components
+- _find_matching_segments(west_datafile_name, n_iter, predicate, invert=False)
+  - Reads the per-iteration group from the WESTPA HDF5 data file.
+  - Calls predicate(n_iter, iter_group) to obtain matching segment IDs.
+  - If invert is True, inverts the match set within the iteration.
+  - Returns a tuple: (n_iter, matchvec) where matchvec is a sorted array of matching seg_ids with dtype seg_id_dtype.
+- WSelectTool(WESTParallelTool)
+  - Command-line wrapper implementing w_select.
+  - Registers arguments for data reading, iteration range, predicate function, invert flag, include-ancestors flag, and output file.
+  - Validates the predicate is callable and stores configuration (predicate, invert, include_ancestors, output filename).
+  - Executes in parallel across iterations, collecting matching segments and writing them to the output file.
+
+Predicate function
+------------------
+- Signature: predicate(n_iter, iter_group)
+  - n_iter: integer iteration index (global iteration number).
+  - iter_group: HDF5 group corresponding to that iteration; the predicate may read datasets within this group to decide matches.
+- Return value: a collection of segment IDs (integers) within that iteration that match the predicate.
+- Inversion: The -v/--invert flag inverts the predicate result for that iteration.
+- Ancestors: If -a/--include-ancestors is specified, the function may incorporate ancestor segments in its result or the overall output may include them depending on implementation.
+
+Output format
+-------------
+The output file (default: select.h5) contains the following datasets:
+
+- /n_iter
+  - dtype: n_iter_dtype
+  - description: Iteration numbers for each entry in the output datasets.
+
+- /n_segs
+  - dtype: unsigned integer
+  - description: Number of matching segments in the given iteration.
+
+- /seg_ids
+  - dtype: seg_id_dtype
+  - shape: (n_iterations, 0) initially, resizable to (n_iterations, max_segments_per_iteration)
+  - description: Matching segment IDs for each iteration. For iteration i, the valid entries are seg_ids[i, :n_segs[i]].
+
+- /weights
+  - dtype: weight_dtype
+  - shape: (n_iterations, 0) initially, resizable to (n_iterations, max_segments_per_iteration)
+  - description: Weights for each matching segment in seg_ids. For iteration i, valid entries are weights[i, :n_segs[i]].
+
+Notes
+- The tool uses a parallel worker pool to compute _find_matching_segments for each iteration in the requested range.
+- The initial shapes for seg_ids and weights are (iter_count, 0) with a maxshape of (iter_count, None), allowing dynamic growth as matching segments are discovered.
+- The predicate must return unique segment identifiers; duplicates will be de-duplicated by the implementation (via a set) before sorting.
+- If no segments match in an iteration, n_segs[i] is 0 and seg_ids[i, :0] is an empty slice.
+
+Arguments and configuration
+---------------------------
+- -p, --predicate-function MODULE.FUNCTION
+  - Path to the Python callable that implements the predicate: predicate(n_iter, iter_group).
+  - The function must be callable; otherwise an error is raised.
+- -v, --invert
+  - Invert the predicate result for each iteration.
+- -a, --include-ancestors
+  - Include ancestors of matched segments in the output (implementation dependent; see edge cases).
+- -o, --output OUTPUT
+  - Output HDF5 file name. Default: select.h5.
+- Data reading and iteration range
+  - The tool leverages WESTDataReader and IterRangeSelection to configure the input data file and the iteration range to process.
+  - Iteration range is specified by the user (e.g., via start/stop or step) and determines the set of iterations for which matching segments are computed.
+
+Usage notes and edge cases
+- Predicate requirements:
+  - Must be deterministic for a given iteration and data state.
+  - Should return a collection of segment IDs that exist for that iteration.
+  - If the predicate accesses data that is expensive to read, performance may degrade; consider caching or minimizing I/O within the predicate.
+- Inversion:
+  - Invert affects the set of IDs considered matching within each iteration.
+- Ancestors:
+  - The include-ancestors flag alters output content. If your workflow relies on ancestral segments, ensure your predicate and downstream tools are compatible with the ancestors semantics.
+- Empty iterations:
+  - If no segments match in an iteration, n_segs will be 0 and seg_ids/weights will reflect an empty second dimension for that iteration.
+- Memory considerations:
+  - The output datasets are chunked and compressed; large iteration ranges with many matches can produce sizable output. Ensure sufficient disk space and consider chunking/compression strategies as needed.
+- Predicate loading:
+  - The predicate is loaded via get_object and must be importable from the provided path; ensure your Python path includes the predicate's module location.
+
+Example: predicate function
+---------------------------
+Below is a minimal example illustrating a predicate function that selects every 3rd segment in an iteration (as an example of the expected interface). The actual iteration data structure is determined by WESTPA; the function should read from iter_group accordingly.
+
+.. code-block:: python
+
+def example_predicate(n_iter, iter_group):
+    """
+    Example predicate that selects every 3rd segment in the iteration.
+    The actual data access will depend on the structure of iter_group.
+    Return a sequence of segment IDs for this iteration.
+    """
+    # Pseudo-access to iteration data; adapt to your data layout
+    nsegs = int(iter_group['seg_index'].shape[0])
+    # Return the IDs (0-based indices or actual seg IDs, depending on your convention)
+    return list(range(0, nsegs, 3))
+
+Usage example
+-------------
+- Command-line invocation (example):
+
+.. code-block:: bash
+
+$ w_select \
+    -p my_predicate_module:example_predicate \
+    -o select.h5 \
+    -a
+
+- Explanation:
+  - -p points to a Python function implementing the predicate.
+  - -o specifies the output file; default is select.h5.
+  - -a includes ancestors in the output.
+
+Reading the output
+------------------
+The resulting HDF5 file can be inspected with h5py or similar tools:
+
+.. code-block:: python
+
+import h5py
+
+with h5py.File('select.h5', 'r') as f:
+    n_iter = f['n_iter'][:]
+    n_segs = f['n_segs'][:]
+    seg_ids = f['seg_ids'][:]
+    weights = f['weights'][:]
+
+    for i, ni in enumerate(n_segs):
+        if ni > 0:
+            print(f"Iter {n_iter[i]}: {ni} matches, first IDs = {seg_ids[i, :ni]}")
+
+See Also
+--------
+- WESTParallelTool: Base class providing parallel execution scaffolding.
+- WESTDataReader: Abstraction for reading input WESTPA HDF5 data.
+- IterRangeSelection: Command-line support for specifying the iteration range.
+- h5io.WESTPAH5File: Lightweight wrapper for HDF5 I/O in WESTPA.
+
+Edge cases to consider in your predicate design
+- If your predicate depends on data not loaded into memory, ensure the iter_group access patterns are efficient.
+- Be mindful of the potential for large numbers of matching segments per iteration; the output datasets scale with the total number of matches across iterations.
+- If include-ancestors is enabled, ensure your predicate or downstream processing aligns with how ancestors should be represented in the output.
+
+Usage summary
+-------------
+- Purpose: Select segments per iteration using a user-defined predicate.
+- Input: WESTPA HDF5 data file; per-iteration HDF5 group exposed to the predicate.
+- Output: select.h5 containing n_iter, n_segs, seg_ids, weights.
+- Options: predicate function, inversion, ancestors, and output file. Parallel execution across iterations is supported.

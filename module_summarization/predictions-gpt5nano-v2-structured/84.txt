@@ -1,0 +1,224 @@
+Piccolo Apps (piccolo_apps.rst)
+===============================
+
+Overview
+--------
+This module provides the core structures and helpers for configuring and discovering Piccolo apps within a project. It includes:
+
+- AppConfig: per-app configuration including table registrations, migrations, dependencies, and CLI commands.
+- AppRegistry: a registry of all Piccolo apps in a project.
+- table_finder: a utility to discover Table subclasses across modules with optional tag-based filtering.
+- MigrationModule and PiccoloAppModule: lightweight ModuleType-based markers used for organizing app migrations and app configurations.
+
+Key concepts
+- App configuration is declared per app (e.g. article, blog) via AppConfig.
+- Tables associated with an app are registered through AppConfig and/or discovered via table_finder.
+- App dependencies allow migrations to be ordered across apps.
+- Commands can be registered so they appear in the Piccolo CLI.
+
+API reference
+-------------
+
+MigrationModule
+~~~~~~~~~~~~~~~
+A lightweight ModuleType subclass used to describe a migration module. It carries metadata about the module and defines a forwards coroutine that runs the forward migrations.
+
+Code outline:
+.. code-block:: python
+
+    from piccolo_apps import MigrationModule
+
+    class MyMigrationModule(MigrationModule):
+        ID: str
+        VERSION: str
+        DESCRIPTION: str
+
+        @staticmethod
+        async def forwards() -> None:
+            pass
+
+PiccoloAppModule
+~~~~~~~~~~~~~~~~
+A lightweight ModuleType subclass used to hold app configuration in a module.
+
+Code outline:
+.. code-block:: python
+
+    from piccolo_apps import PiccoloAppModule
+
+    class MyAppModule(PiccoloAppModule):
+        APP_CONFIG: AppConfig
+
+table_finder
+~~~~~~~~~~~~
+Locates Table subclasses within the provided modules. It imports modules and returns a list of Table subclasses that match optional tag filters.
+
+Parameters
+- modules (Sequence[str]): Module paths to search (e.g., ['blog.tables']).
+- include_tags (Sequence[str], optional): Tags that a Table class must have to be imported. '__all__' imports all found tables.
+- exclude_tags (Sequence[str], optional): Tags that, if present on a Table class, cause it to be skipped.
+- exclude_imported (bool, default False): If True, only tables defined in the provided modules are considered; imported tables are ignored.
+
+Returns
+- List[Type[Table]]: The discovered Table subclasses.
+
+Code example:
+.. code-block:: python
+
+    from piccolo_apps import table_finder
+    from piccolo.table import Table
+
+    class ArticleTable(Table):  # must exist in one of the modules listed
+        pass
+
+    tables = table_finder(
+        modules=['blog.tables'],
+        include_tags=['__all__'],
+        exclude_tags=None,
+        exclude_imported=False,
+    )
+
+Command
+-------
+A small wrapper used within AppConfig to represent a CLI command. It holds a callable and optional aliases.
+
+Code outline:
+.. code-block:: python
+
+    from piccolo_apps import Command
+
+    def create_article():
+        ...
+
+    cmd = Command(callable=create_article, aliases=['new', 'make'])
+
+AppConfig
+~~~~~~~~~
+Per-app configuration for a Piccolo project. This class centralizes information about an app, including its name, migrations folder, registered tables, dependencies, and CLI commands.
+
+Attributes
+- app_name (str): The logical name of the app, e.g., 'article'.
+- migrations_folder_path (str): Path to the app's migration files.
+- table_classes (List[Type[Table]]): Registered Table subclasses for the app.
+- migration_dependencies (List[str]): Other apps’ configurations that must migrate first.
+- commands (List[Union[Callable, Command]]): Functions or Command wrappers exposed to the Piccolo CLI.
+
+Behavior and helpers
+- __post_init__: Normalizes commands to Command instances; converts pathlib.Path to str for migrations_folder_path.
+- register_table(table_class): Convenience method to register a Table subclass and return the class.
+- migration_dependency_app_configs (property): Lazily resolves and caches AppConfig instances for all apps listed in migration_dependencies.
+- get_table_with_name(table_class_name): Returns a registered Table subclass by class name or raises ValueError if not found.
+
+Code outline:
+.. code-block:: python
+
+    from piccolo_apps import AppConfig, Command
+
+    app_config = AppConfig(
+        app_name="article",
+        migrations_folder_path="path/to/article/migrations",
+        table_classes=[],
+        migration_dependencies=["piccolo.apps.user.piccolo_conf"],
+        commands=[lambda: print("hello"), Command(lambda: None, aliases=["greet"])],
+    )
+
+    # Register a table later
+    class Article(Table):
+        ...
+
+    app_config.register_table(Article)
+
+    # Access migration-dependency configs
+    dependencies = app_config.migration_dependency_app_configs
+
+    # Resolve a table by name
+    ArticleClass = app_config.get_table_with_name("Article")
+
+AppRegistry
+~~~~~~~~~~~
+Maintains the set of Piccolo apps within a project. The AppRegistry is typically populated from a list of app modules (e.g., 'blog.piccolo_app') and stores AppConfig objects for each app.
+
+Constructor
+- apps (List[str], optional): Paths to Piccolo apps in your project. If omitted, defaults to an empty list.
+
+Code outline:
+.. code-block:: python
+
+    from piccolo_apps import AppRegistry
+
+    registry = AppRegistry(apps=["article.piccolo_app", "blog.piccolo_app"])
+    # Access registry.app_configs (structure depends on project setup)
+
+Usage examples
+--------------
+
+Discovering and registering app components
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+- Define app configuration and register tables as part of each app.
+- Use table_finder to automatically discover Table subclasses across modules, reducing boilerplate.
+
+Example: defining an app and discovering its tables
+.. code-block:: python
+
+    from piccolo_apps import AppConfig, table_finder
+    from myapp.tables import Article, Comment  # example Tables
+
+    article_config = AppConfig(
+        app_name="article",
+        migrations_folder_path="apps/article/migrations",
+        table_classes=[Article, Comment],
+        migration_dependencies=["piccolo.apps.user.piccolo_conf"],
+        commands=[],
+    )
+
+    # If you prefer discovery instead of explicit registration:
+    discovered_tables = table_finder(
+        modules=["apps.article.tables"],
+        include_tags=["__all__"],
+    )
+    article_config.table_classes.extend(discovered_tables)
+
+Migration and app wiring
+~~~~~~~~~~~~~~~~~~~~~~~~
+- MigrationModule and PiccoloAppModule serve as markers for organizing code that gets dynamically discovered and loaded by Piccolo.
+- AppDependencies ensure migrations run in a predictable order across apps.
+
+Example: minimal wiring (conceptual)
+.. code-block:: python
+
+    from piccolo_apps import MigrationModule, PiccoloAppModule, AppConfig, AppRegistry
+
+    class ArticleMigrations(MigrationModule):
+        ID = "0123"
+        VERSION = "0.1.0"
+        DESCRIPTION = "Initial article migrations"
+
+        @staticmethod
+        async def forwards() -> None:
+            # apply forward migrations
+            pass
+
+    class ArticleAppModule(PiccoloAppModule):
+        APP_CONFIG = AppConfig(
+            app_name="article",
+            migrations_folder_path="apps/article/migrations",
+            table_classes=[],
+            migration_dependencies=["piccolo.apps.user.piccolo_conf"],
+            commands=[]
+        )
+
+    # Registry of apps in your project
+    registry = AppRegistry(apps=["article.piccolo_app", "blog.piccolo_app"])
+
+Notes
+-----
+- The table_finder helper is useful to keep your app configuration lean by discovering Table subclasses automatically, with tag-based filtering to control what gets registered.
+- migration_dependencies ensure cross-app migration ordering, which is important for complex projects.
+
+Appendix: practical tips
+------------------------
+- Use include_tags="__all__" to import all Table subclasses found in the target modules.
+- Use exclude_imported to limit discovery to tables defined in the immediate module for prevention of accidental registrations from imported modules.
+- Leverage AppConfig.migration_dependency_app_configs to access dependent app configurations when orchestrating migrations.
+
+This documentation covers the core components and usage patterns provided by the piccolo_apps module.

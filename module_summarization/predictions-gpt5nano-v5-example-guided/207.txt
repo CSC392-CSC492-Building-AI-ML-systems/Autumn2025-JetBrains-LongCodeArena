@@ -1,0 +1,140 @@
+Decision Trees
+================
+
+Overview
+--------
+
+This module provides the core building blocks for impurity-based decision trees. It defines a Cython-based interface, Criterion, which encapsulates how to measure and manipulate impurity when evaluating splits. The interface is designed to be extended by concrete impurity criteria (e.g., for classification or regression) and is optimized for performance, including support for missing values and sample weights.
+
+Key concepts:
+- Impurity-based split evaluation: compute the impurity of the current node and of potential left/right child nodes to determine the best split.
+- Data subset handling: operations are performed on a subset of samples defined by sample_indices[start:end], with per-sample weights and a shared total weight (weighted_n_samples).
+- Monotonicity and pruning: includes middle_value for monotonicity constraints and proxy_impurity_improvement to speed up the search for the best split.
+- Missing values: provide hooks to initialize and handle missing values within a node.
+
+Key Components
+--------------
+
+- Criterion (abstract interface)
+  - Purpose: Defines the API used by impurity criteria to drive splitting decisions.
+  - Core methods (signatures shown for clarity; concrete implementations are provided in subclasses):
+    - init(self, const DOUBLE_t[:, ::1] y, const DOUBLE_t[:] sample_weight, double weighted_n_samples, const SIZE_t[:] sample_indices, SIZE_t start, SIZE_t end) nogil
+      Initialize the criterion for the samples in [start, end). Returns 0 on success, -1 on failure.
+    - init_missing(self, SIZE_t n_missing) noexcept nogil
+      Initialize sums for missing values when present.
+    - reset(self) noexcept nogil
+      Reset the criterion at the current start position (for a new potential split).
+    - reverse_reset(self) noexcept nogil
+      Reset the criterion at the end position (for reverse sweep).
+    - update(self, SIZE_t new_pos) noexcept nogil
+      Move statistics as the split position shifts to the left, updating left/right counts.
+    - node_impurity(self) noexcept nogil
+      Compute the impurity of the current node (the samples in the current node).
+    - children_impurity(self, double* impurity_left, double* impurity_right) noexcept nogil
+      Compute the impurities of the potential left and right children given a split.
+    - node_value(self, double* dest) noexcept nogil
+      Compute and store the node value (e.g., predicted target) for the node.
+    - clip_node_value(self, double* dest, double lower_bound, double upper_bound) noexcept nogil
+      Clip the stored node value to a specified range.
+    - middle_value(self) noexcept nogil
+      Compute the middle value used for monotonicity constraints (implemented in subclasses).
+    - proxy_impurity_improvement(self) noexcept nogil
+      A fast, proxy measure of impurity improvement used to quickly compare splits.
+    - impurity_improvement(self, double impurity_parent, double impurity_left, double impurity_right) noexcept nogil
+      Compute the true impurity improvement for a given split.
+  - Internal data and behavior:
+    - Operates on a subset of samples defined by sample_indices[start:end].
+    - Tracks weighted counts for left/right children (weighted_n_left, weighted_n_right) and total (weighted_n_samples).
+    - EPSILON is defined for use in Poisson-related criteria.
+    - Weights and sample indices enable handling of weighted samples and missing values efficiently.
+  - Notes:
+    - The class includes pickling hooks (__getstate__/__setstate__) for serialization.
+    - The design supports multiple impurity measures by providing a unified interface, allowing specialized subclasses to implement specific impurity logic.
+
+- EPSILON
+  - A small constant (10 times the machine epsilon) used in Poisson-criterion computations to ensure numerical stability.
+
+- WeightedMedianCalculator
+  - Imported utility used in certain criteria to handle weighted medians, relevant for monotonicity constraints or specific split criteria.
+
+- Monotonicity and efficiency
+  - middle_value and proxy_impurity_improvement are used to enforce monotonicity constraints and speed up the search for the optimal split, respectively.
+  - The interface emphasizes in-place updates and memory-efficient operations for performance on large datasets.
+
+Usage
+-----
+
+The Criterion interface is intended to be subclassed by concrete impurity criteria (e.g., for classification or regression). The following outline shows how the components interact during tree construction:
+
+1. Prepare data:
+   - y: target variables (buffer for impurity computation)
+   - sample_weight: per-sample weights
+   - sample_indices: indices of samples used in the current node
+   - weighted_n_samples: sum of sample weights
+
+2. Initialize criterion for a node:
+   - status = criterion.init(y, sample_weight, weighted_n_samples, sample_indices, start, end)
+   - If status != 0, memory allocation failed.
+
+3. Evaluate splits:
+   - impurity_parent = criterion.node_impurity()
+   - criterion.update(new_pos) as you sweep possible split positions
+   - criterion.children_impurity(&impurity_left, &impurity_right)
+   - improvement = criterion.impurity_improvement(impurity_parent, impurity_left, impurity_right)
+
+4. Choose best split:
+   - Use proxy_impurity_improvement for fast pruning, and compute exact impurity_improvement for the final decision.
+
+5. Compute node values:
+   - criterion.node_value(dest)
+
+Example (pseudo Python-like usage)
+----------------------------------
+
+Note: Concrete criterion classes (e.g., ClassificationCriterion, RegressionCriterion) implement the specific impurity logic. The following demonstrates typical usage at a high level.
+
+.. code-block:: python
+
+    # Pseudo-example; concrete classes must be instantiated from the library.
+    y = np.asarray([...], dtype=np.float64)
+    sample_weight = np.ones(n)
+    sample_indices = np.arange(n)
+    start, end = 0, n
+
+    criterion = ClassificationCriterion()  # or RegressionCriterion, etc.
+    status = criterion.init(y, sample_weight, sample_weight.sum(), sample_indices, start, end)
+    if status != 0:
+        raise MemoryError("Failed to initialize criterion")
+
+    impurity_parent = criterion.node_impurity()
+
+    # Sweep potential split positions and evaluate impurities
+    best_pos = None
+    best_improve = -np.inf
+    for pos in range(start + 1, end):
+        criterion.update(pos)
+        impurity_left, impurity_right = 0.0, 0.0
+        criterion.children_impurity(&impurity_left, &impurity_right)
+        improve = criterion.impurity_improvement(impurity_parent, impurity_left, impurity_right)
+        if improve > best_improve:
+            best_improve = improve
+            best_pos = pos
+
+    # Use best_pos to perform the split and build children
+    node_value = np.empty(1, dtype=np.float64)
+    criterion.node_value(node_value)
+
+Details
+-------
+
+- The Criterion interface is designed for high-performance tree implementations, enabling efficient in-place updates and minimal Python overhead.
+- It supports weighted samples and missing values, which are common in real-world datasets.
+- The proxy impurity improvement provides a fast heuristic for pruning the split search, while impurity_improvement computes the exact gain once a candidate split is identified.
+- The middle_value method is intended to be implemented by concrete subclasses to enforce monotonicity constraints on splits (e.g., when target means are monotone with respect to a feature).
+
+Notes
+-----
+
+- This documentation reflects the internal API used by the tree-building process. End users typically interact with higher-level tree classes that rely on these impurity criteria.
+- For concrete implementations and practical examples, refer to the specific subclass documentation (e.g., ClassificationCriterion, RegressionCriterion) in the same codebase.
+

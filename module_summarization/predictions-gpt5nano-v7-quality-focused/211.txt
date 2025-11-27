@@ -1,0 +1,160 @@
+Generalized Linear Mixed Models (GLMM) with Bayesian Estimation
+================================================================
+
+This document describes the Generalized Linear Mixed Models implemented in mixed_glm.rst. The implementation focuses on Bayesian inference for GLMs with random effects, supporting a subset of families and two estimation approaches.
+
+Overview
+--------
+
+- Purpose: Fit generalized linear mixed models using Bayesian methods.
+- Supported families: Binomial and Poisson (without additional scale or shape parameters).
+- Estimation methods:
+  - Laplace approximation (maximum a posteriori, MAP)
+  - Variational Bayes (mean-field approximation to the posterior)
+- Random effects: All random effects are modeled as mutually independent in this implementation.
+- Random effects design: The exog_vc matrix is the design matrix for random effects; each column represents an independent random effect realization. Random effects have mean zero and an unknown standard deviation.
+- Variance structure: The standard deviation parameters are constrained to be equal within subsets of columns (defined by ident). If formulas are used, columns derived from the same formula share the same variance.
+
+Model and Parameterization
+--------------------------
+
+The joint density factors as
+
+.. math::
+
+    p(y | vc, fep) p(vc | vcp) p(vcp) p(fe)
+
+- p(y | vc, fep): GLM likelihood component
+- p(vc | vcp): Gaussian random effects given the variance-structure parameters vcp
+- p(vcp): Prior on the log-standard deviations of random effects (vcp); these are Gaussian, so the standard deviations have log-normal distributions
+- p(fe): Prior on fixed effects parameters (fe)
+
+Key points
+
+- Random effects (vc) are independent Gaussian realizations, with variances determined by vcp and the ident grouping.
+- Each column of exog_vc corresponds to a random effect realization. Columns sharing the same ident value share the same variance parameter.
+- When using formulas, columns of exog_vc derived from a common formula share the same variance parameter (via ident).
+
+Notation
+
+- endog: Response vector.
+- exog: Covariates for the fixed effects part of the mean structure.
+- exog_vc: Covariates for the random effects part of the model. May be a sparse matrix; if a dense matrix is provided, it is converted to sparse internally.
+- ident: Integer labels indicating which columns of exog_vc share a variance parameter.
+  - If formulas are not used, ident must have the same length as the number of columns of exog_vc.
+  - Columns with the same ident value share the same standard deviation.
+  - When formulas are used, columns derived from the same formula share a variance parameter.
+- vcp_p: Prior standard deviation for variance-component parameters (the prior is on the log-standard deviations, so the standard deviations have log-normal distributions with this scale).
+- fe_p: Prior standard deviation for fixed effects parameters.
+- family: A GLM family instance from statsmodels.genmod.families (e.g., Binomial, Poisson).
+- fep_names: Names of fixed effects parameters (corresponding to columns of exog). If None, default names are created.
+- vcp_names: Names of variance component parameters (corresponding to distinct labels in ident). If None, default names are created.
+- vc_names: Names of the random effect realizations (one per column of exog_vc).
+
+Priors and Parameterization
+---------------------------
+
+- Fixed effects (fe): Gaussian prior with mean 0 and standard deviation fe_p.
+- Variance components (vcp): Gaussian priors on the log-standard deviations (vcp). Since the standard deviations are exponentiated, they have log-normal distributions.
+- Random effects (vc): Independent Gaussian realizations given vcp, with variances determined by ident.
+- All random effects realizations are independent across columns and across ident groups, under the specified variance structure.
+
+Input Data and Parameters
+-------------------------
+
+- endog (array_like): Vector of response values.
+- exog (array_like): Covariates for the fixed effects part.
+- exog_vc (array_like or sparse matrix): Covariates for the random effects part. May be scipy.sparse; if a dense matrix is provided, it is converted to sparse internally. Using formulas (via Patsy) affects the construction of exog_vc and ident.
+- ident (array_like): Integer labels for variance-structure grouping. Must have the same length as the number of columns of exog_vc when formulas are not used; two columns with the same ident share the same variance parameter.
+- vcp_p (float): Prior standard deviation for variance components (on the log scale).
+- fe_p (float): Prior standard deviation for fixed effects.
+- family (statsmodels.genmod.families instance): GLM family (Binomial or Poisson, etc.).
+- fep_names (list of str or None): Names for fixed effects parameters.
+- vcp_names (list of str or None): Names for variance components.
+- vc_names (list of str or None): Names for random effect realizations.
+
+Formulas
+--------
+
+- The implementation supports formulas via Patsy. When formulas are used, ident is constructed internally:
+  - Each distinct term yields a separate variance parameter in ident.
+  - Columns of exog_vc derived from a common formula share the same variance parameter.
+
+Sparse vs dense
+--------------
+
+- exog_vc may be provided as a sparse matrix. If a dense matrix is provided, the implementation converts it to a sparse matrix internally.
+- When using formulas, there is currently no way to avoid creating a temporary dense version of exog_vc.
+
+Fitting and Output
+------------------
+
+- Fitting methods:
+  - fit_map: Laplace approximation to the posterior (maximum a posteriori)
+  - fit_vb: Variational Bayes (mean-field approximation to the posterior)
+- Both methods return a MixedGLMResults object containing posterior summaries for:
+  - Fixed effects (fep)
+  - Random effects realizations (vc)
+  - Variance-structure parameters (vcp)
+
+Notes on Assumptions and Behavior
+---------------------------------
+
+- All random effects realizations are modeled as independent Gaussian values given the variance structure.
+- The model assumes no additional scale or shape parameters for the family (only Binomial and Poisson are supported under current constraints).
+- The posterior mode (MAP) or VB solution is returned along with posterior uncertainty information in the results object.
+
+Example
+-------
+
+The following example demonstrates fitting a Binomial GLMM with a random intercept per group.
+
+.. code-block:: python
+
+    from statsmodels.genmod import families
+    from statsmodels.genmod.mixed_glm import MixedGLM
+
+    # Synthetic data (endog: binary outcome)
+    n = 1000
+    G = 50  # number of groups
+    groups = np.random.randint(0, G, size=n)
+
+    # Fixed effects: intercept and one covariate
+    X = np.column_stack((np.ones(n), np.random.randn(n)))
+
+    # exog_vc: one column per group (random effect per group)
+    exog_vc = np.zeros((n, G))
+    exog_vc[np.arange(n), groups] = 1.0
+
+    # ident: one variance parameter per group
+    ident = groups.copy()
+
+    endog = np.random.binomial(1, 0.5, size=n)
+
+    model = MixedGLM(
+        endog=endog,
+        exog=X,
+        exog_vc=exog_vc,
+        ident=ident,
+        vcp_p=0.5,
+        fe_p=1.0,
+        family=families.Binomial()
+    )
+
+    result = model.fit_map()
+    print(result.summary())
+
+Further details
+---------------
+
+- The documentation for the class and methods is available in the source code and includes specifics on the expected shapes and constraints for exog, exog_vc, and ident.
+- The design supports practical use with sparse random-effect structures and formula-based specification for convenient modeling of grouped variance terms.
+
+References
+----------
+
+- Generalized linear mixed models: introductory materials and practical guidance
+- UCLA IDRE GLMM resources
+- SAS documentation on mixed models
+
+This documentation adheres to the behavior described in the source code for mixed_glm.rst, including the supported families, priors, and estimation methods.

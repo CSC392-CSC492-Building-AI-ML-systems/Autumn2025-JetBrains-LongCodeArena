@@ -1,0 +1,191 @@
+# FITS Headers
+
+This document explains FITS (Flexible Image Transport System) headers in depth for developers working with the FITS I/O stack used in this project. It covers the header structure, data types, common keywords, and practical patterns for reading, modifying, and validating headers with Python (notably using Astropy’s header utilities).
+
+---
+
+## Overview
+
+- A FITS file is organized into Header Data Units (HDUs). Each HDU begins with a header consisting of one or more 80-character "cards" that describe metadata about the following data unit.
+- Header cards are unit-length 80-character records arranged into 2880-byte blocks. The header ends with a card whose keyword is `END`.
+- Each header card generally follows the format: an 8-character keyword, an optional value field (preceded by `= `), and an optional comment.
+- Standard keywords encode crucial information (e.g., SIMPLE, BITPIX, NAXIS, NAXISn, CRVALi, CTYPEi, etc.). Additional or extended keywords can use the `HIERARCH` convention for longer names.
+
+---
+
+## Header Anatomy
+
+- Card structure (80 characters):
+  - Keyword: columns 1–8 (8 chars, left-justified)
+  - Value indicator: column 9 (usually `=` if the card has a value)
+  - Value field: columns 10–80
+  - Comment: optional, typically following a slash or appended to the value field as a comment
+- End of header: an `END` card marks the termination of header content.
+- Padding: the header must be padded with spaces to fill an integral multiple of 2880 bytes.
+
+Common card formats:
+- Cards with a value:
+  - `KEYWORD = value / comment`
+  - Example: `NAXIS   = 2 / number of data axes`
+- Comment and History cards (no `=`):
+  - `COMMENT This is a comment line describing the header`
+  - `HISTORY  Created by pid 1234`
+
+Note: The 8-character keyword length is enforced; longer or more descriptive identifiers require the `HIERARCH` convention.
+
+---
+
+## Data Model and Common Keywords
+
+- Core structure:
+  - SIMPLE: boolean; indicates the file conforms to the FITS standard.
+  - BITPIX: integer; number of bits per data value.
+  - NAXIS: integer; number of data axes.
+  - NAXISn: integers; size of each axis (NAXIS1, NAXIS2, ...).
+  - EXTEND: boolean; whether extensions are permitted.
+- World Coordinate System (WCS) keywords (typical for astronomical imaging):
+  - CTYPEi: type of coordinate axis i (e.g., `CTYPE1  = 'RA---TAN'`).
+  - CRVALi: coordinate value at the reference point for axis i.
+  - CRPIXi: reference pixel coordinate along axis i.
+  - CDELTi: incremental scale along axis i.
+  - CROTAi or PC/MATRIX keywords: orientation details.
+- Extended and long keywords:
+  - HIERARCH keyword set allows longer names for advanced metadata.
+- Typical values:
+  - Strings are quoted (e.g., `OBJECT = 'NGC 1234'`).
+  - Logicals are represented as `T`/`F` or Python booleans when using library interfaces.
+  - Numeric values may be integers or floating-point numbers; arrays are supported in some contexts with appropriate syntax.
+
+Best practice: keep required minimal headers standard-compliant and place instrument/observation-specific metadata in user-defined keywords (often with a `OBJECT`, `OBSERVER`, `DATE-OBS`, etc.).
+
+---
+
+## Access and Manipulation in Python (Astropy-centric)
+
+This section shows common patterns when working with headers via Python (Astropy).
+
+- Reading a header from a FITS file:
+  - Example:
+    - from astropy.io import fits
+    - with fits.open('image.fits') as hdul:
+    -     header = hdul[0].header
+    -     naxis1 = header['NAXIS1']
+    -     ctype1 = header['CTYPE1']
+
+- Creating and populating a header from scratch:
+  - Example:
+    - from astropy.io import fits
+    - header = fits.Header()
+    - header['SIMPLE'] = (True, 'file conforms to FITS standard')
+    - header['BITPIX'] = 16
+    - header['NAXIS'] = 2
+    - header['NAXIS1'] = 1024
+    - header['NAXIS2'] = 768
+    - header['EXTEND'] = True
+    - header['CREATED'] = ('2025-11-22T12:34:56', 'Creation timestamp')
+    - header['OBJECT'] = ('NGC 1234', 'Object name')
+    - header['COMMENT'] = 'This is a test header'
+
+- Using HIERARCH for long keywords:
+  - Example:
+    - header['HIERARCH.OBS.OBJECT'] = 'NGC 1234'
+
+- Writing a header and data to a FITS file:
+  - Example (simplified):
+    - from astropy.io import fits
+    - hdu = fits.PrimaryHDU(data=None, header=header)
+    - hdu.writeto('out.fits', overwrite=True)
+
+- Verifying a header:
+  - Note: Verification patterns vary by library version. In many setups, headers can be checked for standard compliance and consistency using the library’s verification utilities. If your environment provides a verify() method or a dedicated verification tool, you can apply it to ensure required keywords exist and values are in valid ranges.
+  - Example (conceptual):
+    - header.verify(option='warn')  # warn on issues, raise on errors (depending on library)
+
+- Access patterns:
+  - Read a keyword value: value = header['NAXIS']
+  - Update a keyword with a value and a comment:
+    - header['OBJECT'] = ('NGC 1234', 'Object name')
+  - Append a free-form comment:
+    - header['COMMENT'] = 'Additional notes about the header'
+
+- Safe handling of missing keys:
+  - Use header.get('KEY', default) when needed:
+    - naxis = header.get('NAXIS', 0)
+
+- Interaction with WCS-related metadata:
+  - Typical access includes:
+    - ctype1 = header['CTYPE1']
+    - crval1 = header['CRVAL1']
+    - crpix1 = header['CRPIX1']
+    - cdelt1 = header['CDELT1']
+  - If axis count or naming differs, NAXIS and NAXISn keywords will reflect the actual data dimensionality.
+
+---
+
+## Validation and Consistency
+
+- FITS headers must remain consistent with the corresponding data unit(s). For example:
+  - NAXIS must equal the number of data axes.
+  - NAXISn must reflect the size of each axis.
+  - BITPIX must correctly describe the data pixel type.
+- Validation typically checks:
+  - Presence of required keywords (SIMPLE, BITPIX, NAXIS, NAXISn, END).
+  - Data-type consistency between NAXISn sizes and the actual data shape.
+  - Conformity of string values, quoted strings, and comments.
+- In this codebase, verification utilities (e.g., Verify-like mechanisms) are provided to report, fix, or raise for header-related issues. Use the project’s standard verification workflow to enforce metadata quality during development and data ingestion.
+
+---
+
+## Common Pitfalls and Best Practices
+
+- 8-character keyword limit: Use exact keywords (e.g., NAXIS, NAXIS1, CTYPE1). For longer metadata, prefer HIERARCH or place information in separate custom keywords with a clear naming convention.
+- String values require quotes: Always provide Python tuples of the form `(value, 'comment')` or ensure the library quotes strings correctly.
+- Boolean values: Use `True`/`False` (or `T`/`F` in raw FITS cards). When in doubt, rely on library handling.
+- Endianness: FITS uses a portable binary representation; your library will handle endianness, but be mindful when constructing raw cards outside standard libraries.
+- Header-data synchronization: If you modify a header, ensure the underlying data and the header remain consistent (e.g., shape, axis order).
+- Use standard WCS conventions when possible to maximize compatibility with visualization and analysis tools.
+
+---
+
+## Quick Reference Examples
+
+- Minimal header for a 2D image:
+  - Example:
+    - from astropy.io import fits
+    - hdr = fits.Header()
+    - hdr['SIMPLE'] = (True, 'file conforms to FITS standard')
+    - hdr['BITPIX'] = 16
+    - hdr['NAXIS'] = 2
+    - hdr['NAXIS1'] = 1024
+    - hdr['NAXIS2'] = 768
+    - hdr['EXTEND'] = True
+
+- Adding an object name with a comment:
+  - Example:
+    - hdr['OBJECT'] = ('NGC 1234', 'Object name')
+
+- Reading WCS-related keywords:
+  - Example:
+    - with fits.open('image.fits') as hdul:
+    -     header = hdul[0].header
+    -     ctype1 = header['CTYPE1']
+    -     crval1 = header['CRVAL1']
+
+- Long keyword with HIERARCH:
+  - Example:
+    - hdr['HIERARCH.OBS.LONGKEYNAME'] = 'value'
+
+- Basic verification (library-dependent; adapt to your version):
+  - Example:
+    - header.verify(option='warn')
+
+---
+
+## Reference and Further Reading
+
+- FITS Standard (IODevice and Header Cards)
+- Astropy I/O: fits.Header and fits.open
+- WCS conventions and typical keywords: CTYPE, CRVAL, CRPIX, CDELT, etc.
+- HIERARCH convention for long keywords
+
+If you need a tailored section focusing on how this project’s internal verification utilities interact with FITS headers, I can add a dedicated subsection with concrete code samples and integration notes.

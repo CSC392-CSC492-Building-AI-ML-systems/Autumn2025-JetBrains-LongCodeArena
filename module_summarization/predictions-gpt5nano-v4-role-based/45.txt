@@ -1,0 +1,181 @@
+log.rst
+
+Module overview
+---------------
+This module provides a centralized logging configuration for the application. It defines a custom log level (NOTICE), a mapping between human-friendly level names and Python's logging levels, and a high-level Logging class that wires console, file-based (rotating) logging, and syslog integration based on application configuration.
+
+Key concepts
+-------------
+- Custom log level: NOTICE (numeric value 25) for warnings that should be visible in non-verbose mode but not treated as errors.
+- Global root logger configuration: The Logging class configures the root logger when no handlers are attached.
+- Dynamic handler setup:
+  - Console logging (TTY or forced via environment)
+  - Rotating file logging (with path, rotation policy, and formatting)
+  - Syslog logging (via AsyncIOHandler, supporting multiple URL schemes and formats)
+- Asynchronous rotation: Rotation can be scheduled using a Timer, enabling periodic log rotation independent of file size.
+
+Public API
+----------
+
+Constants
+- LOG_NOTICE: int
+  - Numeric value for the custom NOTICE level (25).
+  - Description: "Info log level that is visible in non-verbose mode. It should not be used for warnings and errors."
+
+- L: logging.Logger
+  - A logger instance obtained from the module namespace (root context).
+
+- _NAME_TO_LEVEL: dict
+  - Mapping from string level names to numeric logging levels, including variants such as "NOTICE", "LOG NOTICE", etc.
+
+Classes
+1) Logging
+   - Purpose: Configure and attach console, rotating file, and syslog handlers to the root logger based on application configuration.
+   - Constructor: __init__(self, app)
+     - Parameters:
+       - app: Application object that provides an asyncio loop (app.Loop) and might be used by asynchronous components (e.g., AsyncIOHandler, Timer).
+     - Behavior:
+       - If the root logger has no handlers, the class:
+         - Configures console logging when stdout is a TTY or ASABFORCECONSOLE is set.
+         - Initializes a RotatingFileHandler if logging:file/path is non-empty.
+           - Ensures the target directory exists.
+           - Applies a StructuredDataFormatter using configuration keys:
+             - fmt: logging:file:format
+             - datefmt: logging:file:datefmt
+             - sd_id: logging:sd_id
+           - Attaches the file handler to the root logger.
+           - Supports an optional rotate_every configuration (rotate every N units) which schedules a timer to trigger log rotation:
+             - Supported formats: "<number><unit>" where unit is one of H (hours), M (minutes), d (days), s (seconds).
+             - On valid configuration, creates a Timer to periodically invoke _on_tick_rotate_check.
+             - If rotate_every is invalid, logs an error.
+         - Initializes a Syslog handler if logging:syslog:enabled is true.
+           - Address parsing:
+             - If address starts with '/': use a UNIX socket datagram handler (AF_UNIX, SOCK_DGRAM) to the given path.
+             - Otherwise, parse as URL and support schemes: tcp, udp, unix-connect, unix-sendto.
+           - If the address is invalid, logs a warning.
+           - If a Syslog handler is created:
+             - Sets level to DEBUG.
+             - Selects formatter based on logging:syslog:format:
+               - 'm': MacOSXSyslogFormatter
+               - '5': SyslogRFC5424Formatter
+               - '5micro': SyslogRFC5424microFormatter
+               - else: SyslogRFC3164Formatter
+             - Each formatter receives sd_id from logging:sd_id.
+             - Attaches the syslog handler to the root logger.
+
+   - Note: The class relies on several supporting components (e.g., AsyncIOHandler, MacOSXSyslogFormatter, SyslogRFC5424Formatter, SyslogRFC6424microFormatter, SyslogRFC3164Formatter, StructuredDataFormatter) that are defined elsewhere in the codebase.
+
+Internal helpers referenced (not shown in snippet)
+- _on_tick_rotate_check: Periodic callback used to perform log rotation checks.
+- _configure_console_logging: Configures console-based logging output.
+
+Configuration details
+---------------------
+The behavior of the Logging class is driven by application configuration (Config). Primary keys and expected data types are:
+
+- logging:file
+  - path: string
+    - Path to the log file. If empty, file logging is disabled.
+  - backup_count: int
+    - Maximum number of backup log files to retain.
+  - backup_max_bytes: int
+    - Maximum size (in bytes) for each log file before rotation.
+  - format: string
+    - Formatter format for file logs (passed to StructuredDataFormatter as fmt).
+  - datefmt: string
+    - Date/time format used by the file formatter.
+  - rotate_every: string (optional)
+    - Rotation interval expressed as "<number><unit>", where unit is:
+      - H: hours
+      - M: minutes
+      - d: days
+      - s: seconds
+    - If provided and valid, a periodic rotation is scheduled via Timer.
+
+- logging:syslog
+  - enabled: boolean
+    - Enable or disable syslog integration.
+  - address: string
+    - Destination address for syslog:
+      - Absolute path (starting with /) for UNIX datagram or stream sockets
+      - URL-style for network-based syslog:
+        - tcp://host:port
+        - udp://host:port
+        - unix-connect://path
+        - unix-sendto://path
+  - format: string
+    - Formatter type for syslog output:
+      - 'm' for MacOSXSyslogFormatter
+      - '5' for SyslogRFC5424Formatter
+      - '5micro' for SyslogRFC5424microFormatter
+      - any other value defaults to SyslogRFC3164Formatter
+  - (sd_id): string
+    - Identifier used by syslog formatters (logging:sd_id).
+
+- logging:sD_id
+  - sd_id: string
+    - Identifier used by the syslog formatters to tag messages.
+
+- Environment and runtime
+  - Console logging:
+    - Enabled if stdout is a TTY or ASABFORCECONSOLE environment variable differs from "0".
+  - Directory creation:
+    - If the configured log file path points to a non-existent directory, the directory is created automatically.
+
+Usage examples
+--------------
+
+1) Basic application startup with logging
+- Ensure a Config object is populated with appropriate sections (logging:file and logging:syslog as needed).
+- Instantiate Logging with the application instance that provides an event loop (app.Loop).
+
+Example:
+- app = MyApp()
+- logging_module = Logging(app)
+
+2) File logging with rotation
+- Configure:
+  - logging:file/path = /var/log/myapp/app.log
+  - logging:file/backup_count = 7
+  - logging:file/backup_max_bytes = 10485760 (10 MB)
+  - logging:file/rotate_every = 1d
+  - logging:file/format and logging:file/datefmt as desired
+- The RotatingFileHandler will write to app.log, keeping up to 7 backups, rotating when the file exceeds the configured size or on the interval if rotate_every is supplied.
+
+3) Syslog integration
+- Configure:
+  - logging:syslog/enabled = true
+  - logging:syslog/address = tcp://syslog.example.org:514
+  - logging:syslog/format = 5
+  - logging:sd_id = MyApp
+- Messages are forwarded to the specified syslog endpoint using RFC 5424 format.
+
+Practical notes
+--------------
+- The Logging class attaches handlers only if the root logger has no handlers, enabling idempotent initialization in multi-module environments.
+- Invalid configuration values are surfaced via the root logger (errors/warnings) to aid troubleshooting.
+- The implementation relies on several project-specific components (e.g., AsyncIOHandler, various Syslog formatters, and StructuredDataFormatter) that should be available in the codebase for full functionality.
+
+See Also
+--------
+- timer.Timer: Used to schedule periodic tasks (e.g., log rotation).
+- config.Config: Centralized configuration access for logging setup.
+- utils.running_in_container: Utility that may influence runtime behavior (imported but not directly used in the shown logic).
+
+Dependencies
+------------
+- Python standard logging module (with a custom level)
+- asyncio (for asynchronous scheduling)
+- RotatingFileHandler (logging.handlers)
+- Custom formatters and handlers provided elsewhere in the project:
+  - AsyncIOHandler
+  - MacOSXSyslogFormatter
+  - SyslogRFC5424Formatter
+  - SyslogRFC5424microFormatter
+  - SyslogRFC3164Formatter
+  - StructuredDataFormatter
+
+Notes for maintainers
+---------------------
+- If extending log.rst to cover more details, consider listing each configuration key under a separate subsection with concrete sample values.
+- Ensure that all referenced formatters and handlers are documented or linked to their respective modules for complete traceability.

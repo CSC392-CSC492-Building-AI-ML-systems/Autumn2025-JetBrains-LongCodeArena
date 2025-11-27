@@ -1,0 +1,120 @@
+Postgres Engine
+================
+
+Overview
+--------
+
+This module provides a PostgreSQL-specific engine for the Piccolo ORM. It implements:
+- A PostgresEngine that uses asyncpg (lazily loaded) for PostgreSQL connections.
+- Transaction handling via PostgresTransaction, including nested transaction support and savepoints.
+- Convenience helpers for batch processing (AsyncBatch), and programmatic, single-transaction execution (Atomic).
+
+Key concepts:
+- AsyncBatch: streaming results from a query in batches using a server-side cursor.
+- PostgresTransaction: context-managed, async-only transaction wrapper with optional nested-transaction support and savepoints.
+- Savepoint: represent a transaction savepoint with rollback or release operations.
+- Atomic: accumulate a set of queries and execute them within a single transaction.
+- PostgresEngine: the concrete engine to connect to PostgreSQL, with optional connection pooling.
+
+API reference
+-------------
+
+AsyncBatch
+  - Class: AsyncBatch(Batch)
+  - Purpose: Iterate over query results in batches. Uses a server-side cursor to fetch results in chunks.
+  - Important members:
+    - cursor: The underlying Cursor; raises ValueError if not set.
+  - Methods:
+    - next(): Fetches the next batch and processes results via the associated Query.
+    - __aiter__(): Returns the asynchronous iterator.
+    - __anext__(): Returns the next batch or raises StopAsyncIteration.
+    - __aenter__(): Initializes the transaction and cursor for the batch.
+    - __aexit__(exception_type, exception, traceback): Commits or rollbacks the transaction; closes the connection.
+
+Atomic
+  - Class: Atomic
+  - Purpose: Build up a set of queries to run inside a single transaction.
+  - Attributes:
+    - engine: The PostgresEngine instance.
+    - queries: List of queries to execute.
+  - Methods:
+    - add(*query): Add one or more Query objects.
+    - run(): Executes the accumulated queries inside a transaction. Clears the list on success or error.
+    - run_sync(): Synchronous wrapper around run().
+    - __await__(): Enables awaiting the transaction run.
+
+Savepoint
+  - Class: Savepoint
+  - Purpose: Represent and manipulate a savepoint within a transaction.
+  - Methods:
+    - rollback_to(): Roll back to this savepoint.
+    - release(): Release this savepoint.
+
+PostgresTransaction
+  - Class: PostgresTransaction
+  - Purpose: Async context manager for PostgreSQL transactions with optional nesting and savepoints.
+  - Key parameters:
+    - engine: The PostgresEngine instance.
+    - allow_nested: If True, nested transactions are treated as no-ops when a transaction is already active.
+  - Important attributes (internal):
+    - engine, transaction, connection, _savepoint_id, _parent, _committed, _rolled_back, context
+  - Methods:
+    - __aenter__(): Enters the transaction; handles nesting by returning the parent if applicable.
+    - get_connection(): Obtains a new connection or grabs one from the pool.
+    - begin(): Starts the transaction.
+    - commit(): Commits the transaction.
+    - rollback(): Rolls back the transaction.
+    - rollback_to(savepoint_name): Roll back to a named savepoint.
+    - get_savepoint_id(): Generates a unique savepoint identifier.
+    - savepoint(name=None): Creates a new savepoint (auto-named if not provided).
+    - __aexit__(exception_type, exception, traceback): Finalizes the transaction; commits or rolls back as needed; releases resources and resets context.
+
+PostgresEngine
+  - Class: PostgresEngine(Engine[t.Optional[PostgresTransaction]])
+  - Purpose: Concrete engine for connecting to PostgreSQL using asyncpg (lazily loaded).
+  - Notes:
+    - Integrates with the asyncpg driver via LazyLoader.
+    - Supports asynchronous transactions through PostgresTransaction.
+    - Works with connection pooling if configured; otherwise it manages individual connections.
+
+Usage examples
+--------------
+
+- Creating a Postgres engine:
+  .. code-block:: python
+
+     from piccolo.engine.postgres_engine import PostgresEngine
+
+     engine = PostgresEngine(dsn="postgres://user:pass@host:5432/dbname")
+
+- Using a transaction:
+  .. code-block:: python
+
+     async with engine.transaction():
+         # run queries here
+         ...
+
+- Running multiple queries atomically:
+  .. code-block:: python
+
+     atomic = Atomic(engine)
+     atomic.add(Foo.create_table())
+     atomic.add(Bar.delete().where(...))
+     await atomic.run()
+
+- Streaming results in batches:
+  .. code-block:: python
+
+     async with engine.transaction():
+         batch = AsyncBatch(connection, query, batch_size=100)
+         async for rows in batch:
+             ...
+
+Notes
+-----
+
+- AsyncBatch relies on a server-side cursor and requires an active transaction.
+- PostgresTransaction supports nested transactions via savepoints when allow_nested is True; otherwise, nesting raises TransactionError.
+- Asyncpg is loaded lazily to avoid import-time overhead when the engine is not used.
+
+This module is intended for use with Piccolo’s PostgreSQL backend and is compatible with the rest of the Piccolo ecosystem.

@@ -1,0 +1,263 @@
+Header Interface Transition Guide
+===============================
+
+Introduction
+------------
+This guide documents the header verification facilities used during header interface transitions. It describes how verification errors are collected, reported, and optionally fixed in a consistent, extensible way. The core components are a verification engine, a structured error container, and the warning/error reporting behavior that governs how downstream code should react to header changes.
+
+Overview of the verification framework
+--------------------------------------
+Key concepts
+
+- VERIFY_OPTIONS
+  A predefined list of option strings that control how verification is reported and whether fixable errors should be auto-fixed. Examples include "warn", "exception", "fix", "silentfix", and combinations such as "fix+warn" or "silentfix+ignore".
+
+- _Verify
+  A mixin-like class that provides the common verification workflow. It offers:
+  - run_option(option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True)
+    Executes a verification action with the selected option. It returns a tuple (fixable, text) where:
+    - fixable (bool): indicates whether the error can/should be fixed automatically.
+    - text (str): a descriptive message about the error and any applied fix.
+
+    Behavior highlights:
+    - If option is "warn" or "exception", errors are treated as unfixable for reporting purposes.
+    - If the error is fixable and a fix function is provided, it will be invoked and the message can be augmented with fix_text.
+    - The return value guides how the caller should present or handle the issue.
+
+  - verify(option="warn")
+    The primary entry point for performing verification. It:
+    - Validates the option against VERIFY_OPTIONS.
+    - Invokes self._verify(opt) to collect errors into an _ErrList (a nested error container).
+    - Parses the option into fix-related and reporting-related sub-options (supports options like "fix+warn", "silentfix+ignore", etc.).
+    - Formats and reports messages according to the chosen options, either by emitting warnings, returning silently, or raising VerifyError.
+
+- _ErrList
+  A nested list structure that stores verification messages in a hierarchical form. It is designed to be built by a _verify implementation and consumed by _Verify.verify for reporting.
+
+  - __init__(val=(), unit="Element")
+    Creates a new error-list instance. unit is used as a header label for nested levels.
+
+  - __str__()
+    Returns a human-friendly string representation of the error structure.
+
+  - iter_lines(filter=None, shift=0)
+    Generator that yields lines of messages as tuples (fixable, text) with proper indentation for nested levels. If an item is itself an _ErrList, it’s treated as a nested block; top-level messages are emitted first, followed by nested blocks with increased indentation.
+
+- VerifyError / VerifyWarning
+  Custom exception and warning classes used by the verification system:
+  - VerifyError: raised when verification is configured to treat errors as exceptions.
+  - VerifyWarning: a subclass of AstropyUserWarning used for verification-related warnings.
+
+Important parameters and return values
+--------------------------------------
+- VERIFY_OPTIONS (list of str)
+  A catalog of valid option strings. If an unrecognized option is supplied to _Verify.verify, a ValueError is raised.
+
+- _Verify.run_option(...)
+  - option: str, one of the VERIFY_OPTIONS or their combinations.
+  - err_text: str, the error message to present if not fixed.
+  - fix_text: str, the suffix to append to the message when a fix is applied.
+  - fix: callable or None, a function that will perform the automatic fix if provided.
+  - fixable: bool, whether the error is considered fixable.
+  Returns: (fixable: bool, text: str)
+
+- _Verify.verify(option="warn")
+  Returns nothing. It may emit warnings (VerifyWarning) or raise VerifyError depending on the chosen option and the detected errors.
+
+- _ErrList.iter_lines(...)
+  Yields (fixable: Optional[bool], text: str) pairs. It recursively traverses the nested error structure to present a readable, indented report.
+
+Usage patterns
+--------------
+- Basic verification (warnings)
+  - Use when you want to log issues without interrupting flow.
+  - Example: verifier.verify("warn")
+  - Expected outcome: issues are emitted as warnings; processing continues.
+
+- Strict verification (exceptions)
+  - Use when header changes must be strictly validated in-place.
+  - Example: verifier.verify("exception")
+  - Expected outcome: a VerifyError is raised if any issue is found.
+
+- Auto-fixing with reporting
+  - Use when some issues are fixable and you want to apply fixes automatically and optionally report them.
+  - Example: verifier.verify("fix+warn") or verifier.verify("fix+exception")
+  - Behavior: fixable errors may be fixed via provided fix callbacks; messages reflect fixes and are reported according to the reporting part of the option.
+
+- Silent fixing
+  - Use when you want to fix fixable issues without any reporting (and with controlled reporting of non-fixable issues).
+  - Example: verifier.verify("silentfix") or verifier.verify("silentfix+ignore")
+
+- Edge-case handling
+  - If an option is not recognized, a ValueError is raised.
+  - The behavior of “silentfix” variants is to suppress non-essential output; specific combinations determine whether fixable/unfixable lines are reported.
+  - The structure and formatting of error messages depend on how _verify constructs the _ErrList; nested blocks will be labeled to indicate hierarchy (e.g., “Header”, “Version”).
+
+Code examples
+-------------
+Below are representative snippets illustrating the verification framework. These examples are indicative; actual implementations will provide concrete _verify methods that populate _ErrList.
+
+- Core classes and option handling (conceptual)
+```python
+# header_transition.py (conceptual excerpt)
+class VerifyError(Exception):
+    """Verify exception class."""
+
+
+class VerifyWarning(AstropyUserWarning):
+    """Verify warning class."""
+
+
+VERIFY_OPTIONS = [
+    "ignore","warn","exception","fix","silentfix",
+    "fix+ignore","fix+warn","fix+exception",
+    "silentfix+ignore","silentfix+warn","silentfix+exception",
+]
+
+
+class _Verify:
+    def run_option(self, option="warn", err_text="", fix_text="Fixed.", fix=None, fixable=True):
+        text = err_text
+        if option in ["warn", "exception"]:
+            fixable = False
+        elif not fixable:
+            text = f"Unfixable error: {text}"
+        else:
+            if fix:
+                fix()
+            text += "  " + fix_text
+        return (fixable, text)
+
+    def verify(self, option="warn"):
+        opt = option.lower()
+        if opt not in VERIFY_OPTIONS:
+            raise ValueError(f"Option {option!r} not recognized.")
+
+        if opt == "ignore":
+            return
+
+        errs = self._verify(opt)
+        if "+" in opt:
+            fix_opt, report_opt = opt.split("+")
+        elif opt in ["fix", "silentfix"]:
+            fix_opt, report_opt = opt, "exception"
+        else:
+            fix_opt, report_opt = None, opt
+
+        if fix_opt == "silentfix" and report_opt == "ignore":
+            return
+
+        if fix_opt == "silentfix":
+            line_filter = lambda x: not x[0]
+        elif fix_opt == "fix" and report_opt == "ignore":
+            line_filter = operator.itemgetter(0)
+        else:
+            line_filter = None
+
+        unfixable = False
+        messages = []
+        for fixable, message in errs.iter_lines(filter=line_filter):
+            if fixable is not None:
+                unfixable = not fixable
+            messages.append(message)
+
+        if messages:
+            messages.insert(0, "Verification reported errors:")
+            messages.append("Note: astropy.io.fits uses zero-based indexing.\n")
+
+            if fix_opt == "silentfix" and not unfixable:
+                return
+            elif report_opt == "warn" or (fix_opt == "fix" and not unfixable):
+                for line in messages:
+                    warnings.warn(line, VerifyWarning)
+            else:
+                raise VerifyError("\n" + "\n".join(messages))
+```
+
+- Nested error list structure
+```python
+class _ErrList(list):
+    def __init__(self, val=(), unit="Element"):
+        super().__init__(val)
+        self.unit = unit
+
+    def __str__(self):
+        return "\n".join(item[1] for item in self.iter_lines())
+
+    def iter_lines(self, filter=None, shift=0):
+        element = 0
+        for item in self:
+            if not isinstance(item, _ErrList):
+                if filter is None or filter(item):
+                    yield item[0], indent(item[1], shift=shift)
+
+        for item in self:
+            if isinstance(item, _ErrList):
+                next_lines = item.iter_lines(filter=filter, shift=shift + 1)
+                try:
+                    first_line = next(next_lines)
+                except StopIteration:
+                    first_line = None
+
+                if first_line is not None:
+                    if self.unit:
+                        yield None, indent(f"{self.unit} {element}:", shift=shift)
+                    yield first_line
+
+                yield from next_lines
+                element += 1
+```
+
+- Minimal usage pattern (conceptual)
+```python
+# Example usage (conceptual; actual usage depends on concrete _verify implementation)
+
+class HeaderVerifier(_Verify):
+    def __init__(self, header):
+        self.header = header
+
+    def _verify(self, opt):
+        errs = _ErrList(unit="Header")
+        if "DATE" not in self.header:
+            errs.append((False, "Missing required header key: DATE"))
+        if self.header.get("VERSION") != "1.0":
+            sub = _ErrList(unit="Version")
+            sub.append((True, f"VERSION is {self.header.get('VERSION')!r}, expected '1.0'"))
+            errs.append(sub)
+        return errs
+
+# Instantiate and run verification
+verifier = HeaderVerifier({"VERSION": "0.9"})
+verifier.verify("warn")
+```
+
+Usage notes and best practices
+------------------------------
+- Design _verify implementations to produce a structured _ErrList where each leaf is a pair [fixable, message]. Nested _ErrList entries provide grouping (e.g., per-header-field sections).
+- Use run_option within fixable checks to register a fix function and a descriptive message. The framework will call the fix function when appropriate based on the chosen option.
+- Choose verification options to match your workflow:
+  - "warn" or "silentfix+warn": report issues as warnings; optionally fixable issues can be fixed if a fix is provided.
+  - "exception": treat issues as errors and raise VerifyError when any issue is found.
+  - "fix" variants: apply automatic fixes where possible and report the results.
+  - "ignore": skip verification entirely.
+- Edge cases:
+  - Unknown option strings raise ValueError.
+  - Combinations with "+ignore" or "+warn" determine the reporting vs. fixing behavior; ensure your _verify implementation aligns with these expectations.
+  - "silentfix" variants suppress output for fixable issues where no unfixable issues remain.
+
+Relation to header interface transitions
+----------------------------------------
+The verification framework described here provides a robust, extensible way to manage header interface transitions. By structuring verification results and controlling reporting behavior, developers can:
+- Detect incompatible header changes early.
+- Provide automatic, optional fixes where safe.
+- Maintain clear, user-facing messages that help diagnose and resolve header discrepancies during transitions.
+
+End-to-end example: quick walkthrough
+--------------------------------------
+- Implement a _verify method that builds and returns an _ErrList representing all header issues for a given transition.
+- Use _Verify.verify with a chosen option to see how issues are reported and whether fixes are applied.
+- Review emitted warnings or caught exceptions to adjust required header changes or fix logic.
+
+Note
+----
+The NotifierMixin class in this module provides a generic event-notification mechanism and is independent of header verification. It is useful for internal communication between components during complex transition workflows but is not a prerequisite for using the header verification framework described above.

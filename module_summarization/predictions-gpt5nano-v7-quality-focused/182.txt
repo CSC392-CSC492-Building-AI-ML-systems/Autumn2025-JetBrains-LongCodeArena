@@ -1,0 +1,147 @@
+# Developing scikit-learn estimators
+
+This guide covers the concepts and implementation patterns used for building estimators in scikit-learn, with a focus on multi-output estimators (meta-estimators) as exemplified by the code in the multi-output module.
+
+## Overview
+
+- Multi-output estimators extend single-output estimators to handle multiple targets.
+- They are implemented as meta-estimators that require a base estimator provided in their constructor.
+- The core utilities ensure consistent fitting, partial fitting, and parameter visibility depending on the capabilities of the sub-estimators.
+
+Public API (as seen in the module)
+- MultiOutputRegressor
+- MultiOutputClassifier
+- ClassifierChain
+- RegressorChain
+
+The module provides:
+- Helper functions to fit and partially fit sub-estimators
+- A base class that encapsulates common behavior for multi-output estimators
+
+Key components (from the source)
+- _fit_estimator(estimator, X, y, sample_weight=None, **fit_params)
+  - Clones the base estimator and fits it on X and y (with optional sample weights and fit parameters).
+- _partial_fit_estimator(estimator, X, y, classes=None, partial_fit_params=None, first_time=True)
+  - Handles partial_fit for online or incremental learning scenarios. Clones on first_time and passes appropriate parameters.
+- _available_if_estimator_has(attr)
+  - Returns a decorator used to conditionally expose estimator parameters based on whether the sub-estimator(s) have a given attribute.
+- _MultiOutputEstimator
+  - Base class for multi-output meta-estimators. Enforces parameter constraints and provides common initialization.
+
+Example usage pattern
+- The public meta-estimators (e.g., MultiOutputRegressor) internally rely on cloning the base estimator and fitting individual copies for each target dimension.
+- The parameter constraints enforce that the provided base estimator implements required methods (e.g., fit, predict).
+
+Code references (conceptual)
+- Fitting a base estimator for each target:
+  - For each target column y[:, i], clone the base estimator and call fit(X, y[:, i], ...).
+- Predict by aggregating predictions for each target:
+  - Predict with each sub-estimator and stack results to form a 2D array of shape (n_samples, n_outputs).
+
+Example: Skeleton of a simple multi-output estimator
+- This example shows how a user could implement a custom multi-output estimator by following the same pattern used in scikit-learn’s meta-estimators.
+
+from sklearn.base import clone
+from sklearn.pipeline import Pipeline
+import numpy as np
+
+class SimpleMultiOutputRegressor:
+    def __init__(self, estimator, n_jobs=None):
+        self.estimator = estimator
+        self.n_jobs = n_jobs
+
+    def fit(self, X, y, sample_weight=None, **fit_params):
+        y = np.asarray(y)
+        # Determine number of outputs (columns in y)
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+        self.n_outputs_ = y.shape[1]
+        self.estimators_ = []
+        for i in range(self.n_outputs_):
+            est = clone(self.estimator)
+            if sample_weight is not None:
+                est.fit(X, y[:, i], sample_weight=sample_weight, **fit_params)
+            else:
+                est.fit(X, y[:, i], **fit_params)
+            self.estimators_.append(est)
+        return self
+
+    def predict(self, X):
+        return np.column_stack([est.predict(X) for est in self.estimators_])
+
+# Usage
+# from sklearn.linear_model import LinearRegression
+# base = LinearRegression()
+# model = SimpleMultiOutputRegressor(base)
+# model.fit(X, y)
+# preds = model.predict(X)
+
+Notes on implementation details
+- Initialization and parameters
+  - The base class enforces __init__(estimator, *, n_jobs=None) and stores self.estimator and self.n_jobs.
+  - Parameter validation uses HasMethods(["fit", "predict"]) to ensure the base estimator provides required capabilities.
+  - n_jobs is optional and may be used to control parallelism in concrete implementations.
+- Fitting behavior
+  - Each target dimension gets its own cloned base estimator.
+  - The helper _fit_estimator centralizes the clone-and-fit logic, ensuring consistent behavior across different multi-output estimators.
+- Partial fitting
+  - _partial_fit_estimator supports incremental learning by reusing fit/partial_fit semantics for each target.
+  - First-time initialization clones a new estimator; subsequent calls reuse the existing clones.
+- Availability gating for parameters
+  - Some parameters should only be exposed if the base estimator supports certain functionality.
+  - _available_if_estimator_has(attr) returns a decorator that can gate parameter visibility based on the presence of attr on the sub-estimator(s).
+  - This pattern helps keep the public API clean and context-aware.
+- Validation and constraints
+  - _parameter_constraints enforces types and capabilities, e.g.:
+    - "estimator": HasMethods(["fit", "predict"])
+    - "n_jobs": Integral or None
+- Metadata routing and multi-target handling
+  - The implementation may rely on routing utilities to manage how parameters influence the sub-estimators.
+  - For classification vs regression, additional utilities (e.g., check_classification_targets) ensure correct handling of target formats.
+
+Guidelines for implementing a new multi-output estimator
+
+1) Define a clear __init__ signature
+- Include estimator (base estimator) and n_jobs=None.
+- Store the provided objects for later cloning and fitting.
+
+2) Enforce parameter constraints
+- Use _parameter_constraints to declare required methods on the base estimator and valid types for n_jobs.
+
+3) Implement fit to handle multi-target data
+- Accept X and y (y can be 2D with shape (n_samples, n_outputs)).
+- For each output column, clone the base estimator and fit on X and y[:, i].
+- Save fitted sub-estimators in an attribute like estimators_ (or similar) for later use in predict.
+
+4) Implement predict to combine sub-estimators’ outputs
+- Collect predictions from each sub-estimator and assemble into a 2D array with shape (n_samples, n_outputs).
+
+5) Consider partial_fit for online learning
+- If incremental learning is desired, implement _partial_fit_estimator usage in fit_partial methods.
+- Manage first_time vs subsequent calls to reuse or recreate sub-estimators as appropriate.
+
+6) Gate optional parameters with available_if
+- Use _available_if_estimator_has to expose parameters only when the base estimator supports required attributes.
+- This keeps the public API coherent and avoids exposing inapplicable options.
+
+7) Validate outputs and shapes
+- Ensure the number of outputs inferred from y matches the number of sub-estimators.
+- Validate that predict returns a 2D array with shape (n_samples, n_outputs).
+
+8) Testing considerations
+- Test with a simple base estimator (e.g., a tiny regressor) and synthetic data to verify:
+  - Correct number of sub-estimators created
+  - Correct shapes of predictions
+  - Behavior with 1D and 2D y
+  - Proper handling of sample_weight and fit_params
+  - Availability gating of parameters when the base estimator lacks features
+
+Example test scenario (conceptual)
+- Create a simple base estimator with fit/predict and a few features.
+- Instantiate the multi-output estimator with this base estimator.
+- Fit on a small 2D y, verify estimators_ length equals number of outputs, and predictions have correct shape.
+
+Documentation notes
+- The internal helpers (_fit_estimator, _partial_fit_estimator, _available_if_estimator_has) are designed to standardize common patterns across multi-output estimators.
+- Public three-phase contract: initialization, training (fit/partial_fit), and inference (predict).
+- When documenting new multi-output estimators, mirror the conventions used in the existing code base to ensure consistency with scikit-learn’s API and testing standards.

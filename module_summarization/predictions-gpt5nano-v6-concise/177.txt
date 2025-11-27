@@ -1,0 +1,168 @@
+Pipelines and Composite Estimators
+===================================
+
+Overview
+--------
+A composite estimator is an estimator built from multiple sub-estimators arranged in a structured composition. The most common example is a Pipeline, which chains a sequence of transforms (that implement fit and transform) followed by a final estimator (which implements fit, and may implement predict). This design enables clean, reusable preprocessing and modeling workflows that can be cross-validated or tuned as a single unit.
+
+Key concepts
+-----------
+- Steps: A Pipeline is defined by an ordered list of (name, estimator) pairs. All steps except the final one must implement fit and transform; the final estimator must implement fit (and usually predict).
+- Naming and parameter access: Each step can be parameterized using a hierarchical name, with double-underscore separators, e.g., "scaler__with_mean". This enables tuning of specific steps in GridSearchCV and related tools.
+- Memory/caching: A memory argument can cache fitted transformers to speed repeated fits, especially in expensive pipelines.
+- Output configuration: A pipeline can propagate output configuration to its steps via set_output.
+- Flexibility: Steps can themselves be pipelines or other composite estimators. A step can be replaced with another estimator, or removed by using 'passthrough' or None.
+- Parallel composition: FeatureUnion (and similar constructs) lets you apply multiple transformers in parallel and concatenate their outputs.
+
+API overview (Pipeline)
+-----------------------
+Parameters
+- steps: list of (name, transform) tuples. Each transform must implement fit and transform, except for the final estimator which must implement fit.
+- memory: None or a string path or object with the joblib.Memory interface. Used to cache fitted transformers. The last step is never cached.
+- verbose: bool. If True, prints timing information while fitting each step.
+
+Attributes
+- named_steps: A dict-like mapping (Bunch) from step name to the corresponding estimator object. Useful for accessing or tweaking parameters (e.g., pipe.named_steps['scaler'].mean_).
+- classes_: ndarray of shape (n_classes,). Present if the last step is a classifier.
+- n_features_in_: int. Present if the first estimator exposes it after fit.
+- feature_names_in_: ndarray. Present if the underlying estimator exposes it after fit.
+
+Core methods (in addition to standard estimator API)
+- fit(X, y=None, **fit_params): Fit all steps in sequence. The transformer steps are fitted, and then the final estimator is fitted on the transformed data.
+- transform(X): Apply the transforms to X, in order, returning the transformed array.
+- fit_transform(X, y=None, **fit_params): Convenience: fit and transform in one pass.
+- predict(X): If the final estimator supports it, delegate prediction to the final estimator after transforming X as needed.
+- set_output(transform=None): Configure the output format for transform and fit_transform (e.g., default, pandas). Applies to all steps in the pipeline.
+- get_params(deep=True): Retrieve constructor parameters, including nested parameters of contained estimators.
+- set_params(**params): Set parameters, including those of nested estimators, using the “name__param” convention.
+
+Naming and parameter tuning
+- To tune parameters of a specific step, use the double-underscore syntax, e.g., pipeline.set_params(svc__C=0.1).
+- For nested pipelines, you can tune parameters of deeply nested steps, e.g., pipeline.set_params(preprocess__pca__n_components=5).
+
+Examples
+--------
+
+Example 1: Basic pipeline
+- Purpose: Standardize features, then fit a classifier.
+
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', LogisticRegression())
+])
+
+# Fit and evaluate
+pipe.fit(X_train, y_train)
+score = pipe.score(X_test, y_test)
+
+# Tune a parameter of a sub-estimator
+pipe.set_params(clf__C=0.5)
+pipe.fit(X_train, y_train)
+score = pipe.score(X_test, y_test)
+
+# Access a specific step
+scaler = pipe.named_steps['scaler']
+
+Example 2: Using memory to cache transformations
+# Cache fitted transformers to speed repeated fits
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', LogisticRegression())
+], memory='/tmp/pipeline_cache')
+
+pipe.fit(X_train, y_train)
+pipe.score(X_test, y_test)
+
+Example 3: Using make_pipeline for brevity
+from sklearn.pipeline import make_pipeline
+pipe = make_pipeline(StandardScaler(), LogisticRegression())
+
+pipe.fit(X_train, y_train)
+pipe.score(X_test, y_test)
+
+Example 4: Using pasthrough to drop a step
+# You can drop a step by setting it to 'passthrough' (or None in some versions)
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('feature_selection', 'passthrough'),  # or None to drop
+    ('clf', LogisticRegression())
+])
+# The pipeline will skip the feature_selection step
+
+Example 5: Nested pipelines
+# A pipeline step can itself be a pipeline
+from sklearn.decomposition import PCA
+from sklearn.svm import SVC
+
+preprocessor = Pipeline([
+    ('scaler', StandardScaler()),
+    ('pca', PCA(n_components=0.95))
+])
+
+pipe = Pipeline([
+    ('preprocess', preprocessor),
+    ('svc', SVC())
+])
+
+pipe.fit(X, y)
+pipe.score(X, y)
+
+Example 6: FeatureUnion for parallel feature extraction
+from sklearn.pipeline import FeatureUnion
+from sklearn.decomposition import PCA
+from sklearn.decomposition import TruncatedSVD
+
+features = FeatureUnion([
+    ('pca', PCA(n_components=10)),
+    ('svd', TruncatedSVD(n_components=5))
+])
+
+# Use FeatureUnion as a transformer inside a Pipeline
+pipe = Pipeline([
+    ('features', features),
+    ('clf', LogisticRegression())
+])
+
+pipe.fit(X, y)
+
+Example 7: Grid search with parameter grid
+from sklearn.model_selection import GridSearchCV
+
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', LogisticRegression())
+])
+
+param_grid = {
+    'clf__C': [0.1, 1.0, 10.0],
+    'scaler__with_mean': [True, False],
+}
+
+grid = GridSearchCV(pipe, param_grid, cv=5)
+grid.fit(X, y)
+
+Accessing and inspecting steps
+- After fitting, you can inspect any step:
+  - pipe.named_steps['scaler'].n_features_in_  # if supported
+  - pipe.named_steps['clf'].coef_  # for linear models
+- You can replace a step by setting it to another estimator, or remove it with 'passthrough' as shown above.
+
+Advanced usage and notes
+------------------------
+- Composite estimators and _BaseComposition: Pipelines (and other composites) are built on base composition helpers that allow nesting, cloning, and parameter routing. This enables consistent behavior across various compose-time scenarios.
+- Parameter routing: Nested estimators expose their parameters under hierarchical names, enabling granular control during hyperparameter tuning and cross-validation.
+- Output configuration: Use set_output to influence the format of transformed data (e.g., pandas DataFrame) to integrate with downstream tools.
+- Memory considerations: When using memory, only the intermediate transformers are cached. The final estimator is not cached. This helps optimize fit time when transforming large datasets multiple times.
+- Replacing or removing steps: You can dynamically modify the pipeline by replacing a step with a different estimator, or removing it via 'passthrough'. This provides flexibility for experimentation and feature selection pipelines.
+
+Reference notes
+--------------
+- The Pipeline class is a core building block for composing preprocessing, feature extraction, and modeling steps into a single estimator.
+- The make_pipeline function offers a concise way to construct a pipeline without naming every step explicitly; step names are generated automatically.
+- The FeatureUnion class (and related utilities) enables parallel feature extraction and combination, useful for combining heterogeneous transforms.
+
+This documentation covers Pipelines and composite estimators using the API and examples from the compose module. For deeper reference, consult the user guide sections on pipelines, parameter tuning with GridSearchCV, and feature unions.

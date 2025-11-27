@@ -1,0 +1,249 @@
+Autowrap: Code Wrapping and Backend Integration
+===============================================
+
+This document describes the autowrap code-wrapping facility implemented in autowrap.rst. It provides a common, backend-agnostic interface for turning code-generation output into executable Python-callable binaries, with the ability to wrap the compiled code for use in symbolic expressions.
+
+Overview
+--------
+
+Autowrap provides a unified mechanism to turn expressions or code-generation outputs into binary Python callables that are faster to execute than pure Python, by compiling to an external backend (e.g., f2py, Cython). The goal is to give Diofant/SymPy users a simple “one-button” workflow for numerical evaluation of expressions that may be expensive to compute in pure Python.
+
+Key ideas
+
+- A backend-agnostic wrapper that handles code generation, compilation, and importing the resulting module.
+- A common interface that allows different backends to be plugged in (Dummy, Cython, etc.).
+- A binary callable that can be used directly in numerical evaluation, or wrapped back into symbolic expressions via binary_function().
+
+Public API
+----------
+
+Classes and major components
+
+- CodeWrapError
+  - A generic exception raised when code wrapping or compilation fails.
+
+- CodeWrapper
+  - Base class for all code wrappers.
+  - Responsibilities:
+    - Manage code generation and wrapping workflow.
+    - Handle temporary work directories and module import.
+    - Control backend-specific compilation via _process_files().
+  - Core attributes:
+    - generator: The code generator object used to produce backend code.
+    - filepath: Optional path to a target directory. If provided, the wrapper writes files there; otherwise, it uses a temporary directory.
+    - flags: Additional command-line flags to pass to the backend tool.
+    - quiet: When True, suppress backend output.
+  - Core properties:
+    - filename: Base name for the generated code file (defaults to 'wrapped_code_<n>').
+    - module_name: Base module name for the generated Python extension (defaults to 'wrapper_module_<n>').
+    - include_header: True if a header should be included (typically when writing to files).
+    - include_empty: True if an empty file with header should be included (also header-related).
+  - Core methods:
+    - __init__(generator, filepath=None, flags=[], verbose=False)
+    - wrap_code(routine, helpers=[]): Generates code, compiles it with the backend, imports the module, and returns the wrapped function associated with routine.name.
+    - _generate_code(main_routine, routines): Subroutine that delegates to the generator to write code; can be overridden by subclasses.
+    - _process_files(routine): Backend-specific step to actually compile/link the generated code. May raise CodeWrapError on failure.
+
+- DummyWrapper(CodeWrapper)
+  - A no-op backend used for testing, independent of any external tools.
+  - Behavior:
+    - _generate_code() writes a pure-Python module that exposes a callable named after the routine, returning a string expression (useful for unit tests and doctests).
+    - _prepare_files() is a no-op.
+    - _process_files() is a no-op.
+    - _get_wrapped_function(mod, name) returns the function object from the dummy module.
+  - Typical use: fast, deterministic tests of the wrapping flow without requiring compilers or external utilities.
+
+- CythonCodeWrapper(CodeWrapper)
+  - A concrete wrapper that uses Cython (via setuptools and a C backend) to generate a Python extension module from the generated code.
+  - Core pieces:
+    - setup_template: A template string used to create a setup.py (or equivalent) for building the Cython extension.
+    - The wrapper flows as:
+      - Generate C/Cython code for the routine.
+      - Create a build configuration (e.g., setup.py) using the template.
+      - Run the build command to compile the extension in-place.
+      - Import the resulting module and fetch the callable by the routine name.
+  - Note: The provided snippet shows a partial setup_template; the exact contents depend on the broader autowrap codebase. The intended design is to provide a Cython-based backend with similar workflow to the DummyWrapper but with actual compilation via setuptools.
+
+- _doctest_depends_on
+  - A module-level constant used to declare doctest prerequisites for autowrap doctests.
+  - Example: exe dependencies include f2py, gfortran, gcc; modules include numpy.
+
+Usage workflow
+--------------
+
+The typical workflow is:
+
+1. Construct a code generator and routine that describes the mathematical expression you want to wrap.
+   - The code in autowrap relies on code generation utilities (e.g., get_code_generator, make_routine) to translate a symbolic expression into a routine representation suitable for the backend.
+2. Create a wrapper instance (DummyWrapper for tests, CythonCodeWrapper for production use, or another backend).
+3. Call wrap_code() with the routine (and optionally helper routines) to produce a Python extension module and import the wrapped function.
+4. Use the resulting binary callable in numerical computations or wrap it back into symbolic expressions with binary_function() if needed.
+
+Example usage (illustrative; exact API may vary by integration)
+- Using a hypothetical autowrap top-level API (the actual names are implementation-specific):
+
+  >>> expr = ((x - y)**25).expand()
+  >>> binary_callable = autowrap(expr)  # via a default backend
+  >>> binary_callable(1, 2)
+  -1.0
+
+  >>> f = binary_function('f', expr)
+  >>> 2*f(x, y) + y
+  y + 2*f(x, y)
+
+  >>> (2*f(x, y) + y).evalf(2, subs={x: 1, y: 2}, strict=False)
+  0.e-190
+
+Notes on design and behavior
+----------------------------
+
+- Unique module naming
+  - CodeWrapper uses a class-level _module_counter to generate unique module_base names for each wrap. After a wrap completes, _module_counter is incremented to avoid name collisions across multiple wrapper invocations.
+
+- Header and empty code handling
+  - The include_header and include_empty properties determine whether header/initialization code should be emitted alongside the wrapped code. This is especially relevant when writing to an external directory (filepath) versus using a temporary workdir.
+
+- Error handling
+  - If the backend command (compilation, linking, etc.) fails, _process_files raises CodeWrapError with the command output for troubleshooting.
+
+- Doctest and dependencies
+  - doctest-based tests in this module rely on external tools (numpy, f2py, compilers). The _doctest_depends_on dictionary captures these requirements to enable doctest skipping or setup.
+
+- Extensibility
+  - The architecture is designed to support new backends by deriving from CodeWrapper and implementing:
+    - _generate_code (to produce backend-specific code)
+    - _prepare_files (optional, to prepare any auxiliary files)
+    - _process_files (to perform the compilation and packaging)
+
+Code snippets from the module
+-----------------------------
+
+- Core wrapper API (simplified):
+
+  .. code-block:: python
+
+     class CodeWrapper:
+         _filename = 'wrapped_code'
+         _module_basename = 'wrapper_module'
+         _module_counter = 0
+
+         @property
+         def filename(self):
+             return f'{self._filename}_{CodeWrapper._module_counter}'
+
+         @property
+         def module_name(self):
+             return f'{self._module_basename}_{CodeWrapper._module_counter}'
+
+         def __init__(self, generator, filepath=None, flags=[], verbose=False):
+             """Generator -- the code generator to use."""
+             self.generator = generator
+             self.filepath = filepath
+             self.flags = flags
+             self.quiet = not verbose
+
+         @property
+         def include_header(self):
+             return bool(self.filepath)
+
+         @property
+         def include_empty(self):
+             return bool(self.filepath)
+
+         def _generate_code(self, main_routine, routines):
+             routines.append(main_routine)
+             self.generator.write(
+                 routines, self.filename, True, self.include_header,
+                 self.include_empty)
+
+         def wrap_code(self, routine, helpers=[]):
+
+             workdir = self.filepath or tempfile.mkdtemp('_diofant_compile')
+             if not os.access(workdir, os.F_OK):
+                 os.mkdir(workdir)
+             oldwork = os.getcwd()
+             os.chdir(workdir)
+             try:
+                 sys.path.append(workdir)
+                 self._generate_code(routine, helpers)
+                 self._prepare_files(routine)
+                 self._process_files(routine)
+                 mod = __import__(self.module_name)
+             finally:
+                 sys.path.remove(workdir)
+                 CodeWrapper._module_counter += 1
+                 os.chdir(oldwork)
+                 if not self.filepath:
+                     shutil.rmtree(workdir)
+
+             return self._get_wrapped_function(mod, routine.name)
+
+- Dummy wrapper (core behavior):
+
+  .. code-block:: python
+
+     class DummyWrapper(CodeWrapper):
+         """Class used for testing independent of backends."""
+
+         template = """# dummy module for testing of Diofant
+     def %(name)s():
+         return "%(expr)s"
+     %(name)s.args = "%(args)s"
+     %(name)s.returns = "%(retvals)s"
+     """
+
+         def _prepare_files(self, routine):
+             return
+
+         def _generate_code(self, main_routine, routines):
+             with open(f'{self.module_name}.py', 'w', encoding='utf-8') as f:
+                 printed = ', '.join(
+                     [str(res.expr) for res in main_routine.result_variables])
+                 # convert OutputArguments to return value like f2py
+                 args = filter(lambda x: not isinstance(
+                     x, OutputArgument), main_routine.arguments)
+                 retvals = []
+                 for val in main_routine.result_variables:
+                     if isinstance(val, Result):
+                         retvals.append('nameless')
+                     else:
+                         retvals.append(val.result_var)
+
+                 print(DummyWrapper.template % {
+                     'name': main_routine.name,
+                     'expr': printed,
+                     'args': ', '.join([str(a.name) for a in args]),
+                    'retvals': ', '.join([str(val) for val in retvals])
+                 }, end='', file=f)
+
+- Cython wrapper (high-level idea):
+
+  .. code-block:: python
+
+     class CythonCodeWrapper(CodeWrapper):
+         """Wrapper that uses Cython."""
+
+         setup_template = (
+             'from setuptools import setup\n'
+             'from setuptools.
+
+Notes
+-----
+
+- The autowrap.rst documentation is designed for developers who implement or extend wrapping backends, integrate autowrap into larger workflows, or contribute new code-generation or wrapping strategies.
+- The exact behavior of CythonCodeWrapper depends on the complete implementation of setup code and the integration with the rest of the autowrap codebase. The documentation highlights the intended design and usage pattern, with the concrete details provided by the current codebase.
+
+See Also
+--------
+
+- autowrap.codegen: Code generation utilities used to produce the backend code.
+- autowrap.lambdify: Utilities for creating symbolic wrappers (e.g., binary_function).
+- Diofant/SymPy core and tensor modules: Core symbolic data structures that interact with autowrap.
+
+Changelog and further reading
+------------------------------
+
+- For details about supported backends, add a note on future backends (e.g., f2py, Fortran, C/C++, SWIG) and extension points.
+- For doctests in autowrap.rst, ensure the environment has numpy, and the appropriate compilers (f2py, gcc/gfortran) installed.
+
+This completes the technical documentation for autowrap.rst, covering the Generate documentation for this code, its public API, usage workflow, and the design of its backends (DummyWrapper and CythonCodeWrapper).

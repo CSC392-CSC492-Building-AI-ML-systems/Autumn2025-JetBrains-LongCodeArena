@@ -1,0 +1,116 @@
+Mixed Linear Models (mixed_linear.rst)
+
+Module description
+- This module provides a complete implementation of linear mixed effects models, encapsulated in the MixedLM class. It supports regression with both fixed effects and random effects, partitioning the data into independent groups, and it is efficient for models with groupwise structure. The implementation follows established statistical literature (Lindstrom & Bates, 1988) and supports both ML and REML estimation, along with post-estimation utilities.
+
+Overview
+- Purpose: Fit linear mixed effects models to grouped data and provide post-estimation tools (e.g., parameter estimates, standard errors, conf intervals, and diagnostics).
+- Primary class: MixedLM.
+- Data organization: Data are partitioned into disjoint groups. Each group i follows the model:
+  Y_i = X_i beta + Z_i gamma + epsilon_i
+  where:
+  - Y_i: endog (response) vector for group i
+  - X_i: design matrix for fixed effects (k_fe columns)
+  - beta: fixed effects parameters
+  - Z_i: design matrix for random effects
+  - gamma: random effects vector with mean 0 and a shared covariance structure
+  - epsilon_i: iid normal errors with variance sigma^2
+- Key features:
+  - Supports two kinds of random effects: standard random effects (possibly correlated) and variance components (uncorrelated random components with group-specific variances).
+  - Variance structure is parameterized by cov_re (the random effects covariance matrix, Psi) and scale (the residual variance).
+  - Flexible grouping and (optionally) crossed/random effects structures via models parameterized as needed.
+
+Model formulation and notation
+- Core model (per group i):
+  Y_i ~ N(X_i beta, Z_i Psi Z_i' + sigma^2 I)
+  with Psi partitioned into:
+  - cov_re: the covariance for the first k_re random effects (shared across groups)
+  - additional variance components (uncorrelated with cov_re and with each other)
+- Global parameterization:
+  - fe_params (beta): fixed effect coefficients
+  - cov_re (Psi): random effects covariance matrix for the standard random effects
+  - vcomp: variance components vector for the remaining random effects
+  - scale: residual variance (sigma^2)
+- Notation:
+  - cov_re corresponds to Psi in the model, and scale is the error variance
+  - exog is X, exog_re is Z, endog is Y in the MixedLM interface
+  - vcomp length equals the number of variance components derived from vc_formula or exog_vc specifications
+
+Random effects and variance components
+- Two types of random effects:
+  - Standard random effects: k_re elements per group with a common covariance structure Psi (cov_re). Across groups, gamma has a shared distribution with this covariance, but each group has independent realizations.
+  - Variance components: uncorrelated random effects with their own variances; same variance parameter across realizations within a group but possibly different across groups.
+- Gamma and epsilon are treated as random; beta, Psi (cov_re), and sigma^2 are estimated (via ML or REML). The probability model integrates over gamma and epsilon.
+
+Parameterizations and packing
+- Multiple parameterizations are used in different places:
+  1) User parameterization: cov(endog) = scale * I + Z cov_re Z'
+  2) Profile parameterization: cov(endog) = I + Z cov_re1 Z'
+     - The user cov_re equals cov_re1 scaled by the scale parameter
+  3) Square root parameterization: uses the Cholesky factor of cov_re1
+- These parameterizations can be combined into a single parameter vector, including fe_params, the (lower-triangular or Cholesky) random-effects dependence structure, and variance parameters.
+- Important: When unpacking parameter vectors, ensure you reflect or square the dependence structure according to the parameterization used.
+
+Estimation, optimization, and diagnostics
+- Estimation method:
+  - Maximum Likelihood (ML) or Restricted Maximum Likelihood (REML) estimation
+- Optimization strategy:
+  - Uses GLS (generalized least squares) to profile out fixed effects during optimization
+  - The likelihood is profiled over the scale parameter and fixed effects; consequently, the Hessian of the profiled log-likelihood is not implemented, and Newton-Raphson relying on the Hessian is not used
+  - The implementation focuses on stable gradient-based optimization with GLS-based profiling
+- Score methods:
+  - Two specialized score computations exist:
+    - Score with respect to the random effects covariance matrix
+    - Score with respect to the Cholesky-square-root parameters of the covariance matrix
+- Limits:
+  - Hessian of the profiled log-likelihood is not provided due to profiling
+- Outputs:
+  - Estimated fixed effects (fe_params)
+  - Estimated random effects covariance parameters (cov_re and vcomp)
+  - Estimated residual variance (scale)
+  - Diagnostic statistics and standard errors derived from the optimization and likelihood framework
+  - Results accessible through the usual Statsmodels results interface (summary, conf_int, etc.)
+
+Inputs and data structures
+- endog: n-vector of dependent variable observations (per observation)
+- exog: n x k_fe design matrix for fixed effects
+- groups: group labels for partitioning data
+- exog_re: design matrix for random effects (per group)
+- vc_formula or exog_vc: specification of variance components (optional)
+- The module supports cross-group structures by grouping, while remaining efficient for group-wise independence
+
+Usage example
+- Typical workflow:
+  - Construct design matrices X (exog) and Z (exog_re), along with endog Y and group labels
+  - Instantiate MixedLM with these inputs
+  - Fit the model (optionally with reml=True)
+  - Inspect results (fe_params, cov_re, scale, etc.)
+Example (illustrative):
+
+from statsmodels.regression.mixed_linear_model import MixedLM
+import numpy as np
+import pandas as pd
+
+# Assume data is a DataFrame with columns: y, x1, x2, group, z1
+endog = data['y'].values
+exog = data[['x1', 'x2']].values
+groups = data['group'].values
+exog_re = data[['z1']].values
+
+model = MixedLM(endog, exog, groups=groups, exog_re=exog_re)
+result = model.fit()  # default is REML; pass reml=False for ML
+print(result.summary())
+
+Notes
+- The implementation is designed for group-based models and is most efficient when data can be partitioned into independent groups.
+- For models with crossed random effects, a single-group specification can approximate the structure.
+- The documentation references classic sources (e.g., Lindstrom & Bates, 1988) and related tutorial materials for deeper understanding.
+
+References
+- Lindström, M. J., & Bates, D. M. (1988). Newton-Raphson and EM algorithms for linear mixed effects models for repeated measures data. Journal of the American Statistical Association, 83(404), 1014–1022. 
+- Additional reading and user-oriented notes:
+  - http://econ.ucsb.edu/~doug/245a/Papers/Mixed%20Effects%20Implement.pdf
+  - http://lme4.r-forge.r-project.org/lMMwR/lrgprt.pdf
+  - http://lme4.r-forge.r-project.org/slides/2009-07-07-Rennes/3Longitudinal-4.pdf
+
+This documentation provides a concise, developer-oriented description of the mixed_linear module, outlining its purpose, mathematical model, parameterizations, estimation approach, inputs/outputs, and example usage.

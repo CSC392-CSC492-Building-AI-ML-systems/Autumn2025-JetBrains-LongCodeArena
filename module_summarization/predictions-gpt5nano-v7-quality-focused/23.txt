@@ -1,0 +1,122 @@
+w_fork
+======
+
+Overview
+--------
+
+w_fork prepares a new weighted ensemble simulation by forking from an existing run at a specified point. It creates a new HDF5 file, copies target and basis states from the original simulation, and transforms each existing segment into a corresponding initial state and a new segment in the forked run. A mapping from old segments to new initial states is written both into the new HDF5 file and to a flat text file to aid in downstream setup (especially for executable propagation).
+
+Key behavior
+- Uses an existing simulation as the source and creates a new simulation at iteration 1.
+- Copies target states and basis states from the source at the chosen iteration.
+- For each old segment, creates one new initial state and one new segment in the forked run.
+- Writes a mapping file ISTATE_MAP describing how old segments map to new initial states.
+- The mapping file can include a header, controlled by --no-headers.
+
+Command synopsis
+----------------
+
+w_fork [options]
+
+Required/optional options
+- -i, --input INPUT_H5FILE
+  Create the fork from the given INPUT_H5FILE. If omitted, configuration defaults are used.
+- -I, --iteration N_ITER
+  Take the initial distribution for the new simulation from iteration N_ITER of the source (default: last complete iteration).
+- -o, --output OUTPUT
+  Save the new simulation HDF5 file as OUTPUT (default: forked.h5).
+- -- istate-map ISTATE_MAP
+  Write a text file describing the mapping of old segments to new initial states (default: istate_map.txt).
+- --no-headers
+  Do not write header lines to ISTATE_MAP.
+
+What w_fork does (flow)
+------------------------
+
+1. Open the source HDF5, determine the source iteration (n_iter = provided value or last complete iteration minus one).
+2. Create and open a new HDF5 for the forked run.
+3. Copy target states and basis states from the source iteration.
+4. Transform each old segment into:
+   - One new initial state in iteration 1.
+   - One new segment in iteration 1, with its weight copied from the old segment, and its parent referencing the corresponding new initial state.
+   - Initialize the new initial state with the last point of the old segment’s final pcoord.
+5. Update the new run’s initial states and prepare iteration 1 with the newly created segments.
+6. Set the new run’s current iteration to 1 and close both HDF5 files.
+7. Write the istate_map file, optionally including a header, with three columns:
+   - old_n_iter: source iteration
+   - old_seg_id: source segment ID
+   - new_istate_id: new initial state ID
+
+Internal details (for developers)
+-------------------------------
+- Old vs. new data:
+  - Source iteration is obtained from the old HDF5 via get_iter_group(n_iter). The per-segment index and the final pcoords are used.
+  - New run uses create_initial_states(n_segments, n_iter=1) to allocate initial states for all old segments.
+- Mapping data structure:
+  - state_map is a NumPy structured array with fields:
+    - old_n_iter (n_iter_dtype)
+    - old_seg_id (seg_id_dtype)
+    - new_istate_id (seg_id_dtype)
+  - Each row links an old segment to its corresponding new initial state.
+- Segment and initial state setup:
+  - New initial state properties:
+    - iter_created = 0
+    - iter_used = 1
+    - istate_type = InitialState.ISTATE_TYPE_RESTART
+    - istate_status = InitialState.ISTATE_STATUS_PREPARED
+    - pcoord is set to the final pcoord of the old segment
+  - New segment properties:
+    - n_iter = 1
+    - seg_id = index in the original sequence (0..n_segments-1)
+    - weight copied from the old index
+    - parent_id = -(istate.state_id + 1)
+    - wtg_parent_ids = [-(istate.state_id + 1)]
+    - status = Segment.SEG_STATUS_PREPARED
+  - The new segment’s pcoord array is initialized with zeros and the first row is set to the final pcoord from the old segment.
+- Iteration handling:
+  - The new fork uses iteration 1 for the new segments.
+  - The code updates initial states for n_iter=0 in the new file before preparing iteration 1.
+  - After preparation, current_iteration is set to 1 in the new data manager.
+
+Output
+------
+
+- A forked HDF5 file containing:
+  - Copied target states for the forked run
+  - Copied basis states
+  - One initial state and one new segment per old segment
+  - Mapping information embedded in the new HDF5
+- A text mapping file (default istate_map.txt) with lines:
+  - old_n_iter old_seg_id new_istate_id
+  - Optionally includes a header when --no-headers is not used
+
+Examples
+--------
+
+Basic fork from an existing run:
+- w_fork -i old_run.h5 -I 10 -o forked_run.h5 --istate-map istate_map.txt
+
+Fork without headers in the mapping file:
+- w_fork -i old_run.h5 -I 10 -o forked_run.h5 --istate-map istate_map.txt --no-headers
+
+Notes
+-----
+
+- If -I is omitted, w_fork uses the last complete iteration minus one as the source for initial states.
+- The mapping file helps correlate old segments to new initial states, which is especially useful when setting up executable propagation.
+
+See Also
+--------
+
+- westpa.rc and data manager API (for understanding how the fork interacts with HDF5 structures and iteration management)
+- w_binning (for adjusting and exploring state mappings in more detail)
+
+Code reference
+--------------
+
+The behavior described here follows the logic in w_fork’s entry_point function, including:
+- Argument parsing and defaults
+- Data manager interactions for old and new files
+- Copying of target and basis states
+- Construction of initial states and new segments
+- Creation of the state mapping and its textual representation

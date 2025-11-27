@@ -1,0 +1,193 @@
+classfiles.rst
+==============
+
+Overview
+--------
+This module implements support for reading GILDAS CLASS binary files and converting them into a pyspeckit ObsBlock. It provides the core constants, mappings, and helper utilities used by the reader (the actual high-level read entry point is outside the included snippet). It is designed to handle Python 2 and 3 compatibility and to interpret the CLASS file header and record layouts.
+
+Public API
+----------
+The following names are defined in this module and used by the CLASS file reader.
+
+- print_timing
+  - A decorator that measures and logs the execution time of the decorated function.
+  - Use to time potentially long-running CLASS file reads.
+
+  Example:
+  .. code-block:: python
+
+     from classfiles import print_timing
+
+     @print_timing
+     def read_class(filename):
+         ...
+
+- ensure_bytes(string)
+  - Converts a string to a byte-form, ensuring consistent keys for Python 3.
+  - If running under Python 3, returns bytes(string, 'utf-8'); otherwise returns the string unchanged.
+
+  Example:
+  .. code-block:: python
+
+     from classfiles import ensure_bytes
+
+     assert ensure_bytes('1A  ') == b'1A  '
+
+- irange
+  - Alias for range, provided for compatibility with code that uses Python 2-style range semantics.
+
+Dictionaries and constants
+--------------------------
+These mappings define how CLASS headers and records are encoded and how to translate codes to human-readable names.
+
+- filetype_dict
+  - Maps CLASS file type codes to a human-friendly type name.
+  - Keys include strings like '1A  ', '1   ', '1B  ', '2A  ', '2   ', '2B  ', '9A  ', '9   ', '9B  '.
+  - Values describe the encoding or format (e.g., 'Multiple_IEEE', 'Multiple_Vax', 'Single_IEEE', etc.).
+  - The dictionary is extended to include byte-string keys (b'...') for compatibility, so both str and bytes keys map to the same values.
+
+  Example:
+  .. code-block:: python
+
+     from classfiles import filetype_dict
+     print(filetype_dict[b'1A  '])  # 'Multiple_IEEE'
+
+- fileversion_dict
+  - Maps CLASS file type variants to a version label (e.g., 'v1', 'v2').
+  - Includes keys like '1A  ', '2A  ', '9A  '.
+  - Also extended to accept byte-string keys.
+
+  Example:
+  .. code-block:: python
+
+     from classfiles import fileversion_dict
+     print(fileversion_dict[b'2A  '])  # 'v2'
+
+- record_lengths
+  - Defines the binary record length by file type version.
+  - Keys: '1A' and '2A'.
+  - Values: 512 for '1A', 4096 (1024*4) for '2A'.
+
+  Example:
+  .. code-block:: python
+
+     from classfiles import record_lengths
+     print(record_lengths['2A'])  # 4096
+
+- header_id_numbers
+  - Maps internal header identifiers to human-friendly header section names.
+  - Examples:
+    - 0  -> 'USER CODE'
+    - -1 -> 'COMMENT'
+    - -2 -> 'GENERAL'
+    - -3 -> 'POSITION'
+    - -4 -> 'SPECTRO'
+    - -5 -> 'BASELINE'
+    - -6 -> 'HISTORY'
+    - -7 -> 'UNKNOWN-APEX'
+    - -9 -> 'GAUSSFIT'
+    - -10 -> 'DRIFT'
+    - -11 -> 'BEAMSWITCH'
+    - -12 -> 'SHELLFIT'
+    - -13 -> 'NH3FIT'
+    - -14 -> 'CALIBRATION'
+    - -18 -> 'ABSFIT'
+
+  Note: There is a commented-out -8 entry for 'SWITCH'.
+
+- header_id_lengths
+  - Maps certain header IDs to expected lengths of their corresponding header blocks.
+  - Examples:
+    - -2: 9
+    - -3: 17
+    - -4: 17
+    - -5: None (variable length)
+    - -6: 3 (variable length)
+
+- filedescv2_nw1
+  - Constant (14) used by the v2 CLASS description in the reader logic.
+
+- keys_lengths
+  - Describes the layout of header blocks in the CLASS file.
+  - Each top-level key corresponds to a header section:
+    - 'unknown'
+      - Example fields (as defined in code): 
+        - 'NUM' (1, 'int32')
+        - 'VER' (1, 'int32')
+        - 'TELES' (3, '|S12')
+        - 'DOBS' (1, 'int32')
+        - 'DRED' (1, 'int32')
+        - 'TYPEC' (1, 'int32')
+        - 'KIND' (1, 'int32')
+        - 'QUAL' (1, 'int32')
+        - 'SCAN' (1, 'int32')
+        - 'SUBSCAN' (1, 'int32')
+    - 'COMMENT'
+      - 'LTEXT' (1, 'int32')
+      - 'CTEXT' (1024//4, '|S1024')
+    - 'GENERAL'
+      - 'UT' (2, 'float64')
+      - 'ST' (2, 'float64')
+      - 'AZ' (1, 'float32')
+      - 'EL' (1, 'float32')
+      - 'TAU' (1, 'float32')
+      - 'TSYS' (1, 'float32')
+      - 'TIME' (1, 'float32')
+      - Note: The snippet shows a trailing comment about XUNIT; the exact handling is not shown in the excerpt.
+
+Usage and interpretation
+------------------------
+- These mappings and layouts are used by the CLASS file reader to interpret binary data blocks and to convert header information into a structured ObsBlock.
+- The dictionaries are designed to be robust to Python versions, accepting both str and bytes keys where appropriate.
+- The keys_lengths structure provides a schema to parse header blocks into numpy dtypes (e.g., int32, float64, and fixed-width string fields).
+
+Implementation notes
+--------------------
+- The module imports include compatibility helpers from six and a conditional ProgressBar from astropy, enabling a progress indicator if available; otherwise, a no-op placeholder is used.
+- The irange alias exists to accommodate code that originally uses Fortran-like range semantics.
+- A simple timing helper, print_timing, helps diagnose slow CLASS file reads.
+
+Examples
+--------
+- Determine a readable file type:
+  .. code-block:: python
+
+     from classfiles import filetype_dict
+     print(filetype_dict[b'1A  '])  # -> 'Multiple_IEEE'
+
+- Look up a header section name by ID:
+  .. code-block:: python
+
+     from classfiles import header_id_numbers
+     print(header_id_numbers[-2])  # -> 'GENERAL'
+
+- Check the read length for a CLASS file variant:
+  .. code-block:: python
+
+     from classfiles import record_lengths
+     print(record_lengths['2A'])  # -> 4096
+
+- Decorate a long read function to time it:
+  .. code-block:: python
+
+     from classfiles import print_timing
+
+     @print_timing
+     def read_class_file(filename):
+         ...
+
+Notes
+-----
+- The module is designed to read CLASS files into pyspeckit.spectrum.ObsBlock. The full reader logic is outside the provided excerpt, but this file defines the essential codes and schemas used during parsing.
+- The exact contents of all keys_lengths entries beyond the shown GENERAL block are not included in the excerpt, but the structure follows the provided pattern.
+
+See Also
+--------
+- pyspeckit.spectrum.ObsBlock
+- GILDAS CLASS file format documentation
+
+References
+----------
+- CLASS file format specification (as per the module’s embedded documentation and mappings)
+- Fortran-to-Python translation hints in the keys_lengths structure
+

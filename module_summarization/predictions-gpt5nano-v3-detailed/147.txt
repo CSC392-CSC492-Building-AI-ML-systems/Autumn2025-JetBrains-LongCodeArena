@@ -1,0 +1,159 @@
+# Fleur input/output parsers
+
+This module provides utilities to extract distinct parts of Fleur XML files to aid versioning, interoperability, and downstream analysis. It focuses on exposing high-level, stable information from Fleur input/output XMLs by interpreting versioned schemas.
+
+## Module overview
+
+- get_fleur_modes(xmltree, schema_dict, logger=None)  
+  Detects and returns a dictionary describing the calculation modes used in a Fleur run. Modes include spins, non-collinearity, spin-orbit coupling, relaxation, GW/Spex-related flags, force theorem, plotting, film systems, LDAs, density of states, band structure, Brillouin-zone integration, greens function calculations, and LD AIA (HIA) flags. The function reads information from the XML using a FleurXMLContext and adapts to schema version differences.
+
+- get_nkpts(xmltree, schema_dict, logger=None)  
+  Determines the number of k-points used in the Fleur calculation by inspecting the currently selected kPointList. It validates the chosen list against available lists and returns the count. Behavior depends on the file version and includes safeguards with informative errors for mismatches or missing data.
+
+Both functions rely on FleurXMLContext to traverse the XML with respect to a given Fleur schema (InputSchemaDict or OutputSchemaDict). The schema-aware behavior is driven by the file version embedded in schema_dict.inp_version.
+
+## Key components and relationships
+
+- FleurXMLContext
+  - A context manager used to read Fleur XML files according to a specific schema. Provides helper methods like:
+    - attribute(...)
+    - tag_exists(...)
+    - find(...)
+  - Used to access attributes and structural elements of the XML in a version-aware manner.
+
+- schema_dict_version_dispatch
+  - Decorator applied to get_nkpts to enable version-aware behavior based on the provided schema dictionary.
+
+- XMLLike
+  - Type alias for XML-like objects accepted by the functions (e.g., lxml elements, trees, or file-like representations as supported by Masci-tools).
+
+- FilterType
+  - Imported for potential future filtering usage by the internal XPath builder (not directly exposed in the documented functions here).
+
+## Function details
+
+### get_fleur_modes(xmltree, schema_dict, logger=None) -> dict[str, Any]
+
+Purpose:
+- Extracts high-level calculation modes from a Fleur output/input XML for version-agnostic downstream usage.
+
+Returned structure (example keys):
+- jspin: int (number of spins)
+- noco: bool (non-collinear flag)
+- soc: bool (spin-orbit coupling)
+- relax: bool (structure relaxation)
+- spex: int (GW/Spex-related mode flag, may be 0 if not applicable)
+- force_theorem: bool (Force theorem calculation)
+- cf_coeff: bool (cF coefficients or related)
+- plot: bool (plotting flag)
+- film: bool (film system flag)
+- ldau: bool (LDA+U active)
+- dos: int/other (density of states mode flag/value)
+- band: int/other (band structure mode flag/value)
+- bz_integration: value (Brillouin-zone integration mode)
+- greensf: bool (greens function calculation, may depend on version)
+- ldahia: bool (LDA+HIA flag for species)
+
+Notes and version considerations:
+- spex is determined from expertModes/gw/spex tags depending on the file version.
+- greensf and related flags are detected if the schema version supports them (and may depend on special tags like greensfCalculation, torqueCalculation, etc., with version guards).
+- cf_coeff is checked via cFCoeffs or related tags under appropriate schema versions.
+- plot handling changes with schema version (e.g., casting rules for iplot).
+- force_theorem is available for schema versions > (0, 27); otherwise, it is False.
+- The presence/absence of certain tags and the exact attribute names depend on the Fleur XML version, so the function adapts accordingly.
+
+Parameters:
+- xmltree: XML-like object representing the Fleur XML.
+- schema_dict: Schema dictionary (InputSchemaDict or OutputSchemaDict) describing the file version.
+- logger: Optional logger for warnings or errors.
+
+Returns:
+- A dictionary mapping mode names (strings) to their extracted values.
+
+ edge cases / errors:
+- The function relies on the XML conforming to the given schema. If expected tags/attributes are missing, behavior falls back to defaults (e.g., False) or may raise if essential fields are missing. The code accounts for version-dependent structures, so mismatches may yield defaults rather than hard errors, unless critical data is absent.
+
+### get_nkpts(xmltree, schema_dict, logger=None) -> int
+
+Purpose:
+- Determines the number of k-points used in the calculation by inspecting the selected kPointList within the Fleur XML.
+
+Behavior:
+- Reads the currently selected k-point list name from the XML (listName).
+- Collects all available kPointList names under kPointLists.
+- Validates that the selected listName exists; if not, raises a ValueError listing available names.
+- Within the selected kPointList (filtered by its name), reads the count attribute to obtain nkpts.
+- Returns nkpts as an integer.
+- If nkpts is not an integer, raises a ValueError (incomplete snippet in the source indicates this safeguard).
+
+Parameters:
+- xmltree: XML-like object representing the Fleur XML.
+- schema_dict: Schema dictionary (InputSchemaDict or OutputSchemaDict) describing the file version.
+- logger: Optional logger for warnings or errors.
+
+Returns:
+- An integer representing the number of k-points used in the calculation.
+
+ edge cases / errors:
+- If the selected k-point list does not exist, a ValueError is raised with available options.
+- If nkpts cannot be evaluated as an integer, a ValueError is raised (as indicated by the source code).
+
+## Usage examples
+
+- Basic usage (assumes you have a Fleur XML document and an appropriate schema dictionary):
+
+```python
+from lxml import etree
+from masci_tools.io.parsers.fleur_schema import InputSchemaDict
+from masci_tools.io.parsers.fleur_parser import get_fleur_modes, get_nkpts
+
+# xmltree can be an ElementTree or similar accepted by XMLLike
+xmltree = etree.parse("path/to/fleur_out.xml")
+
+# Obtain a schema dictionary appropriate for the file version
+# The exact mechanism to obtain this object depends on your workflow.
+schema_dict = ...  # an instance of InputSchemaDict or OutputSchemaDict
+
+# Optional logging
+import logging
+logger = logging.getLogger(__name__)
+
+modes = get_fleur_modes(xmltree, schema_dict, logger=logger)
+nkpts = get_nkpts(xmltree, schema_dict, logger=logger)
+
+print(modes)
+print(nkpts)
+```
+
+- Example with different schema version handling (uses a provided logger):
+
+```python
+# Assuming you have a specific schema_dict aligned with the file version
+modes = get_fleur_modes(xmltree, schema_dict, logger=None)
+nkpts = get_nkpts(xmltree, schema_dict, logger=None)
+```
+
+- Practical note:
+  - The functions are designed to be version-aware. When you work with multiple Fleur version outputs, supply the correct schema_dict corresponding to the file version to ensure accurate extraction.
+
+## Edge cases and considerations
+
+- Version-dependent behavior:
+  - get_fleur_modes adapts to file version differences (e.g., spex, greensf, ldahia, cf_coeff, plot, force_theorem).
+  - get_nkpts relies on the correct selection of kPointList and the associated count, which may depend on version-specific XML structures.
+
+- Validation and errors:
+  - get_nkpts raises a ValueError if the selected k-point list does not exist.
+  - If nkpts cannot be interpreted as an integer, a ValueError is raised (as indicated by the implementation).
+
+- Robustness:
+  - The functions are designed to operate with missing tags by using defaults (e.g., False for booleans when tags are absent) but will raise explicit errors for clearly invalid configurations (such as a non-existent k-point list name).
+
+- Dependencies:
+  - Requires FleurXMLContext, the Fleur schema utilities, and lxml.etree (or compatible XML handling) to parse and traverse Fleur XML files.
+
+## Related concepts
+
+- FleurXMLContext: central utility for schema-aware XML parsing used by these parsers.
+- Fleur schema dictionaries: InputSchemaDict / OutputSchemaDict define how XML data should be interpreted according to Fleur version.
+- Version-aware parsing: the logic explicitly checks schema_dict.inp_version to apply correct interpretation rules.

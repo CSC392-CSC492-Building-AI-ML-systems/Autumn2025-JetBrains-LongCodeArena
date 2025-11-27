@@ -1,0 +1,172 @@
+# Storage (MongoDB Backend)
+
+Introduction
+- This module provides a MongoDB-backed storage service for ASAB. It relies on the motor (async) driver and PyMongo for updates and queries, and integrates with the project’s Upsertor abstraction to support atomic create/update operations.
+- Configuration defaults are provided under the asab:storage section.
+
+Configuration
+- Defaults (override as needed in your config):
+  - mongodb_uri: mongodb://localhost:27017
+  - mongodb_database: asabdb
+
+- Example configuration snippet:
+  - In code (defaults already loaded by asab.Config):
+    asab.Config.add_defaults(
+      {
+        'asab:storage': {
+          'mongodb_uri': 'mongodb://localhost:27017',
+          'mongodb_database': 'asabdb',
+        }
+      }
+    )
+
+- Notes:
+  - The database connection uses a timezone-aware codec options setting (tz_aware=True, tzinfo=datetime.timezone.utc).
+  - The StorageService reads its connection details from the config_section_name (default 'asab:storage').
+
+Classes and relationships
+- StorageService (inherits StorageServiceABC)
+  - Purpose: MongoDB-backed storage service. Establishes the database and provides helpers for basic operations and upsert operations.
+  - Core collaborators:
+    - MongoDBUpsertor: concrete implementation of UpsertorABC for MongoDB.
+  - Key methods:
+    - upsertor(collection, obj_id=None, version=0) -> MongoDBUpsertor
+    - get(collection, obj_id, decrypt=None) -> dict
+    - get_by(collection, key, value, decrypt=None) -> dict
+    - collection(collection) -> AsyncIOMotorCollection
+    - delete(collection, obj_id) -> dict (returns deleted _id)
+
+- MongoDBUpsertor (inherits UpsertorABC)
+  - Purpose: Perform atomic upsert operations against a MongoDB collection, with support for $set, $inc, $push, and $unset.
+  - Core behavior:
+    - generate_id() -> ObjectId
+    - execute(custom_data=None, event_type=None) -> None
+  - Key state and behavior:
+    - Uses ModSet, ModInc, ModPush, ModUnset, ObjId, Collection, Version, and the id field name (via get_id_name()) inherited from UpsertorABC.
+    - On insert or upsert, can raise DuplicateError on duplicate key constraints.
+    - If WebhookURIs is configured, emits webhook payloads including collection, id, _v, and the changes performed.
+
+Key methods and how they work
+- StorageService.__init__(app, service_name, config_section_name='asab:storage')
+  - Creates an AsyncIOMotorClient from the mongodb_uri in config.
+  - Connects to the database named per mongodb_database with tz-aware codec options.
+  - Returns a configured StorageService instance.
+
+- StorageService.upsertor(collection, obj_id=None, version=0)
+  - Returns a MongoDBUpsertor bound to this storage and the specified collection, id, and version.
+
+- StorageService.get(collection, obj_id, decrypt=None)
+  - Fetches a document by _id from the specified collection.
+  - If not found, raises KeyError("NOT-FOUND").
+  - If decrypt is provided (iterable of field names), decrypts those fields using aes_decrypt.
+
+- StorageService.get_by(collection, key, value, decrypt=None)
+  - Fetches a document by a specified key/value index.
+  - If not found, raises KeyError("NOT-FOUND").
+  - If decrypt is provided, decrypts specified fields similarly.
+
+- StorageService.collection(collection)
+  - Returns an AsyncIOMotorCollection for lower-level/custom operations.
+  - Async method, but simply returns Database[collection] for direct use.
+
+- StorageService.delete(collection, obj_id)
+  - Deletes a document by _id using find_one_and_delete.
+  - If not found, raises KeyError("NOT-FOUND").
+  - Returns the deleted document's _id.
+
+- MongoDBUpsertor.generate_id()
+  - Generates a new MongoDB ObjectId for the document.
+
+- MongoDBUpsertor.execute(custom_data=None, event_type=None)
+  - Builds update document from:
+    - ModSet -> $set
+    - ModInc -> $inc
+    - ModPush -> $push with $each
+    - ModUnset -> $unset
+  - Builds a filter document:
+    - If ObjId is provided, filter on the id field name.
+    - If not provided, ensures Version is 0 or None (insertion scenario).
+    - If Version is not None, includes _v = Version as integer in the filter.
+  - Performs find_one_and_update with:
+    - update document as built (addobj)
+    - upsert: True if Version is 0 or None, else False
+    - return_document: AFTER
+  - Handles pymongo.errors.DuplicateKeyError by wrapping into DuplicateError, including key value when available.
+  - If ret is None after the operation, raises KeyError("NOT-FOUND") (object might have been changed concurrently).
+  - Updates self.ObjId with the returned document's id field.
+  - If WebhookURIs is configured, emits a webhook with:
+    - collection
+    - custom (if provided)
+    - event_type (if provided)
+    - upsertor_data containing id_field_name, id, _v, and filtered set/inc data (excluding fields starting with "__")
+
+Important considerations and edge cases
+- Decryption:
+  - get and get_by accept a decrypt iterable. Each field listed will be decrypted if present in the retrieved document using aes_decrypt.
+- Error handling:
+  - NOT-FOUND is signaled via KeyError("NOT-FOUND") for get/get_by/delete when the document is not found.
+  - DuplicateKeyError from MongoDB is translated into a DuplicateError with context.
+- Upsert semantics:
+  - If Version is 0 or None, the operation upserts (inserts or updates found by the filter). If Version is set to a non-zero value, upsert is disabled in the first wave and the operation acts as an update.
+- ID handling:
+  - The id field name is provided by get_id_name() from UpsertorABC. When a new document is created, ObjId can be None and will be generated by generate_id().
+- Webhook integration:
+  - If WebhookURIs is configured, the upsert operation emits a webhook payload describing the changes. Only fields that do not start with "__" are included in the 'set' and 'inc' payloads.
+- Concurrency:
+  - The design uses MongoDB’s atomic update capabilities (find_one_and_update with upsert) to minimize race conditions during updates/inserts.
+
+Usage examples
+- Initialize storage service (ASAB context assumed)
+  - storage = StorageService(app, "storage")
+
+- Obtain an upsertor and perform an insert/update
+  - up = storage.upsertor("my_collection", obj_id=None, version=0)
+  - up.ModSet["name"] = "Alice"
+  - up.ModInc["counter"] = 1
+  - up.execute()
+
+- Retrieve a document by id
+  - doc = await storage.get("my_collection", "60d5f9e8a2f1c4b5d4a9c123")
+
+- Retrieve a document by a field
+  - user = await storage.get_by("users", "username", "jdoe")
+
+- Decrypt specific fields on read
+  - secret_doc = await storage.get("secrets", "docid", decrypt=["password"])
+
+- Direct collection operations
+  - coll = await storage.collection("raw_ops")
+  - cursor = coll.find({})
+  - while await cursor.fetch_next:
+      obj = cursor.next_object()
+      print(obj)
+
+- Delete a document
+  - deleted_id = await storage.delete("my_collection", "60d5f9e8a2f1c4b5d4a9c123")
+
+Notes
+- All operations are asynchronous and should be awaited.
+- Ensure proper configuration for mongodb_uri and mongodb_database in the asab:storage section.
+- Handle exceptions as per your application’s error strategy (KeyError and DuplicateError are raised at points noted above).
+
+Usage-oriented API reference (summary)
+- StorageService
+  - __init__(app, service_name, config_section_name='asab:storage')
+  - upsertor(collection: str, obj_id=None, version=0)
+  - get(collection: str, obj_id, decrypt=None) -> dict
+  - get_by(collection: str, key: str, value, decrypt=None) -> dict
+  - collection(collection: str) -> motor.motor_asyncio.AsyncIOMotorCollection
+  - delete(collection: str, obj_id) -> dict
+
+- MongoDBUpsertor
+  - generate_id() -> bson.objectid.ObjectId
+  - execute(custom_data: Optional[dict] = None, event_type: Optional[str] = None) -> None
+
+Code references (for quick lookup)
+- MongoDB driver: motor.motor_asyncio, pymongo
+- BSON: bson
+- Upsert infrastructure: UpsertorABC
+- Error handling: DuplicateError
+- Timezone handling: datetime
+
+End of documentation.

@@ -1,0 +1,263 @@
+Sync LDAP users
+================
+
+This document describes how to sync users from an LDAP directory into the ftrack user registry. It covers prerequisites, configuration, data mappings, workflow, and practical examples for developers integrating LDAP-based user provisioning into an ftrack-based environment.
+
+Overview
+--------
+
+- Purpose: Create and maintain ftrack users based on LDAP directory entries, keeping user accounts in sync with the directory.
+- Scope: Typical use cases include provisioning new users, updating user attributes (name, email, etc.), and optionally deactivating/removing ftrack users that no longer exist in LDAP.
+- Input: LDAP directory data (users and groups) and a mapping to ftrack user fields.
+- Output: ftrack users with attributes populated from LDAP (username, name, email, groups/roles, etc.) and a defined synchronization policy.
+
+Prerequisites
+-------------
+
+- Access to the LDAP directory (read access to user entries and, if needed, group memberships).
+- An administrator account on the ftrack server, or a service account with sufficient permissions to create and modify users.
+- A deployable script or service that can run on a schedule (e.g., cron, systemd timer) or be integrated into your CI/CD workflow.
+- Network connectivity from the sync host to both the LDAP server and the ftrack server.
+- Optional: secret management for LDAP bind credentials (do not hard-code credentials).
+
+Configuration
+-------------
+
+The LDAP sync process requires configuration for both LDAP and ftrack mappings. Typical configuration sections:
+
+- LDAP connection
+  - ldap_uri: URI of the LDAP server (e.g., ldap://ldap.example.com:389 or ldaps://ldap.example.com:636)
+  - bind_dn: Distinguished Name used to bind/authenticate (service account)
+  - bind_password: Password for the bind DN (store securely)
+  - base_dn: Base DN under which to search for user entries (e.g., ou=people,dc=example,dc=com)
+  - user_filter: LDAP filter to identify user entries (e.g., (objectClass=inetOrgPerson))
+  - user_attributes: Mapping from LDAP attributes to internal fields (see Attribute Mapping)
+
+- User attribute mapping (LDAP -> ftrack)
+  - uid_attr: LDAP attribute used for the ftrack username (e.g., uid, sAMAccountName)
+  - name_attr: LDAP attribute for the user’s display name (e.g., cn, displayName)
+  - mail_attr: LDAP attribute for the user’s email (e.g., mail)
+  - other_attrs: Optional LDAP attributes to sync (e.g., department, title)
+
+- Group/role mapping (optional)
+  - group_attr: LDAP attribute containing group memberships (e.g., memberOf)
+  - ftrack_role_mapping: A mapping from LDAP groups to ftrack roles/groups
+  - default_role: Role to assign if no LDAP group matches
+
+- Synchronization policy
+  - create_missing: Whether to create ftrack users that exist in LDAP but not in ftrack
+  - update_existing: Whether to update existing ftrack users when LDAP attributes change
+  - deactivate_missing: Whether to deactivate or remove ftrack users that are no longer present in LDAP
+  - preserve_internals: Whether to preserve internal ftrack-only properties during sync
+
+- Scheduling and resiliency
+  - schedule: Cron-like expression or interval for running the sync
+  - dry_run: If true, simulate changes without applying them
+  - log_level: Logging verbosity
+  - retry_policy: How to handle transient failures (max retries, backoff)
+
+- Security and secrets
+  - Store ldap_bind_password securely (e.g., environment variable, secret manager, or encrypted file)
+  - Use TLS/SSL (ldaps) where possible
+  - Limit the scope of the bind user to necessary read permissions
+
+Attribute mapping example
+-------------------------
+
+Common LDAP attributes and their ftrack equivalents:
+
+- LDAP uid or sAMAccountName -> ftrack username
+- LDAP cn or displayName -> ftrack full name
+- LDAP mail -> ftrack email
+- LDAP givenName / sn -> potential name components
+
+Example mapping (pseudo-structure):
+
+mapping = {
+  'uid_attr': 'uid',          # LDAP attribute for username
+  'name_attr': 'cn',           # LDAP attribute for display name
+  'mail_attr': 'mail',         # LDAP attribute for email
+  'groups_attr': 'memberOf',   # LDAP attribute listing groups
+}
+
+Group to role mapping example:
+
+group_to_role = {
+  'cn=ftrack-admins,ou=Groups,dc=example,dc=com': 'admin',
+  'cn=ftrack-users,ou=Groups,dc=example,dc=com': 'user',
+}
+
+Usage patterns
+--------------
+
+- Programmatic usage (Python)
+  - Create an LDAP connection client
+  - Retrieve user entries under base_dn with user_filter
+  - For each LDAP entry, construct or update the corresponding ftrack user
+  - Apply group/role mapping
+  - Apply the synchronization policy (create, update, deactivate)
+
+Code sketch (high level; adapt to your codebase)
+
+- Establish LDAP connection
+  - ldap_client = LDAPClient(uri=ldap_uri, bind_dn=bind_dn, bind_password=bind_password)
+
+- Pull users
+  - ldap_users = ldap_client.search(base_dn, user_filter, attributes=[uid_attr, name_attr, mail_attr, groups_attr])
+
+- Sync loop
+  - for ldap_user in ldap_users:
+      username = ldap_user[uid_attr][0]
+      name = ldap_user.get(name_attr, [username])[0]
+      email = ldap_user.get(mail_attr, [None])[0]
+      groups = ldap_user.get(groups_attr, [])
+      ftrack_user = ftrack_api.get_user(username)  # pseudo
+      if ftrack_user is None and create_missing:
+          ftrack_api.create_user(username, name=name, email=email, groups=map_groups(groups))
+      elif update_existing:
+          ftrack_api.update_user(username, name=name, email=email, groups=map_groups(groups))
+  - if deactivate_missing:
+      - determine ftrack users not present in ldap_users and deactivate them
+
+- Persist changes
+  - commit to ftrack server with appropriate permissions
+
+- Dry-run support
+  - If dry_run: log planned actions instead of applying
+
+Examples
+--------
+
+Basic sync (dry-run)
+- Purpose: Verify what would be changed without modifying ftrack
+- Command (pseudo):
+
+  python sync_ldap_users.py \
+    --server-url https://ftrack.example.com \
+    --ldap-uri ldap://ldap.example.com \
+    --bind-dn 'cn=svc-sync,dc=example,dc=com' \
+    --bind-password-file /etc/ldap-sync/password.txt \
+    --base-dn 'ou=People,dc=example,dc=com' \
+    --user-filter '(objectClass=inetOrgPerson)' \
+    --uid-attr 'uid' \
+    --name-attr 'cn' \
+    --mail-attr 'mail' \
+    --group-attr 'memberOf' \
+    --default-role 'user' \
+    --create-missing \
+    --update-existing \
+    --dry-run
+
+Full sync with changes applied
+- Command (pseudo):
+
+  python sync_ldap_users.py \
+    --server-url https://ftrack.example.com \
+    --ldap-uri ldaps://ldap.example.com \
+    --bind-dn 'cn=service-sync,ou=Service,dc=example,dc=com' \
+    --bind-password-file /etc/ldap-sync/password.txt \
+    --base-dn 'ou=People,dc=example,dc=com' \
+    --user-filter '(objectClass=inetOrgPerson)' \
+    --uid-attr 'uid' \
+    --name-attr 'displayName' \
+    --mail-attr 'mail' \
+    --group-attr 'memberOf' \
+    --group-mapping 'cn=Admins,ou=Groups,dc=example,dc=com:admin,cn=Users,ou=Groups,dc=example,dc=com:user' \
+    --default-role 'user' \
+    --deactivate-missing \
+    --log-level INFO
+
+Notes:
+- Replace the LDAP attribute names with those used in your directory.
+- Ensure the LDAP user objects contain consistent and unique identifiers suitable for ftrack usernames.
+- Adjust group/role mappings to match your organization's permissions model in ftrack.
+
+Operational considerations
+--------------------------
+
+- Idempotency: The sync process should be idempotent—re-running with the same LDAP state should not create duplicates.
+- Conflict handling: Decide how to handle conflicting attribute updates (e.g., LDAP name vs. ftrack name).
+- Performance: For large LDAP directories, consider paging or batching LDAP queries and updating ftrack in batches.
+- Auditing: Maintain logs of changes for compliance and troubleshooting; log created/updated/deactivated users, and the LDAP source attributes used.
+- Security: Protect credentials, use secure channels (LDAPS/StartTLS), and limit permissions granted to the LDAP bind account.
+
+Testing and validation
+----------------------
+
+- Unit tests: Mock LDAP responses and ftrack API interactions to verify mappings and policy logic.
+- Integration tests: Run in a staging environment connected to a test LDAP directory and a test ftrack instance.
+- Validation checks:
+  - All created users have valid usernames in ftrack
+  - Email addresses are valid when provided
+  - Group-to-role mappings apply as configured
+  - Deactivation removes only as intended (not removing users with hidden/legacy accounts unless policy requires)
+
+Troubleshooting
+--------------
+
+- Connection failures: Check LDAP server URI, TLS settings, and network connectivity.
+- Bind failures: Verify bind DN and password; ensure the bind user has read access to required LDAP attributes.
+- Missing attributes: Confirm LDAP attributes exist on user entries and map correctly in configuration.
+- Duplication: Ensure username attribute is unique in LDAP; handle duplicates in mapping logic if present.
+- Permissions: Ensure the ftrack account used for syncing has rights to create, update, and deactivate users.
+
+Developer notes
+--------------
+
+- This documentation assumes a dedicated LDAP sync component (script or service) that reads LDAP entries and uses the ftrack API to manage users.
+- The core logic typically involves:
+  - Establishing an LDAP connection and performing a user search
+  - Normalizing LDAP attributes to a stable internal representation
+  - Looking up corresponding ftrack users by username
+  - Creating or updating ftrack users as needed
+  - Optionally deactivating ftrack users not present in LDAP
+- Consider adding a dry-run mode and a robust logging strategy to aid debugging and auditing.
+
+API surface (implementation guidance)
+-------------------------------------
+
+- LDAP connection abstraction:
+  - connect(uri, bind_dn, bind_password)
+  - search(base_dn, filter, attributes)
+
+- Mapping utilities:
+  - map_ldap_user_to_ftrack(ldap_user) -> dict with keys: username, name, email, groups
+  - map_groups(ldap_groups) -> ftrack groups/roles
+
+- User management:
+  - get_user(username) -> user object or None
+  - create_user(username, name, email, groups)
+  - update_user(username, name=None, email=None, groups=None)
+  - deactivate_user(username)
+
+- Policy enforcement:
+  - apply_policy(create_missing, update_existing, deactivate_missing)
+
+Appendix: Example configuration snippet (YAML)
+------------------------------------------------
+
+ldap_sync:
+  ldap_uri: "ldaps://ldap.example.com:636"
+  bind_dn: "cn=svc-sync,ou=ServiceAccounts,dc=example,dc=com"
+  bind_password_file: "/etc/ldap-sync/password.txt"
+  base_dn: "ou=People,dc=example,dc=com"
+  user_filter: "(objectClass=inetOrgPerson)"
+  attributes:
+    uid_attr: "uid"
+    name_attr: "displayName"
+    mail_attr: "mail"
+    groups_attr: "memberOf"
+  group_mapping:
+    "cn=ftrack-admins,ou=Groups,dc=example,dc=com": "admin"
+    "cn=ftrack-members,ou=Groups,dc=example,dc=com": "user"
+  policy:
+    create_missing: true
+    update_existing: true
+    deactivate_missing: true
+  scheduling:
+    interval_minutes: 60
+  security:
+    dry_run: false
+    log_level: "INFO"
+
+This documentation is intended to guide developers integrating an LDAP-based user synchronization workflow with ftrack. Adapt paths, attribute names, and mappings to your environment.

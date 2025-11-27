@@ -1,0 +1,147 @@
+# SGD (Stochastic Gradient Descent) — Multinomial Loss and Helpers
+
+Introduction
+------------
+This module provides the core mathematical building blocks used by the SAG/SAGA implementations for stochastic optimization with multinomial (softmax) logistic loss. To enable high performance across 32-bit and 64-bit floating types, fused types are used to generate optimized code for both float32 and float64 without duplicating Python-visible APIs.
+
+Overview of key components
+--------------------------
+- MultinomialLogLoss{{name_suffix}}:
+  - A fused-type class that implements the per-sample multinomial logistic loss and its gradient with respect to the prediction vector.
+  - Two typedefed variants exist via the fused types: MultinomialLogLoss64 and MultinomialLogLoss32.
+  - Primary responsibilities:
+    - Compute the per-sample loss for a given prediction, true class, and sample weight.
+    - Compute the per-class gradient for this per-sample loss (to be combined with the input features by the SGD routine).
+  - Core methods (internal, cdef):
+    - _loss(prediction, y, n_classes, sample_weight) -> loss
+    - dloss(prediction, y, n_classes, sample_weight, gradient_ptr) -> None
+  - Helper: __reduce__ for pickling support (reconstructs the class with no arguments).
+
+- _logsumexp{{name_suffix}}:
+  - Numerically stable implementation of log(sum(exp(arr))) for a vector of length n_classes.
+  - Used to compute the log-sum-exp term in the multinomial loss without overflow.
+
+- _soft_thresholding{{name_suffix}}:
+  - Soft-thresholding (shrinkage) operator used in L1-regularization contexts.
+  - Returns the result of applying shrinkage to x with the given shrinkage amount.
+
+Important notes on fused types and naming
+----------------------------------------
+- The dtypes list defines two configurations:
+  - 64-bit: c_type = double, np_type = np.float64
+  - 32-bit: c_type = float,  np_type = np.float32
+- For each dtype, a corresponding set of helper functions and classes is generated:
+  - MultinomialLogLoss64 / MultinomialLogLoss32
+  - _logsumexp64 / _logsumexp32
+  - _soft_thresholding64 / _soft_thresholding32
+- These fused variants enable the same algorithmic logic to run efficiently on both float32 and float64 data.
+
+API surface and usage
+---------------------
+Note: The primary public-facing behavior comes from the high-level SGD implementations (e.g., SAG/SAGA) that consume these building blocks. The MultinomialLogLoss classes and helpers are designed to be invoked from the Cython-compiled SGD machinery; direct Python usage typically goes through the generated extension types.
+
+Key methods and their semantics
+- MultinomialLogLoss{{name_suffix}}._loss(prediction, y, n_classes, sample_weight)
+  - prediction: pointer to a 1D array of length n_classes with class scores.
+  - y: the true class index for the sample (0 <= y < n_classes).
+  - n_classes: total number of classes.
+  - sample_weight: scalar weight for the sample.
+  - Returns: the per-sample multinomial logistic loss for this instance.
+  - Formula (conceptual): loss = logsumexp(prediction) - prediction[y], scaled by sample_weight.
+
+- MultinomialLogLoss{{name_suffix}}.dloss(prediction, y, n_classes, sample_weight, gradient_ptr)
+  - Fills gradient_ptr with the per-class gradient for the current sample.
+  - The per-class gradient is proportional to exp(prediction[c] - logsumexp(prediction)) for all c, with an additional adjustment of -1 for the true class y, all scaled by sample_weight.
+  - gradient_ptr is length n_classes.
+
+- _logsumexp{{name_suffix}}(arr, n_classes)
+  - Returns log(sum(exp(arr))) in a numerically stable way.
+
+- _soft_thresholding{{name_suffix}}(x, shrinkage)
+  - Applies the soft-thresholding operator, returning sign(x) * max(|x| - shrinkage, 0).
+
+Parameter and return value overview
+-----------------------------------
+- prediction: 1D array-like of length n_classes (dtype matches the fused type).
+- y: scalar in [0, n_classes - 1], representing the true class index.
+- n_classes: positive integer, number of classes.
+- sample_weight: non-negative scalar weight for the current sample.
+- gradient_ptr: pre-allocated 1D array of length n_classes used to store the gradient.
+
+Return values:
+- _loss returns a scalar of the same dtype as the prediction.
+- dloss returns nothing; it writes into gradient_ptr in-place.
+- _logsumexp returns a scalar of the same dtype as the input.
+- _soft_thresholding returns a scalar of the same dtype as the inputs.
+
+Edge cases and considerations
+-----------------------------
+- y must be within [0, n_classes - 1]. Out-of-bounds indices lead to undefined behavior.
+- sample_weight can be zero, yielding a zero loss and zero gradient.
+- The logsumexp implementation minimizes numerical instability for large or small prediction values.
+- The fused-type design requires correct dtype usage; mixing dtypes between the caller and the generated code can cause type errors.
+- __reduce__ is provided to enable pickling of the loss class instances (e.g., for parallel or serialized workflows).
+
+Usage examples
+--------------
+The following examples illustrate typical usage patterns in the context of the higher-level SGD routines. These classes are intended to be consumed by the generated SAG/SAGA machinery; direct Python interaction is limited to initialization and integration with the rest of the estimator.
+
+Example 1: Instantiating the dtype-specific loss class
+- This demonstrates how to obtain the 64-bit and 32-bit variants from the compiled module.
+
+```python
+# Pseudocode: import from the compiled extension module
+# The actual module name depends on your build setup (e.g., sag_fast)
+from sag_fast import MultinomialLogLoss64, MultinomialLogLoss32
+
+loss64 = MultinomialLogLoss64()
+loss32 = MultinomialLogLoss32()
+```
+
+Example 2: High-level SGD integration (conceptual)
+- The following is a conceptual illustration of how the loss/gradient blocks fit into an SGD step. The exact integration points depend on the surrounding SAG/SAGA framework and the Python-visible API of the compiled extension.
+
+```python
+# Pseudocode only; actual usage occurs within the SGD wrappers
+# prediction: 1D NumPy array of length n_classes (dtype must match the chosen suffix)
+# y: scalar class label (int, 0 <= y < n_classes)
+# sample_weight: float
+
+# Choose dtype variant to match data
+loss = loss64  # or loss32
+
+# Compute per-sample loss
+l = loss._loss(prediction, y, n_classes, sample_weight)
+
+# Compute gradient for this sample w.r.t. the prediction
+grad = np.empty(n_classes, dtype=prediction.dtype)
+loss.dloss(prediction, y, n_classes, sample_weight, grad)
+
+# The resulting grad would then be combined with the input feature vector
+# in the SGD update rule (e.g., w <- w - eta * (grad @ x))
+```
+
+Example 3: Regularization helper (soft-thresholding)
+```python
+# Soft-thresholding is used for L1 regularization adjustments in the optimizer
+shrinkage = 0.01
+x = np.asarray([0.5, -0.2, 0.0], dtype=np.float64)
+from sag_fast import _soft_thresholding64  # or 32, depending on dtype
+y = _soft_thresholding64(x, shrinkage)
+```
+
+Implementation notes
+--------------------
+- The module leverages fused types to emit optimized, type-stable code for both 32-bit and 64-bit floating-point data.
+- Numerical stability is achieved via the log-sum-exp trick in _logsumexp.
+- The design aligns with typical per-sample loss and gradient evaluations required by SAG/SAGA, enabling efficient batch or streaming updates.
+
+Build and integration
+---------------------
+- The code is intended to be compiled as part of a Cython extension (e.g., sag_fast.pyx generated from the template).
+- Build uses a setup.py workflow that substitutes type-specific names (suffixes) and compiles both 32-bit and 64-bit variants.
+- Ensure your environment provides a compatible C compiler and NumPy headers for successful compilation.
+
+End Notes
+---------
+This documentation covers the core stochastic gradient components related to multinomial logistic loss used in the SAG/SAGA implementations. The public Python APIs expose high-level SGD functionality, while the MultinomialLogLoss helper classes and associated functions provide the efficient, low-level building blocks for loss computation and gradient evaluation.

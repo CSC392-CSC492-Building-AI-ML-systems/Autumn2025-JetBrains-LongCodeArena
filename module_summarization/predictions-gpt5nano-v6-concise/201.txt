@@ -1,0 +1,152 @@
+# Partial Dependence and Individual Conditional Expectation (ICE) plots
+
+This document describes Partial Dependence Plots (PDP) and Individual Conditional Expectation (ICE) plots, how they differ, when to use them, and practical guidelines for implementation in the codebase. It focuses on concepts and developer-oriented usage with reference to typical scikit-learn APIs.
+
+## Overview
+
+- Partial Dependence Plot (PDP): For a target feature (or pair of features), PDP estimates the average model prediction as the feature(s) take on a grid of values, averaging over the distribution of all other features. It answers: "On average, how does the predicted outcome change as this feature varies, holding other features constant in expectation?"
+- Individual Conditional Expectation (ICE): Instead of averaging across all instances, ICE shows the model prediction for each individual observation as the target feature(s) vary. It reveals heterogeneity in feature effects and potential interactions with other features.
+
+A combined view (PD with ICE) helps you distinguish global effects from instance-specific behavior and interactions.
+
+---
+
+## Concepts and definitions
+
+- Let f be the trained regression/classification model, and X ∈ ℝ^(n_samples × n_features) be the feature matrix.
+- For a single feature j with value z, the partial dependence is:
+  - PD_j(z) = E_{X_{-j}}[ f( z, X_{-j} ) ]
+  - The expectation is approximated by averaging over the empirical distribution of X_{-j} in the data (or a subset thereof).
+- For ICE, for each instance i, with original features X_i, the curve as z varies is:
+  - ICE_i,j(z) = f( z, X_{i,-j} )
+- PD_j(z) is the mean of ICE_i,j(z) across i:
+  - PD_j(z) = (1/n) ∑_{i=1}^n ICE_i,j(z)
+
+Notes:
+- PD can obscure heterogeneous effects if there is strong interaction with other features.
+- ICE reveals heterogeneity and potential interactions by showing per-instance curves.
+- For two features (j, k), a two-way PD surface PD_{j,k}(z1, z2) can be plotted. ICE generalizes to ICE surfaces when visualizing multiple instances.
+
+---
+
+## Practical guidelines
+
+- When to use:
+  - Use PDP/ICE to interpret complex black-box models (e.g., ensembles, neural nets) on tabular data.
+  - Inspect both PD and ICE to identify average effects vs. heterogeneous effects and potential feature interactions.
+- What to watch out for:
+  - Extrapolation: PDP/ICE combine data from regions of the feature space that may be undersampled or unseen in X. This can lead to unreliable estimates.
+  - Feature distribution: PDP assumes a reasonable distribution of other features; highly skewed or correlated features can distort interpretation.
+  - C-ICE (Centered ICE): Center ICE curves by subtracting the ICE curve value at a reference point (often the minimum value) to focus on shapes rather than absolute levels.
+- Features and interactions:
+  - One-way PD/ICE for a single feature.
+  - Two-way PD/ICE for interactions between two features (requires a 2D grid).
+  - Higher-order PD is not commonly visualized directly due to interpretability limits.
+
+---
+
+## How to compute and plot (typical scikit-learn API)
+
+- Core idea:
+  - Select feature(s) to plot.
+  - Construct a grid of values for the feature(s).
+  - For each value (and each instance, for ICE), replace the feature(s) with the grid value and compute model predictions.
+  - For PD: average predictions across instances (or a large sample).
+  - For ICE: keep predictions for each instance separately.
+
+- Typical API (conceptual example using scikit-learn style):
+
+  - Fit a regression/classification model: estimator.fit(X, y)
+  - Use a PDP/ICE utility to compute and plot:
+    - One feature: from_estimator(estimator, X, features=[j], kind='both')
+    - Two features: from_estimator(estimator, X, features=[j, k], kind='both', grid_resolution=(20, 20))
+
+- Options to consider:
+  - grid_resolution: int for 1D plots, or (n1, n2) for 2D plots. Higher values give smoother curves but cost more compute.
+  - kind: 'average' for PD only, 'individual' for ICE only, or 'both' to show both PD and ICE (or 'auto' depending on version).
+  - X: input data used to define the distribution of the remaining features. The feature values are held constant at the grid values while other features are taken from X.
+  - percentiles / value range: you can constrain the grid to a specific percentile range of the feature(s) to avoid out-of-domain extrapolation.
+
+- Parallelization and performance:
+  - ICE/PD computations can be parallelized over grid points and/or instances.
+  - For large datasets, consider subsampling X or using a smaller grid to reduce compute time.
+
+- Visualization notes:
+  - PD curves (mean effects) are smooth representations of the average effect.
+  - ICE curves show per-instance behavior; multiple curves may cross, diverge, or reveal interactions.
+  - Centered ICE (C-ICE) can make shape comparisons easier by aligning curves at a reference value.
+
+---
+
+## Example: single feature PD and ICE on the Diabetes dataset
+
+- Objective: Inspect how the predicted response changes with the feature 'bmi' (index 2) for a regression model.
+
+Code (conceptual, using scikit-learn-style API):
+
+- Load data and train a model
+  - from sklearn.datasets import load_diabetes
+  - from sklearn.ensemble import RandomForestRegressor
+  - from sklearn.model_selection import train_test_split
+  - X, y = load_diabetes(return_X_y=True)
+  - X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=42)
+  - model = RandomForestRegressor(n_estimators=200, random_state=0, n_jobs=-1)
+  - model.fit(X_train, y_train)
+
+- Compute and plot PD/ICE for bmi (feature index 2)
+  - from sklearn.inspection import PartialDependenceDisplay
+  - pdp = PartialDependenceDisplay.from_estimator(
+      model, X_train, features=[2], grid_resolution=25, kind='both'
+    )
+  - The call renders or returns a display object; you can further customize or save the figure.
+
+- Optional: two features (interaction)
+  - PartialDependenceDisplay.from_estimator(model, X_train, features=[(2, 3)], grid_resolution=(25, 25))
+
+Notes:
+- Replace 2 with the actual index or use a mapping from your dataset to feature names if available.
+- If your dataset has named columns (e.g., a pandas DataFrame), you can pass feature names instead of indices.
+
+---
+
+## Example: CENTERED ICE for interpretability
+
+Code sketch (conceptual):
+
+- After computing ICE curves for a feature, center them around a baseline:
+  - baseline = ICE_i at z = z0 (e.g., z0 = min value of the feature)
+  - ICE_centered_i(z) = ICE_i(z) - ICE_i(z0)
+- Plot the centered ICE curves together with the PD curve to compare shapes without the absolute level bias.
+
+---
+
+## Caveats and limitations
+
+- Extrapolation risk: PD/ICE may rely on combinations of feature values not present in the training data, leading to unreliable estimates.
+- Correlated features: If features are highly correlated, PD may reflect joint effects rather than isolated effects of the target feature.
+- Number of features: PD/ICE are most informative for up to two features. Higher-dimensional grids are hard to visualize and interpret.
+- Model type: The interpretation is as good as the model’s ability to generalize; complex models may produce unintuitive PD/ICE if the training data is limited.
+
+---
+
+## API references (high level)
+
+- PartialDependenceDisplay (conceptual)
+  - from_estimator(estimator, X, features, grid_resolution=..., kind='average'|'individual'|'both')
+  - plot() / render() methods to visualize:
+    - One feature: 1D PD/ICE curve
+    - Two features: 2D PD surface or PD with ICE overlays
+
+- partial_dependence (alternative, older API)
+  - Computes PDP values for given features and returns grid values and averaged responses.
+  - Useful for programmatic access when a custom plotting routine is required.
+
+- Notes for developers:
+  - Ensure input validation for feature indices/names and grid shapes.
+  - For 2D PD, support either a reasonable grid (e.g., 20–40 points per axis) to balance speed and resolution.
+  - Provide options to center ICE and to plot both PD and ICE in a consistent layout.
+  - Document handling of categorical features (PD/ICE typically assume numeric grids; handle categoricals with appropriate encoding or by plotting category means).
+
+---
+
+If you need, I can tailor this documentation to the exact APIs and function names used in your current codebase (e.g., specific class/method names and parameter names) and add a versioned compatibility note.

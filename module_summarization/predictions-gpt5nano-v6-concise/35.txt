@@ -1,0 +1,150 @@
+w_states (command) — technical documentation
+----------------------------------------------
+
+Overview
+- Purpose: Display or manipulate WEST simulation states:
+  - Basis states (initial states used to generate segments)
+  - Target states (recycling/representative states for adaptive sampling)
+- Default behavior: show current basis/target states (dump to file or stdout).
+- Modes:
+  - show: display current states
+  - replace: replace current states with ones provided via files and/or command line
+  - append: append new target states to the existing set (appending basis states is not supported)
+
+Key concepts
+- Basis state: an initial state used to seed segments in the WEST simulation.
+- Target state: a recycling/reweighting state used to guide future segments.
+- Progress coordinates (pcoords): a low-dimensional representation used to characterize states in the target space and to assign coordinates to basis states.
+- State sources:
+  - --bstate-file, --tstate-file: read basis/target states from a file
+  - --bstate, --tstate: specify states on the command line
+- File formats:
+  - Basis states in BSTATE_FILE (via BasisState.states_to_file / BasisState.states_from_file)
+  - Target states in TSTATE_FILE (via TargetState.states_to_file / TargetState.states_from_file, if implemented in the full code)
+- Sums of basis-state probabilities: must sum to 1. If not, probabilities are rescaled automatically with a warning.
+
+Command-line interface
+- Entry point and options are implemented using argparse.
+- Default mode: show
+- Modes (mutually exclusive):
+  - --show: Display current basis/target states (and dump to files if requested)
+  - --append: Append provided states to the existing set for the next iteration
+  - --replace: Replace existing states with the provided ones for the next iteration
+- Basis state inputs:
+  - --bstate-file BSTATE_FILE: read basis states from file
+  - --bstate "label,probability[,auxref]": add a single basis state (may be repeated)
+- Target state inputs:
+  - --tstate-file TSTATE_FILE: read target states from file
+  - --tstate "label,pcoord0[,pcoord1[,...]]": add a single target state (may be repeated)
+
+Implementation notes (based on the code)
+- Environment and managers:
+  - A WestPA work manager is created via make_work_manager()
+  - The master process (work_manager.is_master) performs all I/O and data updates
+  - The data manager is opened in append mode (mode='a')
+  - The current iteration index is read from the data manager
+- Show mode:
+  - Basis states retrieved with data_manager.get_basis_states(n_iter)
+  - Target states retrieved with data_manager.get_target_states(n_iter)
+  - If found, they are written to files (or stdout) with:
+    - BasisState.states_to_file(...)
+    - TargetState.states_to_file(...)
+  - The output is prefixed with a header line indicating the iteration
+- Replace mode:
+  - If there are completed segments in the current iteration, the code advances to the next iteration
+  - Basis states:
+    - Read from file (--bstate-file) and/or from command line (--bstate)
+    - For each basis state input string, parse label, probability, and optional auxref
+    - Basis states are accumulated into a list
+    - If any basis states exist:
+      - Validate that the total probability sums to unity; if not, rescale and log a warning
+      - Assign progress coordinates to basis states via sim_manager.get_bstate_pcoords(basis_states, n_iter)
+      - Create the initial basis state group in the data manager for the current iteration
+      - Report the basis states to the simulator via sim_manager.report_basis_states(...)
+  - Target states:
+    - The provided excerpt ends during target-state handling, but the intended behavior mirrors the basis-state handling:
+      - Read target states from file and/or command line
+      - Validate and assign pcoords as needed
+      - Update the target-state data in the data manager
+      - Report target states to the simulator as appropriate
+- EPS and normalization:
+  - An epsilon (EPS) based check ensures the sum of basis-state probabilities is effectively 1
+  - If deviation exceeds len(basis_states) * EPS, probabilities are scaled to sum to 1
+- Progress coordinates:
+  - Basis states receive progress coordinates via get_bstate_pcoords to ensure they are positioned correctly in state space for simulation
+- Logging:
+  - Warnings (e.g., non-unity probability sum) are emitted using a logger named 'w_states'
+- Notes on constraints:
+  - Appending basis states is not supported due to normalization concerns
+  - To add basis states, use the show mode to export, edit, and then replace mode to apply changes
+
+Data model and file formats
+- Basis states:
+  - Represented by BasisState objects with attributes such as label, probability, and optional auxref
+  - File I/O:
+    - Writing: BasisState.states_to_file(basis_states, file_handle)
+    - Reading: BasisState.states_from_file(file_path)
+- Target states:
+  - Represented by TargetState objects with label and one or more progress coordinates (pcoords)
+  - File I/O:
+    - Writing: TargetState.states_to_file(target_states, file_handle)
+    - Reading: TargetState.states_from_file(file_path)
+- File formats are designed to be human-editable for use with --replace and --show workflows
+
+Usage scenarios (examples)
+- Show current states to stdout
+  - w_states
+- Show current states and dump to a file
+  - w_states --show --bstate-file=bstates.txt --tstate-file=tstates.txt
+- Replace basis states from a file and add a target state from the command line
+  - w_states --replace --bstate-file=bstates.txt --tstate "myTarget,labelCoordinate"
+- Append target states (basis appending is not allowed)
+  - w_states --append --tstate "newTarget,0.12,0.34"
+- Edit and replace basis states
+  - 1) w_states --show --bstate-file=bstates_to_edit.txt
+  - 2) Edit bstates_to_edit.txt to adjust labels/probabilities
+  - 3) w_states --replace --bstate-file=bstates_to_edit.txt
+
+Developer guidance and considerations
+- Integration points:
+  - BasisState and TargetState classes provide file I/O helpers (states_to_file, states_from_file)
+  - Data manager methods used: get_basis_states, get_target_states, get_seg_index, create_ibstate_group
+  - Simulation manager methods used: get_bstate_pcoords, report_basis_states
+- Error handling:
+  - Sum-of-probabilities check prevents malformed input from corrupting the simulation state
+  - EPS-based tolerance helps avoid floating-point drift
+- Extensibility:
+  - The target-state handling portion is not shown in the excerpt; expect a parallel workflow to the basis-state handling for reading, validating, and applying target states
+  - If new state representations or coordinate systems are introduced, adapt the parsing and pcoord assignment steps accordingly
+- Testing considerations:
+  - Validate show mode outputs with known-good state files
+  - Test replace mode with:
+    - Only basis states
+    - Only target states
+    - Both
+  - Ensure append behavior for targets correctly updates the next iteration without altering the current basis states
+
+Internal references (classes and methods)
+- BasisState
+  - BasisState.states_to_file(states, file_handle)
+  - BasisState.states_from_file(file_path)
+- TargetState
+  - TargetState.states_to_file(states, file_handle)
+  - TargetState.states_from_file(file_path)
+- westpa.core.segment.Segment
+  - SEG_STATUS_COMPLETE
+- sim_manager
+  - get_bstate_pcoords(basis_states, n_iter)
+  - report_basis_states(basis_states)
+- data_manager
+  - get_basis_states(n_iter)
+  - get_target_states(n_iter)
+  - get_seg_index(n_iter)
+  - create_ibstate_group(basis_states, n_iter)
+- EPS and logging
+  - EPS = machine epsilon for float64
+  - log = logging.getLogger('w_states')
+
+Notes
+- The documentation reflects the behavior described by the provided code excerpt. The complete file may contain additional details for target-state processing not shown here.
+- This command is intended for developers and advanced users integrating or testing WEST state-management workflows.

@@ -1,0 +1,249 @@
+# The Metadata Routing API
+
+This document describes The Metadata Routing API used by meta-estimators to propagate and route metadata to their nested estimators. The API enables developers to control which metadata is passed to sub-estimators, how routing is applied, and how to validate routing configurations.
+
+---
+
+## Overview
+
+In complex estimators, a single meta-estimator may manage one or more inner estimators. The Metadata Routing API provides:
+
+- A structured way to declare which pieces of metadata should be made available to sub-estimators.
+- Utilities to validate, enable/disable, and process routing configurations.
+- Mechanisms to map metadata through to nested estimators in a predictable and testable manner.
+
+Public pieces typically used by developers:
+
+- `MetadataRouter`
+- `MethodMapping`
+- `process_routing`
+- Internal helpers: `_raise_for_params`, `_routing_enabled`
+
+Note: The helpers prefixed with an underscore (e.g., `_raise_for_params`, `_routing_enabled`) are intended for internal use and may be subject to change. The public entry points are `MetadataRouter`, `MethodMapping`, and `process_routing`.
+
+---
+
+## Core concepts
+
+- **Metadata**: Any information about the data or estimation process that might be useful to sub-estimators. Examples include feature names, data shapes, target types, or flags indicating whether a sub-estimator supports certain parameters (like `sample_weight`).
+
+- **Routing configuration**: A specification that determines how metadata keys are routed to inner estimators or how they influence method calls (e.g., which inner estimator should receive which parameters).
+
+- **MetadataRouter**: The central construct that holds routing rules, validates them, and applies them during fit/predict workflows.
+
+- **MethodMapping**: A helper that describes how methods and their parameter flows should be translated from the parent to child estimators.
+
+- **process_routing**: A utility function to take a human-friendly routing specification and convert it into a form the router can efficiently apply.
+
+- **Internal helpers**:
+  - `_raise_for_params`: Validates that provided parameters are allowed for routing or for the target estimators.
+  - `_routing_enabled`: Indicates whether routing is currently enabled for a given configuration.
+
+---
+
+## Public API surface
+
+> This section documents the public objects you will typically interact with when using the Metadata Routing API in your meta-estimators.
+
+### MetadataRouter
+
+- Purpose: Encapsulates routing rules and provides the mechanism to apply them to sub-estimators.
+
+- Typical responsibilities:
+  - Accept a routing specification (e.g., mapping of metadata keys to targets).
+  - Validate the routing configuration.
+  - Help determine which metadata should be forwarded to which sub-estimators.
+  - Provide an interface to query whether routing is enabled.
+
+- Common usage patterns:
+  - Constructing a router from a routing specification.
+  - Querying the router to determine how to pass metadata to inner estimators during `fit`/`partial_fit`/`predict`.
+  - Integrating with a meta-estimator’s fitting logic to apply routing consistently.
+
+- Example (conceptual):
+  ```python
+  from sklearn.utils.metadata_routing import MetadataRouter, process_routing
+
+  # A routing specification (conceptual)
+  routing_spec = {
+      # pass this flag to inner estimator A
+      "has_sample_weight": ["estimator_A"],
+      # route dataset metadata to inner estimator B
+      "feature_names": ["estimator_B"],
+  }
+
+  router = MetadataRouter.from_routing(routing_spec)
+  # router is then consulted at fit/predict time to forward appropriate metadata
+  ```
+  Notes:
+  - The exact method names (e.g., `from_routing`) may vary by version; consult the API for your installation.
+  - The routing spec is validated and normalized by `process_routing` when constructing the router.
+
+### MethodMapping
+
+- Purpose: Describes how to map methods and their parameter flows between a parent (meta-estimator) and child estimators.
+
+- Typical usage:
+  - Define how `fit`, `predict`, and other relevant methods should propagate parameters to inner estimators.
+  - Use to ensure consistent behavior when the inner estimator supports or does not support certain parameters.
+
+- Example (conceptual):
+  ```python
+  mapping = MethodMapping(
+      parent_method="fit",
+      child_methods={"estimator_A": "fit", "estimator_B": "fit"},
+      pass_through_params=["X", "y", "sample_weight"],
+  )
+  router.add_method_mapping(mapping)
+  ```
+
+- Important: This is a helper to keep method-parameter propagation consistent across nested estimators.
+
+### process_routing
+
+- Purpose: Normalize and validate a routing specification.
+
+- Input: A human-friendly routing description (e.g., dictionaries, simple lists).
+
+- Output: A normalized routing object that can be consumed by `MetadataRouter`.
+
+- Typical use:
+  - Call once during router construction, or as part of a configuration step, to ensure routing is well-formed and unambiguous.
+
+- Example (conceptual):
+  ```python
+  raw_routing = {
+      "X": ["estimator_A"],
+      "y": ["estimator_B"],
+  }
+  router = MetadataRouter(process_routing(raw_routing))
+  ```
+
+- Note: The actual API for constructing the router from a routing description depends on your version of the library.
+
+### _raise_for_params
+
+- Purpose: Internal utility to validate that provided parameters are appropriate for routing.
+
+- Use case: Before passing parameters to sub-estimators, ensure that they are allowed and that routing will not attempt to pass unsupported arguments.
+
+- Access: Internal API; not intended for public use in user code. Rely on the public routing APIs.
+
+### _routing_enabled
+
+- Purpose: Internal check to determine whether routing is currently enabled for a given configuration.
+
+- Use case: Gate routing logic in meta-estimators so routing can be turned on/off (e.g., for backward compatibility or debugging).
+
+- Access: Internal API; typically used inside the routing logic or tests.
+
+---
+
+## How routing works in practice
+
+- A meta-estimator initializes a `MetadataRouter` with a routing configuration describing which metadata keys should be forwarded to which sub-estimators.
+- During fit (and related operations), the meta-estimator consults the router to determine:
+  - Which metadata keys to pass to each inner estimator.
+  - Whether to pass certain parameters (like `sample_weight`) to nested estimators.
+  - How to handle metadata that is not applicable to some sub-estimators.
+- The router uses `MethodMapping` to ensure method calls (e.g., `fit`, `partial_fit`, `predict`) are routed consistently to inner estimators.
+- If routing is disabled, the meta-estimator falls back to a default behavior (typically forwarding a minimal or globally applicable set of parameters).
+
+---
+
+## Example usage
+
+The following example demonstrates a conceptual workflow for a custom meta-estimator that routes metadata to two inner estimators based on their capabilities.
+
+- Goals:
+  - Forward `X` and `y` to inner estimators during `fit` as appropriate.
+  - Forward `sample_weight` to an inner estimator only if that estimator supports it.
+  - Forward metadata like `feature_names` to an estimator that can utilize it.
+
+Note: The exact API names may vary by version; adapt to your installed version and its documentation.
+
+```python
+from sklearn.base import BaseEstimator, MetaEstimatorMixin
+
+from sklearn.utils.metadata_routing import MetadataRouter, MethodMapping, process_routing
+
+class MyMetaEstimator(BaseEstimator, MetaEstimatorMixin):
+    def __init__(self, estimator_A, estimator_B, routing=None):
+        self.estimator_A = estimator_A
+        self.estimator_B = estimator_B
+        routing = routing or {
+            # metadata key -> target estimators
+            "X": ["estimator_A", "estimator_B"],
+            "y": ["estimator_B"],
+            "sample_weight": ["estimator_A"],
+            "feature_names": ["estimator_B"],
+        }
+        self._router = MetadataRouter(process_routing(routing))
+
+        # (Optionally) set up method mappings if needed
+        # self._method_mapping = MethodMapping(...)
+
+    def fit(self, X, y=None, sample_weight=None, **kwargs):
+        # Decide which metadata goes to which estimator
+        routed_params_A = {}
+        routed_params_B = {}
+
+        if self._router.is_enabled():
+            # Example (conceptual): route metadata to inner estimators
+            if "X" in self._router.route_keys_for("estimator_A"):
+                routed_params_A["X"] = X
+            if "sample_weight" in self._router.route_keys_for("estimator_A"):
+                routed_params_A["sample_weight"] = sample_weight
+
+            if "X" in self._router.route_keys_for("estimator_B"):
+                routed_params_B["X"] = X
+            if "y" in self._router.route_keys_for("estimator_B"):
+                routed_params_B["y"] = y
+            if "feature_names" in self._router.route_keys_for("estimator_B"):
+                routed_params_B["feature_names"] = getattr(X, "feature_names", None)
+
+        # Fit inner estimators with their routed parameters
+        self.estimator_A.fit(X, y, **routed_params_A)
+        self.estimator_B.fit(X, y, **routed_params_B)
+        return self
+```
+
+Important: This example is schematic. Adapt to the actual API exposed by your installed version of the library (names, methods, and routing semantics may differ).
+
+---
+
+## Best practices
+
+- Keep routing configurations explicit and well-documented to ease debugging and testing.
+- Validate routing early (e.g., at estimator construction time) using `process_routing` and `_raise_for_params`.
+- Prefer enabling routing for cross-validation and training-time flows where sub-estimators have different capabilities.
+- Provide clear tests that cover:
+  - Routing paths when sub-estimators support/do not support certain parameters.
+  - Behavior when routing is disabled.
+  - Edge cases for metadata keys that are optional or absent.
+
+---
+
+## Design notes
+
+- The API is designed to be lightweight and opt-in. If a meta-estimator does not require specialized routing, it can operate with a default, non-routing path.
+- Internal helpers (`_routing_enabled`, `_raise_for_params`) are provided to aid developers implementing robust routing logic but are not intended for direct use in standard user code.
+- The separation between routing configuration and method-mapping helps keep the meta-estimator logic clean and testable.
+
+---
+
+## Compatibility and versioning
+
+- The Metadata Routing API is part of the utility layer used by meta-estimators. When upgrading the library:
+  - Check for changes in `MetadataRouter`, `MethodMapping`, and `process_routing` signatures.
+  - Review any changes to internal helpers and their expected usage.
+- If you maintain backward compatibility, consider providing a deprecation path for any renamed or signature-changed routing utilities.
+
+---
+
+## References
+
+- Public API: `MetadataRouter`, `MethodMapping`, `process_routing`
+- Internal helpers (for advanced usage or testing): `_raise_for_params`, `_routing_enabled`
+
+If you need a tailored example aligned to your specific project structure or a concrete implementation snippet, share the exact version of the library you’re using and your meta-estimator design, and I can adapt the documentation accordingly.

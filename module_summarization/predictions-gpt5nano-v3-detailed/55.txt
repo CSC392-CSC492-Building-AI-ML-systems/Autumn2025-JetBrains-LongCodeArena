@@ -1,0 +1,153 @@
+Introduction
+------------
+
+The miscmodels module provides robust statistical modeling utilities that use the Student-t distribution for error terms. It includes a linear model with t-distributed errors and a univariate ARMA model with t-distributed errors. These are useful when data exhibit heavy tails or outliers, offering more robust inference for model parameters than traditional Gaussian-based approaches.
+
+Overview of the main components
+------------------------------
+
+- TLinearModel: A maximum likelihood estimator for a linear regression model with t-distributed errors. It relies on GenericLikelihoodModel and performs parameter estimation (including optional estimation of the degrees of freedom and scale).
+- TArma: A univariate ARMA model with t-distributed errors, derived from Arma. It provides likelihood-based estimation with an ancillary df and scale parameter, where the scale reflects a non-standard deviation (the variance is df/(df-2) * scale^2 for df > 2).
+
+Key concepts
+- Student-t errors: The error term y - Xβ is modeled as a t-distributed variable with df degrees of freedom and a scale parameter. The usual Gaussian assumption is relaxed to accommodate heavier tails.
+- Robustness: The t-distribution with heavier tails provides robustness to outliers and departures from normality in the error distribution.
+- Parameterization: For TLinearModel, the parameter vector consists of β (regression coefficients), df (degrees of freedom), and scale. Either df can be estimated, or fixed, depending on the model configuration.
+- Numerical differentiation: Aside from the special-case calculations, gradients and Hessians are computed numerically, making the models flexible but potentially slower to optimize.
+
+Class: TLinearModel
+--------------------
+
+Description
+~~~~~~~~~~~
+
+Maximum Likelihood Estimation of a Linear Model with t-distributed errors. This class serves as an example of using GenericLikelihoodModel for a custom likelihood specification. Most of the class is generic; gradients, Hessians, and resulting statistics are based on numerical differentiation, while the likelihood is model-specific.
+
+Inheritance
+~~~~~~~~~~
+- Inherits from GenericLikelihoodModel
+
+Core attributes
+~~~~~~~~~~~~~~
+- k_vars: number of exogenous variables (columns of exog)
+- fix_df: whether the degrees of freedom is fixed (default: False)
+- fixed_params: array of fixed parameter values (when df is fixed)
+- fixed_paramsmask: boolean mask indicating fixed parameters
+- k_params: total number of parameters (including df and scale when df is not fixed)
+
+Key methods
+~~~~~~~~~~
+- initialize(): Sets up model dimensions, fixed-parameter handling, and starting values.
+- _set_start_params(start_params=None, use_kurtosis=False): Determines sensible starting values for β, df, and scale. If df is not fixed, it can optionally use sample kurtosis to initialize df.
+- loglike(params): Returns the log-likelihood (negative log-likelihood wrapper).
+- nloglikeobs(params): Returns the per-observation negative log-likelihood (the core of the log-likelihood computation).
+- predict(params, exog=None): Predicts the linear predictor Xβ for given parameters.
+
+Usage notes
+~~~~~~~~~~~
+- Parameterization:
+  - params consists of [β, df, scale], where β are the regression coefficients.
+  - scale is constrained internally to its absolute value to avoid sign ambiguities.
+- df handling:
+  - If fix_df is False (default), df is estimated along with β and scale.
+  - If fix_df is a numeric value, df is fixed to that value and only β and scale are estimated.
+- Starting values:
+  - When df is not fixed, starting values for β are based on OLS estimates, with df and scale initialized to reasonable defaults (df ≈ 5, scale ≈ sqrt(residual variance)).
+- Likelihood computation:
+  - The per-observation log-likelihood uses the standard t-logpdf, adjusted for the scale parameter.
+
+Example
+-------
+
+Basic usage (fit a linear model with t-distributed errors)
+
+```python
+from statsmodels.miscmodels import TLinearModel  # adjust import path as appropriate
+
+# y: endogenous variable, X: design matrix of regressors (including intercept if desired)
+model = TLinearModel(y, X)
+result = model.fit(disp=0)
+
+print(result.summary())
+```
+
+Fixing the degrees of freedom (df)
+
+```python
+model = TLinearModel(y, X)
+model.fix_df = 4.0            # fix df to a known value
+result = model.fit(disp=0)
+
+print(result.summary())
+```
+
+Notes
+-----
+- The scale parameter is treated as positive via its absolute value to ensure a valid scale.
+- If df is fixed, the model estimates only β and scale.
+- The implementation is experimental and intended as an illustrative example of generic MLE usage with a t-distributed error model.
+
+Class: TArma
+------------
+
+Description
+~~~~~~~~~~~
+
+Univariate ARMA Model with t-distributed errors. This class inherits from Arma and overrides the log-likelihood components to account for a t-distributed error term. It provides likelihood-based estimation similar to the Gaussian ARMA but with heavier-tailed error modeling.
+
+Inheritance
+~~~~~~~~~~
+- Inherits from Arma
+
+Key methods
+~~~~~~~~~~
+- loglike(params): Returns the total log-likelihood (negative log-likelihood wrapper).
+- nloglikeobs(params): Per-observation negative log-likelihood for the t-distributed error model.
+
+Notes
+~~~~~
+- The implied error variance differs from scale, characterized by:
+  variance = df/(df-2) * scale^2  (for df > 2)
+- The scale parameter is treated as a positive magnitude (absolute value) during likelihood computations.
+- The ancillary parameter is assumed to be the last element of the parameter vector.
+
+Fit interface
+~~~~~~~~~~~~
+- fit_mle(order, start_params=None, method='nm', maxiter=5000, tol=1e-08, **kwds)
+  - order: (p, q) specification for ARMA(p, q)
+  - start_params: optional starting values
+  - method: optimization method (default 'nm' for Nelder-Mead)
+  - maxiter: maximum iterations
+  - tol: convergence tolerance
+
+Usage example
+-------------
+
+```python
+from statsmodels.miscmodels import TArma  # adjust import path as appropriate
+
+# y: univariate time series
+# order is a tuple (p, q)
+model = TArma(y, order=(2, 1))
+result = model.fit_mle(order=(2, 1))
+
+print(result.summary())
+```
+
+Notes and edge cases
+~~~~~~~~~~~~~~~~~~~~
+- Edge cases to consider include:
+  - df ≤ 0 or scale ≤ 0 (the implementation uses abs(scale) to enforce positivity, but users should provide sensible starting values).
+  - Fixed df scenarios where df is not estimable; ensure the provided fixed value is reasonable for the data.
+  - Numerical optimization may be sensitive to starting values; the default _set_start_params tends to rely on OLS baselines for β and heuristics for df/scale.
+- The classes are designed as educational examples illustrating the use of GenericLikelihoodModel and Arma with non-Gaussian errors. They may require adaptation for production-grade robustness and performance.
+
+References
+~~~~~~~~~~
+- Lange, Little, Taylor (1989). Robust Statistical Modeling Using the t Distribution. Journal of the American Statistical Association.
+- Notes in source code: “Starting values based on OLS,” “scale handling,” and “TODO: fixed parameter fixes” provide guidance for further enhancements.
+
+See also
+~~~~~~~~
+- GenericLikelihoodModel (Statsmodels) for building custom likelihood-based models.
+- Arma (Statsmodels TSA) for standard Gaussian ARMA modeling.

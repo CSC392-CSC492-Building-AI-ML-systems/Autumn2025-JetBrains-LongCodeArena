@@ -1,0 +1,214 @@
+# Quick Start
+
+This document provides a concise, developer-focused guide to getting started with Quick Start in toppra. It explains the core concepts, shows how to implement a minimal geometric path, how to generate gridpoints that cover the path, and how to proceed to time-parameterization (with placeholders for your solver integration). It also covers optional OpenRAVE integration via the RaveTrajectoryWrapper.
+
+---
+
+## Overview
+
+- Quick Start focuses on the geometric path representation used by toppra.
+- A geometric path is an object that, given a path position s, can return:
+  - The joint positions at s (order=0)
+  - The first-order derivatives (order=1)
+  - The second-order derivatives (order=2)
+- The core utility propose_gridpoints(path, ...) estimates a dense set of gridpoints along the path so that the interpolation error is kept within a threshold.
+- toppra can then be fed with a path, a set of path/gridpoints, and velocity/acceleration constraints to compute a time-parameterized trajectory.
+- If you use OpenRAVE, you can wrap OpenRAVE trajectories with RaveTrajectoryWrapper for compatibility.
+
+---
+
+## Prerequisites
+
+- Python 3.x
+- numpy
+- scipy
+- Optional: OpenRAVE (for OpenRAVE integration; used by RaveTrajectoryWrapper)
+
+---
+
+## Key Concepts
+
+- AbstractGeometricPath (interface)
+  - A geometric path that toppra consumes must implement:
+    - __call__(path_positions, order=0) -> np.ndarray
+      - order=0: joint positions at path_positions
+      - order=1: first derivatives
+      - order=2: second derivatives
+    - dof (property): degrees of freedom
+    - path_interval (property): (start, end) of the path in path parameter space
+    - waypoints (property): optional, may return a tuple of arrays (or None)
+- propose_gridpoints(path, max_err_threshold, max_iteration, max_seg_length)
+  - Generates a set of path positions (gridpoints) that cover the path.
+  - Uses a simple error estimate based on the second derivative of the path.
+  - Iteratively refines gridpoints until the estimated error is below the threshold or the maximum iterations are reached.
+- RaveTrajectoryWrapper
+  - Optional wrapper that adapts a OpenRAVE trajectory into a form compatible with toppra.
+  - Supports quadratic or cubic interpolations.
+
+---
+
+## Quick Start: Minimal Geometric Path and Gridpoints
+
+The following example shows how to create a minimal geometric path object (without requiring any particular base class import) that provides the interface toppra expects. You can paste this into your script and run it to generate gridpoints.
+
+Example: Minimal 2-DOF path (stand-alone)
+
+```python
+import numpy as np
+
+class SimplePath:
+    """A minimal 2-DOF path for demonstration.
+
+    - dof = 2
+    - Path s in [0, 1]
+    - Positions: [s, s^2]
+    - First derivatives: [1, 2s]
+    - Second derivatives: [0, 2]
+    """
+
+    @property
+    def path_interval(self):
+        return (0.0, 1.0)
+
+    @property
+    def dof(self):
+        return 2
+
+    @property
+    def waypoints(self):
+        # Not used for this quickstart; return None to indicate no explicit waypoints.
+        return None
+
+    def __call__(self, s, order=0):
+        s = np.asarray(s)
+
+        if order == 0:
+            # Position: [s, s^2]
+            return np.stack([s, s ** 2], axis=-1)
+        elif order == 1:
+            # First derivative: [1, 2s]
+            return np.stack([np.ones_like(s), 2 * s], axis=-1)
+        elif order == 2:
+            # Second derivative: [0, 2]
+            return np.stack([np.zeros_like(s), 2 * np.ones_like(s)], axis=-1)
+        else:
+            raise ValueError("Unsupported derivative order: {}".format(order))
+
+# Create the path instance
+path = SimplePath()
+
+# Generate gridpoints that cover the path
+gridpoints = __import__("numpy").array(
+    __import__("toppra.quickstart", fromlist=["propose_gridpoints"]).propose_gridpoints(
+        path,
+        max_err_threshold=1e-3,
+        max_iteration=20,
+        max_seg_length=0.25
+    )
+)
+
+print("Proposed gridpoints along the path:", gridpoints)
+```
+
+Notes:
+- The proposed gridpoints are a list/array of path positions in the interval [start, end].
+- The path object only needs two methods/properties: __call__ with the appropriate derivative orders, and path_interval.
+
+What this demonstrates:
+- How to implement a simple path that provides the necessary interface.
+- How to call propose_gridpoints to obtain a refined set of gridpoints.
+
+---
+
+## Quick Start: Integrating with TOPPRA (Time-Optimal Path Parameterization)
+
+Once you have a path (and its gridpoints), the typical next step is to feed the path and gridpoints into a time-parameterization solver along with joint velocity/acceleration constraints. The exact API may vary across toppra versions, but the general workflow is:
+
+- Define velocity and acceleration constraints for each DOF.
+- Create a TOPPRA solver instance with the constraints and your path.
+- Compute time stamps or a time-parameterized trajectory using the gridpoints.
+
+Pseudo-code (illustrative; adapt to your toppra version):
+
+```python
+# Pseudo-code for integrating with TOPPRA
+import toppra as ta
+
+# 1) Define path (as in the minimal example above)
+# path = SimplePath()
+
+# 2) Define constraints (example, adapt to your robot)
+# constraints = [
+#     ta.constraints.JointVelocityConstraint(max_velocities),
+#     ta.constraints.JointAccelerationConstraint(max_accelerations)
+# ]
+
+# 3) Create TOPPRA solver
+# solver = ta.TOPPRA(constraints, path, discretization_scheme='grid', gridpoints=gridpoints)
+
+# 4) Compute time stamps / trajectory
+# sol = solver.compute_trajectory(0.0, 0.0)  # start_time, start_velocity (example)
+```
+
+Important:
+- Replace the pseudo names with the actual API calls from your toppra version.
+- gridpoints can be supplied to influence the discretization used by the solver.
+
+If you prefer a fully concrete example, please share your toppra version or the exact API you are using, and I can tailor the snippet accordingly.
+
+---
+
+## Optional: OpenRAVE Integration (RaveTrajectoryWrapper)
+
+If you use OpenRAVE, you can wrap an OpenRAVE trajectory with RaveTrajectoryWrapper to expose it to toppra’s geometric path interface.
+
+Usage outline:
+
+```python
+# This requires OpenRAVE to be installed and FOUND_OPENRAVE to be True
+from toppra.quickstart import RaveTrajectoryWrapper
+
+# traj is an OpenRAVE trajectory (orpy.RaveTrajectory)
+# robot is the OpenRAVE robot object
+wrapped_path = RaveTrajectoryWrapper(traj, robot)
+
+# Now wrapped_path conforms to the same interface:
+# wrapped_path.path_interval, wrapped_path.__call__(s, order=0/1/2), etc.
+```
+
+Note:
+- RaveTrajectoryWrapper supports trajectories using quadratic or cubic interpolation.
+- If OpenRAVE is not installed, this wrapper is unavailable.
+
+---
+
+## Tips and Gotchas
+
+- Always expose path_interval correctly: the first and last path positions that bound the domain.
+- The gridpoint generation relies on a second-derivative-based error estimate. If your path has low curvature, expect fewer gridpoints; highly curved regions yield more.
+- If propose_gridpoints raises a ValueError about not finding a good gridpoint within max_iteration, increase max_iteration or adjust max_err_threshold and max_seg_length.
+- OpenRAVE integration requires the OpenRAVE installation and runtime environment to be available; otherwise use the stand-alone path wrapper.
+
+---
+
+## Reference
+
+- propose_gridpoints(path, max_err_threshold=1e-4, max_iteration=100, max_seg_length=0.05)
+  - Returns a list/array of gridpoints along path.path_interval.
+  - Uses path(s, order=2) to estimate curvature-based error.
+
+- AbstractGeometricPath
+  - Interface for geometric paths used by toppra.
+  - Must implement:
+    - __call__(path_positions, order=0) -> np.ndarray
+    - dof (property)
+    - path_interval (property)
+    - waypoints (property) => optional (may return None)
+
+- RaveTrajectoryWrapper
+  - Wraps an OpenRAVE trajectory for compatibility with the path interface.
+  - Supports trajectories with quadratic or cubic interpolation.
+
+---
+
+If you’d like, I can tailor this Quick Start documentation to your exact toppra version and provide a fully runnable end-to-end example (path, gridpoints, and a concrete TOPPRA call) using your environment details.

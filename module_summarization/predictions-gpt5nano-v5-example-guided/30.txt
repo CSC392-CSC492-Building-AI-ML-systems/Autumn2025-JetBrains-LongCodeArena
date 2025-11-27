@@ -1,0 +1,122 @@
+w_pdist Command
+=================
+
+Overview
+--------
+w_pdist calculates time-resolved, multi-dimensional probability distributions of WE datasets. It processes data from a source (defaulting to the progress coordinate dataset) and builds normalized histograms across iterations and dimensions. The resulting HDF5 file can be plotted with plothist or post-processed for analysis.
+
+Key Components
+--------------
+- WPDist (WestParallelTool)
+  - The main command implementation for w_pdist. It runs with parallel processing by default and uses a progress indicator and data reader to compute histograms over iterations.
+  - Source data selection, histogram binning, and output formatting are described by the tool's documentation string and implemented logic.
+- Helper functions
+  - isiterable(x): determines if an object is iterable.
+  - _remote_min_max(ndim, dset_dtype, n_iter, dsspec): determines data ranges across dimensions and iterations for auto-binning when explicit bin boundaries are not provided.
+  - _remote_bin_iter(iiter, n_iter, dsspec, wt_dsspec, initpoint, binbounds, ignore_out_of_range): computes a per-iteration, per-timepoint histogram, then normalizes it.
+- Data handling and processing
+  - Uses WESTDataReader to access dataset slices per iteration.
+  - Uses histnd and normhistnd from westpa.fasthist to accumulate and normalize multi-dimensional histograms.
+  - ProgressIndicatorComponent to report progress during parallel execution.
+
+Code excerpts (illustrative)
+----------------------------
+- Helper function signatures (from the source):
+  .. code-block:: python
+     def isiterable(x):
+         try:
+             iter(x)
+         except TypeError:
+             return False
+         else:
+             return True
+
+- Core per-iteration binning (illustrative snippet):
+  .. code-block:: python
+     def _remote_bin_iter(iiter, n_iter, dsspec, wt_dsspec, initpoint, binbounds, ignore_out_of_range):
+         iter_hist_shape = tuple(len(bounds) - 1 for bounds in binbounds)
+         iter_hist = np.zeros(iter_hist_shape, dtype=np.float64)
+         dset = dsspec.get_iter_data(n_iter)
+         npts = dset.shape[1]
+         weights = wt_dsspec.get_iter_data(n_iter)
+         dset = dset[:, initpoint:, :]
+         for ipt in range(npts - initpoint):
+             histnd(dset[:, ipt, :], binbounds, weights, out=iter_hist, binbound_check=False, ignore_out_of_range=ignore_out_of_range)
+         del weights, dset
+         normhistnd(iter_hist, binbounds)
+         return iiter, n_iter, iter_hist
+
+Usage
+-----
+Source data
+  - By default, the progress-coordinate dataset named "pcoord" is used.
+  - To extract custom data, use one of:
+    - --construct-dataset MODULE.FUNCTION
+      - The function is called as function(n_iter, iter_group) and must return indexable data
+        as [segment][timepoint][dimension].
+    - --dsspecs with dataset specifications
+      - Format: NAME[,file=FILENAME,slice=SLICE]
+      - Uses dataset NAME from FILENAME (default west.h5) and applies SLICE
+        (e.g., [0:2] to select a subset along the first axis).
+
+Histogram binning
+  - By default, 100 bins per dimension are used.
+  - -b/--bins accepts:
+    - A single integer N: N uniformly spaced bins per dimension.
+    - A comma-separated sequence N1,N2,...: N1 for dim 0, N2 for dim 1, etc.
+    - A list of lists [[B11,B12,...], [B21,B22,...], ...]: explicit bin boundaries per dimension.
+      - These can be non-uniform and are evaluated with Python’s eval, with np available.
+  - If explicit bin boundaries are provided, automatic min/max scans can be avoided.
+
+Output format
+-------------
+The output HDF5 file (default: pdist.h5) contains:
+- histograms
+  - Normalized histograms with the first axis corresponding to iteration, and remaining axes to the input data dimensions.
+- /binbounds_0, /binbounds_1, ...
+  - Datasets containing bin boundaries for each dimension.
+- /midpoints_0, /midpoints_1, ...
+  - Datasets containing bin midpoints for each dimension.
+- /n_iter
+  - Vector of iteration numbers corresponding to the stored histograms.
+
+Subsequent processing
+---------------------
+The produced pdist.h5 file can be plotted with plothist (see plothist --help). It can also be post-processed or converted to other formats as needed.
+
+Parallelization
+----------------
+w_pdist supports parallelized binning and input data reading. Parallel processing is enabled by default via the West parallel work managers. For simple cases, running serial (--serial) can be more efficient.
+
+Examples
+--------
+Basic usage (default data source, 100 bins per dimension):
+.. code-block:: console
+   w_pdist -o pdist.h5
+
+Custom binning (uniform 50 bins per dimension):
+.. code-block:: console
+   w_pdist -o pdist.h5 -b 50
+
+Custom, non-uniform bins for two dimensions:
+.. code-block:: console
+   w_pdist -o pdist.h5 -b [[0,1,2,5,10],[0,0.5,1.5,3]]
+
+Data source via custom function:
+.. code-block:: console
+   w_pdist --construct-dataset mymodule.MyDatasetFunction -o pdist.h5
+
+Data source via dataset specifications:
+.. code-block:: console
+   w_pdist --dsspecs pcoord,file=west.h5,slice=[0:2]
+
+Notes
+-----
+- The output is designed to be compatible with plothist and other post-processing tools.
+- The --serial option can be used to override default parallel execution when desired.
+
+Implementation details
+--------------------
+- The tool relies on WESTParallelTool infrastructure, IterRangeSelection, and ProgressIndicatorComponent to manage parallel execution and progress reporting.
+- During processing, per-iteration histograms are accumulated using histnd, then normalized with normhistnd.
+- Data range determination for auto-binning uses _remote_min_max, accounting for both floating-point and integer dtypes.

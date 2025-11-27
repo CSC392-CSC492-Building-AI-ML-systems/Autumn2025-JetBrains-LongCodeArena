@@ -1,0 +1,136 @@
+Introduction
+------------
+The w_fluxanl tool extracts flux measurements for predefined target states from a WEST data file, computes statistics such as mean flux and confidence intervals, and supports bootstrapping to account for correlations in the data. Outputs are organized per target and can be used to analyze flux behavior across iterations.
+
+Key concepts and data structures
+-------------------------------
+- fluxentry_dtype
+  - A structured dtype for flux records with fields:
+    - n_iter: iteration number (n_iter_dtype)
+    - flux: flux value (weight_dtype)
+    - count: event count (unsigned int)
+- target_index_dtype
+  - A structured dtype describing target statistics with fields:
+    - target_label: target name (string type vstr_dtype)
+    - mean_flux: mean flux (weight_dtype)
+    - mean_flux_ci_lb: lower bound of mean flux CI (weight_dtype)
+    - mean_flux_ci_ub: upper bound of mean flux CI (weight_dtype)
+    - mean_flux_correl_len: estimated correlation length (unsigned int)
+
+Primary functionality
+---------------------
+- extract_fluxes(iter_start=None, iter_stop=None, data_manager=None)
+  - Extracts flux values for iterations in [iter_start, iter_stop) from a WEST HDF5 file.
+  - Returns a dictionary mapping target names (or indices when names are unavailable) to a 1-D array of fluxentry_dtype.
+  - Behavior depends on file version:
+    - For file versions < 7, data is read from the recycling tables in each iteration.
+    - For file versions >= 7, importantly, fluxes are derived from the new_weights group in the iteration following recycling events.
+  - If a target is not observed in an iteration, or recycling data is not present, appropriate sentinel values are recorded.
+
+- _extract_fluxes_fileversion_lt_7(iter_start, iter_stop, data_manager)
+  - Internal helper for file versions < 7.
+  - Iteration range is split, and per-iteration recycling data is read.
+  - Handles two possible flux field names depending on file version (<5 uses 'weight', otherwise 'flux').
+  - Produces a per-target flux array for the iteration window.
+
+- _extract_fluxes_fileversion_7(iter_start, iter_stop, data_manager)
+  - Internal helper for file version 7 and newer.
+  - Iterates over iterations, collecting target states and corresponding recycled weights from the next iteration’s new_weights group.
+  - Builds a per-target flux array keyed by target label, initializing counts to -1 to denote unseen targets.
+  - Trims the result to the last contiguous run where the target is present (based on count values).
+
+- WFluxanlTool
+  - A WESTTool-based command object for the w_fluxanl CLI entry point.
+  - Core responsibilities:
+    - Provide data reader and iteration range options
+    - Manage output destinations (HDF5 groups) and per-target flux data
+    - Expose parameters controlling the bootstrap/evolution procedures (alpha, autocorrel_alpha, n_sets, do_evol, evol_step)
+  - Important attributes:
+    - data_reader: WESTDataReader instance for accessing data
+    - iter_range: IterRangeSelection instance for selecting iteration ranges
+    - output_h5file / output_group: targets for HDF5-based outputs
+    - target_groups: per-target output grouping
+    - fluxdata: in-memory storage for flux results
+    - alpha / autocorrel_alpha / n_sets: bootstrap-related parameters
+    - do_evol / evol_step: evolution-related controls
+  - Intended usage pattern:
+    - Construct the tool, configure input/output options, and invoke the command to produce flux analyses and diagnostics.
+
+Usage overview
+--------------
+- By default, extract_fluxes uses the current WEST data manager if none is provided, and iterates over [1, current_iteration) unless a specific range is given.
+- Results are returned as a dictionary:
+  - Keys: target labels when available, otherwise numerical indices
+  - Values: numpy arrays of dtype fluxentry_dtype with fields n_iter, flux, count
+
+Code references (illustrative)
+--------------------------------
+- Function to extract fluxes (high level entry point)
+  - def extract_fluxes(iter_start=None, iter_stop=None, data_manager=None):
+  - Returns: dict[str or int, np.ndarray of fluxentry_dtype]
+
+- Internal helpers (version-specific)
+  - def _extract_fluxes_fileversion_lt_7(iter_start, iter_stop, data_manager)
+  - def _extract_fluxes_fileversion_7(iter_start, iter_stop, data_manager)
+
+- Tool class
+  - class WFluxanlTool(WESTTool):
+    - Core methods:
+      - __init__(self): initialize readers and state
+      - add_args(self, parser): configure CLI arguments (data reader, iteration range, and output options)
+
+Important considerations and edge cases
+---------------------------------------
+- File version handling:
+  - Older file formats (< 7) store recycling information in iteration-specific tables; flux values are read directly from recycling groups.
+  - File version >= 7 stores recycling information in the following iteration’s new_weights group; the tool reconstructs fluxes by summing weights of recycled entries that target a given state.
+- Missing recycling data:
+  - If recycling data is unavailable for an iteration (KeyError on new_weights), that iteration is skipped for the corresponding target.
+- Target visibility:
+  - If a target is not observed in the current window, its “count” is set to -1 as a sentinel.
+  - After processing, the tool trims results to the last contiguous segment of valid data for each target.
+- Units:
+  - Output flux values are in units of per tau when using the version 7+ logic; to convert to familiar units, divide flux values and scale correlation lengths by the true tau.
+- Bootstrap and CI:
+  - The documentation notes Monte Carlo bootstrapping is used to estimate confidence intervals and handle correlations; actual bootstrap parameters are controlled via tool options (alpha, autocorrel_alpha, n_sets, etc.).
+- Output structure:
+  - The output is designed to be consumable for downstream analysis, including potential creation of per-target statistics (mean_flux, CIs, and correl_len) in target_index_dtype.
+
+Usage examples
+--------------
+Example 1: Basic flux extraction over a range
+```python
+from westpa.rc import get_data_manager
+from w_fluxanl import extract_fluxes
+
+# Optionally specify a data manager, otherwise uses the global WestPA data manager
+dm = get_data_manager()
+fluxes = extract_fluxes(iter_start=10, iter_stop=100, data_manager=dm)
+
+# Access flux data for a target named "A"
+A_flux = fluxes.get("A")
+print(A_flux['n_iter'], A_flux['flux'], A_flux['count'])
+```
+
+Example 2: Default behavior (current iteration only, using global data manager)
+```python
+from w_fluxanl import extract_fluxes
+
+fluxes = extract_fluxes()  # iter_start=1, iter_stop=current_iteration assumed
+# Iterate over targets
+for label, arr in fluxes.items():
+    print(label, arr['mean_flux'] if 'mean_flux' in arr.dtype.names else arr['flux'])
+```
+
+Example 3: Working with the WFluxanlTool (CLI usage)
+Note: The exact CLI options depend on the full implementation of add_args; the following illustrates intended usage pattern.
+```
+$ w_fluxanl -i 1 100 -o analysis_output
+```
+
+Notes
+-----
+- The tool is designed to operate seamlessly with WEST’s HDF5 data structure across different file versions.
+- For precise control of output formatting and location, use the command-line options exposed by WFluxanlTool (data reader settings, iteration range, and output targets).
+
+End of documentation

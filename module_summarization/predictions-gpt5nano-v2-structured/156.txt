@@ -1,0 +1,177 @@
+How Mitogen Works
+==================
+
+Overview
+--------
+
+Mitogen is a Python-based framework for efficient, scalable remote execution and orchestration. It relies on a small, self-contained bootstrap that is shipped to every remote context (slave) and a central routing/dispatch mechanism (the broker) that handles inter-process communication, module loading, function invocation, and lifecycle management.
+
+Key ideas:
+- A single broker coordinates communication between a master process and multiple slave contexts.
+- Communication is done through lightweight, structured messages encoded with small integer type codes and payloads.
+- A bootstrap snippet is sent to each new slave to initialize it with the minimum runtime required to understand and participate in Mitogen’s protocol.
+- Routes and IDs are allocated on demand; endpoints may be added, removed, or detached as contexts come and go.
+
+Core Concepts
+-------------
+
+- Broker and Router
+  - The broker is the central event loop that reads/writes messages over inter-process channels, dispatches them to the appropriate handler, and routes responses back to the requester.
+  - Routers maintain the mapping of routes (endpoints) to their handlers and are responsible for delivering messages to the correct remote or local context.
+
+- Channels and Routes
+  - Communication happens over channels, which are logical pathways between master and slave contexts.
+  - Routes enable the broker to direct messages to the right destination, and can be added or removed at runtime.
+
+- Bootstrapper
+  - When a new slave context is created, Mitogen sends a bootstrapping portion of code. This bootstrap code initializes the remote interpreter with the necessary minimal runtime to participate in Mitogen’s messaging protocol.
+
+- Message Protocol (wire format)
+  - Mitogen uses numeric codes to represent different message types. The receiver interprets these codes and processes the payload accordingly.
+  - A special value (IS_DEAD) signals that a sender cannot be reached or that a route has become invalid. Receiving IS_DEAD typically raises a channel-related error.
+
+- Module Loading and Remote Execution
+  - LOAD_MODULE and FORWARD_MODULE facilitate transmitting code and modules to remote contexts on demand.
+  - CALL_FUNCTION requests execution of a function in a remote context, enabling remote computation as if the function were local to the master.
+
+- Error Handling and Lifecycle
+  - The framework handles disconnections and routing failures gracefully, using IS_DEAD to denote unrecoverable states and trigger cleanup callbacks.
+
+Wire Protocol: Message Types
+----------------------------
+
+Mitogen defines a compact set of message type codes used by the broker to coordinate actions across contexts. The following codes appear in the transport protocol:
+
+- GET_MODULE = 100
+  - Request or retrieval of a module on the remote side.
+
+- CALL_FUNCTION = 101
+  - Request to invoke a function in the remote context with given arguments.
+
+- FORWARD_LOG = 102
+  - Forward a log message from a remote context to the master or logger.
+
+- ADD_ROUTE = 103
+  - Establish a new route between endpoints.
+
+- DEL_ROUTE = 104
+  - Remove an existing route.
+
+- ALLOCATE_ID = 105
+  - Allocate a new identifier for a route, channel, or similar resource.
+
+- SHUTDOWN = 106
+  - Request graceful shutdown of a context or the broker.
+
+- LOAD_MODULE = 107
+  - Transmit a module to a remote context for use there.
+
+- FORWARD_MODULE = 108
+  - Forward module code to a remote context (typically as part of a bootstrap or on-demand load).
+
+- DETACHING = 109
+  - Indicate that a context or route is detaching/being torn down.
+
+- CALL_SERVICE = 110
+  - Invoke a service call on the remote context.
+
+- STUB_CALL_SERVICE = 111
+  - A placeholder or stub implementation for a service call (used for optimization or compatibility).
+
+Note: These numeric codes define the protocol surface used by the broker and are intended for internal communication between master and slave contexts.
+
+IS_DEAD and Disconnection
+-------------------------
+
+- IS_DEAD = 999
+  - Special sentinel value used in reply_to fields to signal disconnection or the inability to route a message.
+  - Receipt typically results in a ChannelError and triggers cleanup of the affected route or context.
+  - Common scenarios:
+    - The remote receiver has disconnected or closed.
+    - A message cannot be delivered due to no existing route.
+    - A router is tearing down and needs to notify callbacks to clean up resources.
+
+Performance and Buffering
+-------------------------
+
+- Default I/O buffer size
+  - Mitogen uses a carefully chosen default buffer size for Side.read/Side.write and socketpair buffers. The recommended default is 128 KiB.
+  - Trade-offs:
+    - Too small: many IO loop iterations, higher CPU usage, lower throughput.
+    - Too large: larger kernel buffers and userspace buffers, higher memory usage and potential zero-copy overhead.
+  - Real-world considerations:
+    - Kernel pipe or socket buffer sizes vary by OS and configuration; tuning may be necessary for high-latency networks or constrained environments.
+    - When a mediator (e.g., SSH) or intermediary process is involved, its own buffering behavior will affect throughput.
+
+Bootstrap and Slave Contexts
+----------------------------
+
+- Bootstrap code
+  - Each new slave context receives a bootstrap payload during initialization.
+  - The bootstrap code minimizes the remote runtime footprint while enabling the context to participate in Mitogen’s messaging protocol immediately.
+  - This approach keeps the per-context footprint small and reduces startup overhead.
+
+- Slave lifecycle
+  - A slave starts, receives bootstrap code, and registers itself with the broker.
+  - The broker assigns routes/IDs as needed and enables remote function invocation, module loading, and logging.
+
+Usage Patterns
+--------------
+
+- Remote execution
+  - Master sends a CALL_FUNCTION message to a remote context to execute a Python function with given arguments, and a result or exception is returned via the broker.
+
+- Module distribution
+  - When a remote context requires a module it does not have, a LOAD_MODULE or FORWARD_MODULE message transfers the module code to the remote side.
+
+- Dynamic routing
+  - ADD_ROUTE and DEL_ROUTE allow the system to adapt to changing topologies, such as adding/removing slaves or reorganizing communication paths.
+
+Illustrative Workflow (Conceptual)
+----------------------------------
+
+1. A slave context is created; Mitogen sends bootstrap code to initialize it.
+2. The broker allocates an ID for the new route and registers the endpoint.
+3. A CALL_FUNCTION message is sent to the remote context to execute a function.
+4. The function executes on the slave; the result or exception is sent back as a response via the broker.
+5. If the remote context disconnects, the receiver sees IS_DEAD and triggers appropriate cleanup.
+
+Example: Conceptual Remote Function Call
+----------------------------------------
+
+Note: This is a simplified illustration to convey the flow; actual usage uses Mitogen’s high-level API.
+
+- Master side (conceptual):
+  - request = {
+      'type': CALL_FUNCTION,     # 101
+      'route_id': 42,
+      'function': 'os.path.exists',
+      'args': ['/etc/passwd'],
+      'kwargs': {}
+    }
+  - broker.send(request)
+
+- Slave side (conceptual):
+  - Upon receiving CALL_FUNCTION, resolve os.path.exists and execute with provided args.
+  - Send back result or exception to the master through the broker.
+
+- Master receives:
+  - result = True or raises an exception if the function failed.
+
+Implementation Notes
+--------------------
+
+- The module containing this protocol is designed to be lightweight and to serve as the bootstrap implementation sent to slaves.
+- The codebase is written with Python 2/3 compatibility in mind, with careful handling of type differences for strings and bytes.
+- The architecture emphasizes minimal per-context footprint, robust routing, and efficient IO to support scalable orchestration.
+
+Further Reading
+--------------
+
+- For a deeper dive, consult the broker, router, and channel components in theMitogen codebase, focusing on:
+  - Message handling loops and routing logic
+  - Module loading and remote execution pathways
+  - Lifecycle management and error handling
+
+End of How Mitogen Works
+------------------------

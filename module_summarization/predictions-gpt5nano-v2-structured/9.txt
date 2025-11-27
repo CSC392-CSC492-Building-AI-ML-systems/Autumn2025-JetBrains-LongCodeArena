@@ -1,0 +1,158 @@
+Using timers
+============
+
+Overview
+--------
+
+Timers provide a simple way to execute functions after a delay or at regular intervals. They are useful for deferring work, polling for changes, implementing timeouts, or rate-limiting actions when interacting with an ftrack server or other external services.
+
+This guidance demonstrates using Python’s threading.Timer for one-shot timers, and a small helper for repeating timers. Timers run in their own threads, so callback code should be thread-safe and should not directly manipulate UI components or other non-thread-safe resources.
+
+One-shot timers
+---------------
+
+A one-shot timer runs a function once after a specified delay.
+
+Key points:
+- Use threading.Timer(delay_seconds, function, args=None, kwargs=None)
+- Start with .start()
+- Cancel with .cancel() if the timer has not yet executed
+
+Example: schedule a function to run after 10 seconds
+
+.. code-block:: python
+
+   import threading
+   import time
+
+   def notify(message):
+       print("Notification:", message, "at", time.ctime())
+
+   # Schedule the notification to run in 10 seconds
+   t = threading.Timer(10.0, notify, args=("Check the server status",))
+   t.start()
+
+   # If needed, cancel before it runs
+   # t.cancel()
+
+Notes:
+- The callback runs in a separate thread.
+- Do not interact with UI from this thread; marshal results back to the main thread if required.
+
+Repeating timers
+---------------
+
+Python’s Timer is inherently one-shot. To perform an action at fixed intervals, schedule the next call from within the callback, or implement a small repeating-timer helper.
+
+Example: simple repeating timer (every 60 seconds)
+
+.. code-block:: python
+
+   import threading
+   import time
+
+   class RepeatingTimer(object):
+       def __init__(self, interval, function, *args, **kwargs):
+           self.interval = interval
+           self.function = function
+           self.args = args
+           self.kwargs = kwargs
+           self._stop_event = threading.Event()
+           self._thread = threading.Thread(target=self._run)
+           self._thread.daemon = True
+
+       def _run(self):
+           while not self._stop_event.wait(self.interval):
+               self.function(*self.args, **self.kwargs)
+
+       def start(self):
+           self._thread.start()
+
+       def stop(self):
+           self._stop_event.set()
+           self._thread.join()
+
+   def poll_status():
+       print("Polling at", time.ctime())
+
+   rt = RepeatingTimer(60.0, poll_status)
+   rt.start()
+
+   # To stop later:
+   # rt.stop()
+
+Notes:
+- The repeating timer runs in a daemon thread. Ensure proper shutdown to avoid lingering threads.
+- Like one-shot timers, callbacks execute on a separate thread; avoid unsafe cross-thread interactions.
+
+Scheduling at a specific time
+-----------------------------
+
+If you need a timer to fire at a particular wall-clock time, compute the delay from now to the target time and create a one-shot timer with that delay.
+
+Example: schedule a task for a specific point in time using arrow for time arithmetic
+
+.. code-block:: python
+
+   import threading
+   import time
+   import arrow
+
+   def perform_task():
+       print("Task executed at", time.ctime())
+
+   now = arrow.utcnow()
+   target = now.shift(minutes=15)  # 15 minutes from now
+   delay = max((target - now).total_seconds(), 0.0)
+
+   t = threading.Timer(delay, perform_task)
+   t.start()
+
+Notes:
+- If the computed delay is negative, the task will run immediately.
+
+Lifecycle and cleanup
+---------------------
+
+- Always ensure timers are canceled or properly shut down when your application or session ends.
+- Use atexit to cancel pending timers if your program exits unexpectedly.
+
+Example: register cleanup on exit
+
+.. code-block:: python
+
+   import atexit
+   t = threading.Timer(60.0, lambda: print("Timer fired"))
+   t.start()
+   atexit.register(t.cancel)
+
+Best practices
+--------------
+
+- Use daemon threads for timers if appropriate for your application.
+- Do not perform long-running or blocking operations in timer callbacks; defer work to worker threads or the main thread as needed.
+- When integrating with ftrack sessions, consider tying timer lifecycles to the session lifecycle (start timers after session creation and cancel them on session close).
+
+Use cases in the ftrack context
+-------------------------------
+
+- Deferred API calls: schedule updates to be sent to the server after a short delay to coalesce rapid events.
+- Polling and status checks: periodically poll the server for status without blocking the main thread.
+- Timeouts and retries: implement timeouts for network requests or retry logic with backoff.
+
+See also
+--------
+
+- Python threading.Timer: https://docs.python.org/3/library/threading.html#timer-objects
+- atexit: https://docs.python.org/3/library/atexit.html
+- arrow: https://github.com/crsmithdev/arrow
+- General threading and concurrency guidelines for ftrack integrations
+
+Code references (conceptual)
+----------------------------
+
+- One-shot timer usage pattern
+- Repeating timer helper to implement periodic tasks
+- Time calculations with arrow for scheduling at specific times
+
+This provides a practical, self-contained guide to using timers in Python, with patterns that align with typical ftrack API usage without depending on a separate timer module in the project.

@@ -1,0 +1,264 @@
+# events.rst — SQLAlchemy ORM Instrumentation: Class Management and Events
+
+## Overview
+This module defines SQLAlchemy's class instrumentation system. It handles registration of user classes for state tracking and coordinates interaction between per-class and per-instance instrumentation. It is primarily an internal component of the ORM, and is designed to be extended or customized via the external sqlalchemy.ext.instrumentation package for global or per-class instrumentation strategies.
+
+The system interacts closely with state.py and attributes.py to establish per-instance and per-class attribute instrumentation, and it can be customized through the instrumentation extension to alter resolution and behavior.
+
+Key class: ClassManager
+
+- Tracks state information at the class level.
+- Manages per-class instrumentation data, init hooks, base-class inheritance of instrumentation, and event dispatch integration.
+
+References to internal concepts:
+- Dispatcher and InstanceEvents integration
+- Per-class registry of instrumented attributes
+- Deferred/expired attribute loading (legacy naming)
+- Initialization hooks and original __init__ tracking
+- Warnings for potential memory leaks when __del__ is defined
+
+## Key Components
+
+- ClassManager
+  - Purpose: Tracks state information at the class level and coordinates instrumentation for a particular user class.
+  - Core attributes:
+    - MANAGER_ATTR and STATE_ATTR: defaults used to store manager and state metadata.
+    - _state_setter: static setter for the STATE_ATTR.
+    - expired_attribute_loader: function for loading attributes that were deferred/expired.
+    - init_method and original_init: hooks related to class initialization.
+    - factory: optional factory for creating managers.
+    - declarative_scan: optional weak reference to mapper configuration for declarative systems.
+    - registry: central registry for managers.
+    - class_: the user class being instrumented.
+    - _bases: list of ClassManager instances corresponding to base classes, enabling inheritance of instrumentation.
+  - Key methods:
+    - __init__(self, class_): initializes internal structures, discovers bases, wires events, and checks for __del__ to warn about memory leaks.
+      - Example excerpt:
+        - Initializes core attributes and computes _bases from the class's bases, updating from each base manager.
+        - Registers new class manager instance with the InstanceEvents dispatch.
+        - Propagates updates to base managers’ dispatch.
+        - Warns if __del__ is defined on the class.
+    - _update_state(self, finalize=False, mapper=None, registry=None, declarative_scan=None, expired_attribute_loader=None, init_method=None): updates internal state with optional mapper/registry/declarative_scan/loader/init_method, and optionally finalizes instrumentation.
+      - If finalize is True, finalizes instrumentation via _finalize().
+      - If an init_method is provided, stores it for later use during instrumentation.
+    - _finalize(self): marks the manager as finalized, initializes instrumentation components, and engages the instrumentation factory.
+  - Deprecation note:
+    - deferred_scalar_loader is a deprecated alias for expired_attribute_loader. Accessing or setting deferred_scalar_loader maps to expired_attribute_loader, with a deprecation warning.
+      - Example (alias):
+        @property
+        @util.deprecated(
+            "1.4",
+            message="The ClassManager.deferred_scalar_loader attribute is now "
+                    "named expired_attribute_loader",
+        )
+        def deferred_scalar_loader(self):
+            return self.expired_attribute_loader
+        @deferred_scalar_loader.setter
+        @util.deprecated(
+            "1.4",
+            message="The ClassManager.deferred_scalar_loader attribute is now "
+                    "named expired_attribute_loader",
+        )
+        def deferred_scalar_loader(self, obj):
+            self.expired_attribute_loader = obj
+
+- _ExpiredAttributeLoaderProto (Protocol)
+  - Defines the signature for a loader function used to load "expired" attributes that should be reloaded or refreshed for a given state.
+  - Expected call signature:
+    def __call__(
+        self,
+        state: state.InstanceState[Any],
+        toload: Set[str],
+        passive: base.PassiveFlag,
+    ) -> None
+
+- _ManagerFactory (Protocol)
+  - Defines a factory protocol for creating a ClassManager given a class type:
+    def __call__(self, class_: Type[_O]) -> ClassManager[_O]:
+
+- DEL_ATTR
+  - A sentinel symbol used by the instrumentation system to represent a deleted attribute in internal state tracking.
+
+- dispatch and registry
+  - dispatch: EventTarget-backed dispatch for a ClassManager; connects with InstanceEvents to propagate class-level instrumentation events.
+  - registry: Central registry type used to track and access ClassManager instances.
+
+- declarative_scan
+  - Optional weak reference to a MapperConfig object used by declarative configurations to share instrumentation context.
+
+- init_method and original_init
+  - init_method: optional user-provided initialization hook for the class.
+  - original_init: preserves the original __init__ method to allow instrumentation to augment or wrap initialization.
+
+- Other notes
+  - The module wires instrumentation state into the class hierarchy by inspecting base classes and MRO, combining base managers into the current class’s instrumentation context.
+  - It issues a warning if a class defines __del__ due to potential memory leaks from reference cycles created by instrumentation.
+
+Code excerpt highlights
+- ClassManager declaration and core attributes:
+  class ClassManager(
+      HasMemoized,
+      Dict[str, "QueryableAttribute[Any]"],
+      Generic[_O],
+      EventTarget,
+  ):
+      """Tracks state information at the class level."""
+
+      dispatch: dispatcher[ClassManager[_O]]
+
+      MANAGER_ATTR = base.DEFAULT_MANAGER_ATTR
+      STATE_ATTR = base.DEFAULT_STATE_ATTR
+
+      _state_setter = staticmethod(util.attrsetter(STATE_ATTR))
+
+      expired_attribute_loader: _ExpiredAttributeLoaderProto
+      "previously known as deferred_scalar_loader"
+
+      init_method: Optional[Callable[..., None]]
+      original_init: Optional[Callable[..., None]] = None
+
+      factory: Optional[_ManagerFactory]
+
+      declarative_scan: Optional[weakref.ref[_MapperConfig]] = None
+
+      registry: _RegistryType
+
+      if not TYPE_CHECKING:
+          # starts as None during setup
+          registry = None
+
+      class_: Type[_O]
+
+      _bases: List[ClassManager[Any]]
+
+- __init__ overview (highlights):
+  def __init__(self, class_):
+      self.class_ = class_
+      self.info = {}
+      self.new_init = None
+      self.local_attrs = {}
+      self.originals = {}
+      self._finalized = False
+      self.factory = None
+      self.init_method = None
+
+      self._bases = [
+          mgr
+          for mgr in cast(
+              "List[Optional[ClassManager[Any]]]",
+              [
+                  opt_manager_of_class(base)
+                  for base in self.class_.__bases__
+                  if isinstance(base, type)
+              ],
+          )
+          if mgr is not None
+      ]
+
+      for base_ in self._bases:
+          self.update(base_)
+
+      cast(
+          "InstanceEvents", self.dispatch._events
+      )._new_classmanager_instance(class_, self)
+
+      for basecls in class_.__mro__:
+          mgr = opt_manager_of_class(basecls)
+          if mgr is not None:
+              self.dispatch._update(mgr.dispatch)
+
+      self.manage()
+
+      if "__del__" in class_.__dict__:
+          util.warn(
+              "__del__() method on class %s will "
+              "cause unreachable cycles and memory leaks, "
+              "as SQLAlchemy instrumentation often creates "
+              "reference cycles.  Please remove this method." % class_
+          )
+
+- _update_state signature (highlights):
+  def _update_state(
+      self,
+      finalize: bool = False,
+      mapper: Optional[Mapper[_O]] = None,
+      registry: Optional[_RegistryType] = None,
+      declarative_scan: Optional[_MapperConfig] = None,
+      expired_attribute_loader: Optional[
+          _ExpiredAttributeLoaderProto
+      ] = None,
+      init_method: Optional[Callable[..., None]] = None,
+  ) -> None:
+      if mapper:
+          self.mapper = mapper  # type: ignore[assignment]
+      if registry:
+          registry._add_manager(self)
+      if declarative_scan:
+          self.declarative_scan = weakref.ref(declarative_scan)
+      if expired_attribute_loader:
+          self.expired_attribute_loader = expired_attribute_loader
+
+      if init_method:
+          assert not self._finalized, (
+              "class is already instrumented, "
+              "init_method %s can't be applied" % init_method
+          )
+          self.init_method = init_method
+
+      if not self._finalized:
+          self.original_init = (
+              self.init_method
+              if self.init_method is not None
+              and self.class_.__init__ is object.__init__
+              else self.class_.__init__
+          )
+
+      if finalize and not self._finalized:
+          self._finalize()
+
+- _finalize highlights:
+  def _finalize(self) -> None:
+      if self._finalized:
+          return
+      self._finalized = True
+
+      self._instrument_init()
+
+      _instrumentation_factory
+
+## Usage
+
+- This module is intended for internal ORM use. Application developers typically do not instantiate or interact with ClassManager directly.
+- For advanced customization of instrumentation, use the external SQLAlchemy instrumentation extension:
+  - sqlalchemy.ext.instrumentation
+  - This extension provides means to build and specify alternate instrumentation forms (per-class or global).
+
+Code references from the module illustrate internal wiring of initialization, base-class propagation, and deprecation handling:
+- Deferred scalar loader alias (deprecated):
+  The alias deferred_scalar_loader maps to expired_attribute_loader with a deprecation warning, ensuring backward compatibility while guiding users toward the new name.
+
+- __del__ warning:
+  Instrumented classes that define __del__ may create reference cycles; a warning is issued during ClassManager initialization.
+
+## Details
+
+- Internal integration
+  - The system wires ClassManager instances into the ORM’s event model via an InstanceEvents dispatch, enabling per-class event handling and state tracking.
+
+- Inheritance and bases
+  - The manager collects base managers for each base class and propagates updates to ensure consistent instrumentation across an inheritance hierarchy.
+
+- Declarative scanning
+  - The declarative_scan reference enables integration with declarative mapper configurations, allowing richer instrumentation contexts for declarative setups.
+
+- Initialization hooks
+  - The system supports custom initialization hooks (init_method) and preserves the original __init__ to allow instrumentation to wrap initialization semantics safely.
+
+- Deprecation strategy
+  - Backward-compatibility maintained via deprecated alias (deferred_scalar_loader) with a clear migration path to expired_attribute_loader.
+
+- Extensibility
+  - The class infrastructure is designed to be extended by the sqlalchemy.ext.instrumentation package to customize resolution mechanics and instrumentation behavior beyond the ORM’s defaults.
+
+- References
+  - See the module docstring for history and notes on moving instrumentation support to the external extension, enabling more comprehensive customization.
