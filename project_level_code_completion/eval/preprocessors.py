@@ -196,3 +196,63 @@ class StarcoderPreprocessor(HFPreprocessor):
         self.meta_info_sep_symbol = 'METASEP'
         self.extension = '.py'
         self._tokenizer: AutoTokenizer
+
+
+class TextOnlyPreprocessor(PreprocessorBase):
+    """Preprocessor that composes text context/completion but skips tokenization entirely.
+
+    It writes out the same fields as HF preprocessor, but leaves `context_len` and `model_input` as None.
+    This is suitable for OpenAI-based generation where we don't need tokenizer IDs.
+    """
+    def compose_context(self, datapoint: DatapointBase) -> str:
+        # Fallback composition if no composer provided
+        context = datapoint.context_dict
+        repo_name = datapoint.repo_name
+        meta_sep = 'METASEP'
+        composed_content = [path + meta_sep + content for path, content in context.items()]
+        return repo_name + ''.join(composed_content)
+
+    def compose_completion(self, datapoint: DatapointBase) -> str:
+        completion = datapoint.completion_dict
+        meta_sep = 'METASEP'
+        composed_content = [path + meta_sep + content for path, content in completion.items()]
+        return ''.join(composed_content)
+
+    def prepare_model_input_parallel(self, num_workers=1, dataset_path=None):
+        """Compose text fields but also preserve original dicts for better grounding (file paths).
+
+        We bypass tokenization entirely. Each saved datapoint will include:
+        - repo_id, repo_name, completion_lines
+        - context_dict, completion_dict (to expose file paths)
+        - context (composed), completion (composed)
+        - context_len=None, model_input=None
+        """
+        # Build composed fields directly from raw data to retain dicts
+        if os.path.exists(dataset_path):
+            os.remove(dataset_path)
+
+        list_to_save: list[dict] = []
+        for raw_dp in tqdm(self.data, desc="Composing text (OpenAI path)"):
+            item: dict = {
+                'repo_id': raw_dp.repo_id,
+                'repo_name': raw_dp.repo_name,
+                'completion_lines': raw_dp.completion_lines,
+                'context_dict': raw_dp.context_dict,
+                'completion_dict': raw_dp.completion_dict,
+            }
+            # Compose strings using provided composers or defaults
+            if self.context_composer is None:
+                item['context'] = self.compose_context(raw_dp)
+            else:
+                item['context'] = self.context_composer(raw_dp)
+            if self.completion_composer is None:
+                item['completion'] = self.compose_completion(raw_dp)
+            else:
+                item['completion'] = self.completion_composer(raw_dp)
+
+            item['context_len'] = None
+            item['model_input'] = None
+            list_to_save.append(item)
+
+        with open(dataset_path, 'w') as json_file:
+            json.dump(list_to_save, json_file)

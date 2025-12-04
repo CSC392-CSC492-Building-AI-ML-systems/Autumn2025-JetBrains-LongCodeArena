@@ -24,6 +24,7 @@ class ExampleGenerationModel(ABC):
         for name in project_apis:
             corpus.append(split_identifier(name))
 
+
         bm25 = BM25Okapi(corpus)
 
         clean_instruction = "".join(c for c in instruction if c.isalnum() or c == " ").lower().split(" ")
@@ -38,4 +39,4 @@ class ExampleGenerationModel(ABC):
             + "You can find the following APIs from the library helpful:\n"
             + ", ".join(predictions)
         )
-        return self.get_prompt(bm25_instruction)
+        return self.get_prompt(bm25_instruction), predictions
