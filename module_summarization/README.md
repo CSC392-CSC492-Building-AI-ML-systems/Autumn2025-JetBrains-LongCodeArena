@@ -25,6 +25,24 @@ In order to generate your predictions, add your parameters in the [configs](conf
 
 The script will generate predictions and put them into the `save_dir` directory from config.
 
+## 🎯 Prompt Engineering
+
+**NEW**: We now support multiple prompt versions to improve generation quality! 
+
+To test different prompts and improve documentation quality:
+
+**Available versions**: 7 different prompt templates (v1-v7) with various improvements
+### Example: Test a different prompt
+
+```bash
+# Edit your config to include prompt_version
+echo "prompt_version: v7_quality_focused" >> configs/config_openai.yaml
+
+# Run generation
+poetry run python chatgpt.py --config="configs/config_openai.yaml"
+```
+You can change run_all_versions.sh to help you run multiple version.
+
 #### Metrics 
 
 To compare predicted and ground truth texts, we introduce the new metric based on LLM as an assessor. Our approach involves feeding the LLM with relevant code and two versions of documentation: the ground truth and the model-generated text. To mitigate variance and potential ordering effects in model responses, we calculate the probability that the generated documentation is superior by averaging the results of two queries:
