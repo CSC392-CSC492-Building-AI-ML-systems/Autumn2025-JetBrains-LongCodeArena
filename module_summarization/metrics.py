@@ -101,7 +101,7 @@ def get_bert_scores(dataset, direct, model_name):
     
 
 def solo_bert_score(pred, gold, model_name="roberta-large"):
-    P, R, F1 = bert_score([pred], [gold], lang="en", model_type=model_name)
+    P, R, F1 = bert_score([pred], [gold], lang="en", model_type=model_name, use_fast_tokenizer=True)
     return float(F1[0])
  
 
@@ -145,18 +145,20 @@ if __name__ == '__main__':
                     print(f'Skipping {save_dir} - directory does not exist')
                     continue
                 
-                model_metric = np.mean(
-                    score_one_model(
-                        scorer, dataset, save_dir, 
-                        max_context_toks, tokenizer, True
-                    )
-                )
+                # model_metric = np.mean(
+                #     score_one_model(
+                #         scorer, dataset, save_dir, 
+                #         max_context_toks, tokenizer, True
+                #     )
+                # )
                 
                 mean_bert_score = np.mean(
                     get_bert_scores(dataset, save_dir, model_name)
                 )
                 
-                path2metric[save_dir] = {"model_score": model_metric, "bert_score": mean_bert_score}
+                # path2metric[save_dir] = {"model_score": model_metric, "bert_score": mean_bert_score}
+                path2metric[save_dir] = {"bert_score": mean_bert_score}
+
 
     with open('result_gold.json', 'w') as f:
         json.dump(path2metric, f)
