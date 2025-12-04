@@ -35,7 +35,6 @@ def evaluate(model: ExampleGenerationModel, metrics: list[Metric], data_path: st
     print(f"Evaluating model {model.name()}")
 
     dataset = load_dataset("JetBrains-Research/lca-library-based-code-generation", split="test")
-    n_samples = len(dataset)
 
     evaluation_result_path = os.path.join(data_path, model.name())
     metadata_path = os.path.join(evaluation_result_path, "metadata.json")
@@ -45,16 +44,16 @@ def evaluate(model: ExampleGenerationModel, metrics: list[Metric], data_path: st
     scores = defaultdict(list)
 
     for i, sample in tqdm(enumerate(dataset)):
-        # generated_file = os.path.join(evaluation_result_path, f"{i}.py")
-        # if os.path.exists(generated_file):
-        #     with open(generated_file, "r", encoding="utf-8") as fin:
-        #         generated_example = fin.read()
+        generated_file = os.path.join(evaluation_result_path, f"{i}.py")
+        if os.path.exists(generated_file):
+            with open(generated_file, "r", encoding="utf-8") as fin:
+                generated_example = fin.read()
             
-            
-        # else:
-        generated_example = model.generate(sample["instruction"], sample["project_defined_elements"])
-        # with open(generated_file, "w", encoding="utf-8") as fout:
-        #     fout.write(generated_example)
+        else:
+            generated_example = model.generate(sample["instruction"], sample["project_defined_elements"])
+            with open(generated_file, "w", encoding="utf-8") as fout:
+                fout.write(generated_example)
+
 
         generated_example = extract_code(generated_example)
         for metric in metrics:
@@ -86,33 +85,32 @@ def evaluate_together(model_name, use_bm25=False, n_selections=0):
     evaluate(TogetherModel(model_name, use_bm25, n_selections), [ChrF(), Overlap(), NGram_Match(), Weighted_NGram_Match(), Syntax_Match(), Dataflow_Match()], "results")
 
 
-if __name__ == "__main__":
-    # evaluate_together("codellama/CodeLlama-7b-Instruct-hf")
-    # evaluate_together("codellama/CodeLlama-70b-Instruct-hf")
-    # evaluate_together("mistralai/Mistral-7B-Instruct-v0.3")
-    # evaluate_together("mistralai/Mixtral-8x7B-Instruct-v0.1")
-    # evaluate_openai("gpt-3.5-turbo-0125", use_bm25=True)
-    # evaluate_openai("gpt-4-0125-preview", use_bm25=True)
-    # evaluate_together("codellama/CodeLlama-7b-Instruct-hf", use_bm25=True)
-    # evaluate_together("codellama/CodeLlama-70b-Instruct-hf", use_bm25=True)
-    # evaluate_together("mistralai/Mistral-7B-Instruct-v0.3", use_bm25=True)
-    # evaluate_together("mistralai/Mixtral-8x7B-Instruct-v0.1", use_bm25=True)
-    
-    
+if __name__ == "__main__":   
 
     openai_models = ["gpt-3.5-turbo-0125", "gpt-4-0125-preview", "gpt-4.1-2025-04-14"]
+    together_ai_models = ["mistralai/Mixtral-8x7B-Instruct-v0.1", "codellama/CodeLlama-70b-Instruct-hf"]
     
+    models = {"open_ai": openai_models, "together_ai": together_ai_models}
     n_selections = [0, 20, 50, 200]
     
     
-    for model in openai_models:
+    for model_type in models:
+        for model_name in model_type:
         
-        for n in n_selections:
-            if n_selections == 0:
-                evaluate_openai(model, False)
-                
-            else:
-                evaluate_openai(model, True, n)
-    
-    
-    # python -m Autumn2025-JetBrains-LongCodeArena.library_based_code_generation.src.evaluation.evaluate
+            for n in n_selections:  
+                          
+                if n_selections == 0:
+                    
+                    if model_type == "open_ai":
+                        evaluate_openai(model_name, False)
+                    
+                    else:
+                        evaluate_together(model_name, False)
+                    
+                else:
+                    
+                    if model_type == "open_ai":
+                        evaluate_openai(model_name, True, n)
+
+                    else:
+                        evaluate_together(model_name, True, n)
