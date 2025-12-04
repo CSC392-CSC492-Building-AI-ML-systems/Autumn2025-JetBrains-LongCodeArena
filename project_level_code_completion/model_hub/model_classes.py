@@ -33,9 +33,16 @@ class HFModelBuilder(ModelBuilderBase):
 
     @staticmethod
     def _update_kwargs(checkpoint, kwargs):
+        ## FOR IBM-granite1, uncomment the following:
+        # kwargs.setdefault('attn_implementation', 'sdpa')
+        # if 'dtype' not in kwargs and 'torch_dtype' not in kwargs:
+        #    kwargs['dtype'] = torch.bfloat16
+        # return kwargs
+        
+        # For flash attention
         if 'attn_implementation' not in kwargs:
             if 'starcoder' not in checkpoint:  # Quick fix for Flash-attention 2 and starcoder
-                kwargs['attn_implementation'] = 'flash_attention_2'
+                kwargs['attn_implementation'] = 'flash_attention_2' 
         if 'torch_dtype' not in kwargs:
             kwargs['torch_dtype'] = torch.bfloat16
 

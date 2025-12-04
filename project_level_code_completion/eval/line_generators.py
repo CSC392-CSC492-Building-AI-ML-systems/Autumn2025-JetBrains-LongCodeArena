@@ -53,6 +53,34 @@ class GenerationResults:
         self.prediction.append(prediction)
         self.gt.append(gt)
 
+# ===================================================
+# IBM GRANITE IMPROVEMENTS
+# ------------------------------------------------------------
+# These helpers replace HF exact_match metric with a safer,
+# dependency-free fallback version.
+#
+def _compute_em_local(preds: list[str], refs: list[str]):
+    assert len(preds) == len(refs)
+    n = len(preds)
+    if n == 0:
+        return {"exact_match": 0.0}
+    hits = sum(1 for p, r in zip(preds, refs) if p.strip() == r.strip())
+    return {"exact_match": hits / n}
+
+def get_em_metric():
+    try:
+        metric = load("evaluate-metric/exact_match")
+        return lambda preds, refs: metric.compute(predictions=preds, references=refs)
+    except Exception:
+        pass
+    try:
+        metric = load("exact_match")
+        return lambda preds, refs: metric.compute(predictions=preds, references=refs)
+    except Exception:
+        pass
+    return _compute_em_local
+# ============================================================
+
 
 class LineGeneratorBase:
     def __init__(self, model, device, max_seq_len, results_path):
@@ -154,8 +182,20 @@ class LineGeneratorHF(SpecificLineGenerator):
                 input_ids = self.tokenize(context)[..., -self.max_seq_len:]
                 if input_ids.size(-1) < 1:
                     new_size = torch.Size(list(input_ids.size())[:-1] + [1])
-                    input_ids = torch.full(new_size, self._tokenizer.bos_token_id)
+                    fill_id = getattr(self._tokenizer, 'bos_token_id', None)
+                    if fill_id is None:
+                        fill_id = getattr(self._tokenizer, 'eos_token_id', None)
+                    if fill_id is None:
+                        fill_id = getattr(self._tokenizer, 'pad_token_id', None)
+                    if fill_id is None:
+                        fill_id = 0
+                    input_ids = torch.full(new_size, fill_id, dtype=torch.long)
                 input_ids = input_ids.to(self.device)
+
+                # IBM improvement: provide attention_mask to avoid warnings
+                # attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
+                # out = self.model.generate(input_ids, attention_mask=attention_mask, **gen_config)
+
                 out = self.model.generate(input_ids, **gen_config)
                 out = out[..., input_ids.size(-1):]
                 prediction = self.decode(out)
@@ -209,7 +249,15 @@ class LineGeneratorHF(SpecificLineGenerator):
         return self._tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)[0]
 
     def calculate_exact_match(self):
-        exact_match = load("exact_match")
+        # IBM alternative — uncomment to switch:
+        # results = {}
+        # for sc_name, gen_res in self.generation_results.items():
+        #     if len(gen_res.gt) > 0:
+        #         preds = [p.strip() for p in gen_res.prediction]
+        #         refs = [r.strip() for r in gen_res.gt]
+        #         results[sc_name] = self._compute_em(preds, refs)
+        # return results
+        exact_match = load("evaluate-metric/exact_match")
         results = dict()
         for sc_name, gen_res in self.generation_results.items():
             if len(gen_res.gt) > 0:
