@@ -12,7 +12,7 @@ from utils.context_utils import collect_good_context, trim_context
 from tqdm.auto import tqdm
 
 def prepare_code_context(row, max_context_toks, tokenizer):
-    context = collect_good_context(row)
+    context = collect_good_context(row, config.get("context_strategy", "default"))
     if max_context_toks is None:
         return context
     return trim_context(context, tokenizer, max_context_toks)
@@ -40,6 +40,10 @@ def generate_all(config, client):
     if not os.path.exists(f"{save_dir}"):
         os.makedirs(f"{save_dir}")
 
+    # Avoid regenerating existing files
+    existing = {int(fn.split('.')[0]) for fn in os.listdir(save_dir) if fn.endswith(".txt") and fn.split('.')[0].isdigit()}
+    logging.info(f"Found {len(existing)} existing files in {save_dir}, will skip them.")
+    
     # Preparing dataset
     logging.info("Downloading dataset")
     dataset = load_dataset("JetBrains-Research/lca-module-summarization",
@@ -49,10 +53,16 @@ def generate_all(config, client):
                                               token=hf_api_key)
 
     # Generation
+    
     logging.info("Start generation process")
     for row_idx, row in tqdm(enumerate(dataset), total=len(dataset), 
                              position=0, leave=True, 
                              desc="Generation"):
+        if row_idx in existing:
+            logging.info(f"Skipping {row_idx}: already exists")
+            print(f"Skipping {row_idx}: already exists")
+            continue
+        
         code_context = prepare_code_context(row, max_context_toks, tokenizer)
         generate_res = generate_one(row, code_context, client, model_name)
 
