@@ -26,28 +26,21 @@ This fork introduces improvements across three benchmarks:
 
 ### Project-Level Code Completion
 
-* Added several new models (StarCoder2, Granite-1B, Qwen-7B, GPT-3.5/4o-mini/4o)
-* Implemented BM25 retrieval to compare lexical vs. path-distance context strategies
-* Added full support for OpenAI models in the completion pipeline
+* Evaluated several new models (StarCoder2, Granite-1B, Qwen-7B, GPT-3.5/4o-mini/4o).
+* Implemented BM25 context composition strategy to compare it to path-distance context strategy.
+* Added full support for OpenAI models in the completion pipeline.
 
 
 ### Library-Based Code Generation
 
-* Added the CodeBLEU metric suite for structural/semantic code evaluation
-* Introduced new retrieval strategies (BM25, BM25 + function headers, expanded windows)
-* Evaluated a broader set of modern LLMs across these strategies
+* Added the CodeBLEU metric suite for structural/semantic code evaluation.
+* Introduced new retrieval strategies (BM25, BM25 + function headers, expanded windows).
+* Evaluated a broader set of modern LLMs across these strategies.
 
 
 ### Module Summarization
 
-* Added BERTScore for embedding-based semantic similarity
-* Added structured prompt templates for prompt-engineering experiments
-* Evaluated updated pipeline using multiple modern LLMs and retrieval variants
-
-
-## How can I submit my results? 
-
-We are excited to invite you to participate in solving our [benchmarks]((https://huggingface.co/spaces/JetBrains-Research/long-code-arena))! To submit your results, please send the following materials to our 📩 email (lca@jetbrains.com):  
-* **Results**: Include the summary of your benchmark outcomes.
-* **Reproduction Package**: To ensure the integrity and reproducibility of your results, please include the code for context collection (if any), generation of predictions, and evaluating. You can follow [our baselines](https://github.com/JetBrains-Research/lca-baselines) as a reference.  
-* **Metadata**: Model information, organization name, licence of your model, context size, and other information you find relevant.
+* Added BERTScore metric for embedding-based semantic similarity.
+* Added structured prompt templates for prompt-engineering experiments.
+* Implemented context composition strategies such as BM25 retrieval and code-context cleaning to determine whether cleaner code contexts improve the generated documentation.
+* Evaluated multiple newer models on this benchmark.
