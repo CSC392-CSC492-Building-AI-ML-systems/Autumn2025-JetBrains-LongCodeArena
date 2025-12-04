@@ -71,3 +71,4 @@ You can also add command-line arguments using [Hydra's override feature](https:/
     ```
     poetry run python -m eval.eval_pipeline dataset=medium params=codellama7b_4bit params.inference_params.seq_max_len=8000
     ```
+**Note:** For example code to run IBM Granite models, see `model_hub/model_classes.py` and `eval/line_generators.py`.
