@@ -1,4 +1,4 @@
-def gpt_generation(client, prompt, model_name='gpt-3.5-turbo-16k'):
+def gpt_generation(client, prompt, model_name='gpt-3.5-turbo-16k', temp = 0.0):
     response = client.chat.completions.create(
         model=model_name,
         messages=[
@@ -7,7 +7,7 @@ def gpt_generation(client, prompt, model_name='gpt-3.5-turbo-16k'):
             {"role": "user", "content": prompt}],
         n=1,
         stream=False,
-        temperature=0.0,
+        temperature=temp, 
         max_tokens=2000,
         top_p=1.0,
         frequency_penalty=0.0,

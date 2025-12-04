@@ -10,6 +10,8 @@ from utils.files_utils import load_config
 from transformers import AutoTokenizer
 from utils.scorer import OptionsScoringModel
 from bert_score import score as bert_score
+# FOR BM25: uses OPENAI scoring model
+# from utils.openai_scorer import OptionsScoringModel
 
 
 def get_metric(scorer, intent, code_context, gold_doc, pred_doc):
@@ -40,7 +42,7 @@ def score_one_model(scorer, dataset, direct, max_cont_len, tokenizer, use_pbar=F
     golds, preds, intents, codes = [], [], [], []
     
     for idx in range(len(dataset)):
-        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8') as f:
+        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8', errors='ignore') as f:
             pred = f.read()
         gld = dataset[idx]['target_text']
         golds.append(gld)
@@ -86,7 +88,7 @@ def get_bert_scores(dataset, direct, model_name):
     golds, preds = [], []
 
     for idx in range(len(dataset)):
-        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8') as f:
+        with open(f"{direct}/{idx}.txt", 'r', encoding='utf-8', errors='ignore') as f:
             pred = f.read()
         gld = dataset[idx]['target_text']
         golds.append(gld)
@@ -122,13 +124,14 @@ if __name__ == '__main__':
     model_name = config.get("model_name")
     hf_tokenizer_checkpoint = config.get("hf_tokenizer_checkpoint")
     max_context_toks = config.get("max_context_toks", None)
-    use_bert_metric = config.get("use_bert", True)
+    use_bert_metric = config.get("use_bert", True) # FOR BM25 CONTEXT: bert_model_name = config.get("bert_model_name", "microsoft/deberta-large-mnli")
+
     
     tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_checkpoint, 
                                               token=hf_api_key)
     
 
-    scorer = OptionsScoringModel(model_name)
+    scorer = OptionsScoringModel(model_name) # FOR BM25 CONTEXT: OptionsScoringModel(api_key, model_name)
     dataset = load_dataset("JetBrains-Research/lca-module-summarization",
                                token=hf_api_key)['test']
     
@@ -153,6 +156,7 @@ if __name__ == '__main__':
                     )
                 )
                 
+                # REMOVE FOLLOWING CONDITIONAL LOGIC FOR BM25 CONTEXT
                 if use_bert_metric:
                     mean_bert_score = np.mean(
                         get_bert_scores(dataset, save_dir, model_name)
@@ -165,4 +169,4 @@ if __name__ == '__main__':
                 
 
     with open('result_gold.json', 'w') as f:
-        json.dump(path2metric, f)
+        json.dump(path2metric, f) # FOR BM25 CONTEXT ADD: ensure_ascii=False

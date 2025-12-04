@@ -9,11 +9,11 @@ from openai import OpenAI
 from together import Together
 from utils.files_utils import load_config
 from utils.api_generation import gpt_generation
-from utils.context_utils import collect_good_context, trim_context
+from utils.context_utils import collect_good_context, trim_context, get_temperature
 from tqdm.auto import tqdm
 
-def prepare_code_context(row, max_context_toks, tokenizer):
-    context = collect_good_context(row, config.get("context_strategy", "default"))
+def prepare_code_context(row, max_context_toks, tokenizer, context_kwargs):
+    context = collect_good_context(row, config.get("context_strategy", "default"), **context_kwargs)
     if max_context_toks is None:
         return context
     return trim_context(context, tokenizer, max_context_toks)
@@ -27,7 +27,9 @@ def generate_one(row, code_context, client, model_name):
     prompt += f'My code:\n\n{code_context}'
     prompt += f'\n\n\n\nAs answer return text for {filename} file about {intent}. Do not return the instruction how to make documentation, return only documentation itself.'
 
-    answer = gpt_generation(client, prompt, model_name)
+    temp = get_temperature(config.get("context_strategy", "default"))
+
+    answer = gpt_generation(client, prompt, model_name, temp)
     return answer
 
 def generate_all(config, client):
