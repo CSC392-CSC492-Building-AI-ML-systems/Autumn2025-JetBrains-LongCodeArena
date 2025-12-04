@@ -1,4 +1,5 @@
 import os
+import inspect
 
 from together import Together
 
@@ -7,21 +8,29 @@ from .example_generation_model import ExampleGenerationModel
 
 class TogetherModel(ExampleGenerationModel):
 
-    def __init__(self, model_name: str, use_bm25: bool = False):
+    def __init__(self, model_name: str, use_bm25: bool = False, n_selections: int = 0):
         self.client = Together(api_key=os.environ.get("TOGETHER_API_KEY"))
         self.model_name = model_name
         self.use_bm25 = use_bm25
+        self.n_selections = n_selections
 
     def generate(self, task_description: str, project_apis: list[str] = None) -> str:
-        instruction = (
-            self.get_prompt(task_description)
-            if not self.use_bm25
-            else self.get_bm25_prompt(task_description, project_apis)
-        )
+                
+        if not self.use_bm25:
+            instruction = self.get_prompt(task_description)
+        
+            prompt = [
+                {"role": "user", "content": instruction}
+            ]
+            
+        else:
+            instruction, recommended = self.get_bm25_prompt(task_description, project_apis, n_selections=self.n_selections)
+            extra_context = [f"{elem}: {str(inspect.signature(elem) if callable(elem) else 'None') }\n" for elem in recommended]
+            
+            prompt = [
+                {"role": "user", "content": instruction + "\nHere is a list of function headers for each project element:\n" + '\n'.join(extra_context)},
+            ]
 
-        prompt = [
-            {"role": "user", "content": instruction},
-        ]
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=prompt,
