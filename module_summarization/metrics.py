@@ -11,7 +11,7 @@ from transformers import AutoTokenizer
 from utils.scorer import OptionsScoringModel
 from bert_score import score as bert_score
 # FOR BM25: uses OPENAI scoring model
-# from utils.openai_scorer import OptionsScoringModel
+from utils.openai_scorer import OptionsScoringModel as OptionsOpenScoring
 
 
 def get_metric(scorer, intent, code_context, gold_doc, pred_doc):
@@ -124,14 +124,17 @@ if __name__ == '__main__':
     model_name = config.get("model_name")
     hf_tokenizer_checkpoint = config.get("hf_tokenizer_checkpoint")
     max_context_toks = config.get("max_context_toks", None)
-    use_bert_metric = config.get("use_bert", True) # FOR BM25 CONTEXT: bert_model_name = config.get("bert_model_name", "microsoft/deberta-large-mnli")
-
-    
+    strategy = config.get("context_strategy", "default")
     tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_checkpoint, 
                                               token=hf_api_key)
-    
 
-    scorer = OptionsScoringModel(model_name) # FOR BM25 CONTEXT: OptionsScoringModel(api_key, model_name)
+    if strategy != 'bm25':
+        use_bert_metric = config.get("use_bert", True) 
+        scorer = OptionsScoringModel(model_name)
+    else: # FOR BM25 CONTEXT: 
+        bert_model_name = config.get("bert_model_name", "microsoft/deberta-large-mnli")
+        scorer = OptionsOpenScoring(api_key, model_name)
+
     dataset = load_dataset("JetBrains-Research/lca-module-summarization",
                                token=hf_api_key)['test']
     
@@ -156,17 +159,20 @@ if __name__ == '__main__':
                     )
                 )
                 
-                # REMOVE FOLLOWING CONDITIONAL LOGIC FOR BM25 CONTEXT
-                if use_bert_metric:
-                    mean_bert_score = np.mean(
-                        get_bert_scores(dataset, save_dir, model_name)
-                    )
+                if strategy != 'bm25':
+                    if use_bert_metric:
+                        mean_bert_score = np.mean(
+                            get_bert_scores(dataset, save_dir, model_name)
+                        )
 
-                    path2metric[save_dir] = {"model_score": model_metric, "bert_score": mean_bert_score}
-                
-                else:
-                    path2metric[save_dir] = {"model_score": model_metric}
+                        path2metric[save_dir] = {"model_score": model_metric, "bert_score": mean_bert_score}
+                    
+                    else:
+                        path2metric[save_dir] = {"model_score": model_metric}
                 
 
     with open('result_gold.json', 'w') as f:
-        json.dump(path2metric, f) # FOR BM25 CONTEXT ADD: ensure_ascii=False
+        if strategy != 'bm25':
+            json.dump(path2metric, f)
+        else:  # FOR BM25 CONTEXT
+             json.dump(path2metric, f, ensure_ascii=False)
