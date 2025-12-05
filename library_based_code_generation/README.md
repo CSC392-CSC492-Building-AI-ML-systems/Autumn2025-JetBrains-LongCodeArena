@@ -33,3 +33,25 @@ If the code for the specific model is already available in the `results` directo
 * To implement more metrics, refer to the available [examples](src/metrics). Currently, we run `ChrF` and `API Recall`.
 * To add more models, implement new instances of [abstract model](src/models/example_generation_model.py). We provide connectors to all models available via OpenAI and Together.AI.
 * To work with code, we provide [examples of parsing](src/context) with the [tree-sitter](https://github.com/tree-sitter/py-tree-sitter) library.
+
+## New Improvements
+We have extended the original Library-Based Code Generation benchmark to provide more comprehensive coverage of model behavior, evaluation depth, and context effects. The following enhancements are now included in the framework:
+
+### **IMPORTANT: Caching**
+The current code to uses caching, where the scores keep re-using existing, cached, generated code with each run instead of new results. 
+This can be configured in `src/evaluation/evaluate.py`. Instructions are provided as comments within the file.
+
+### **Expanded Evaluation Metrics**
+- Integrated the full CodeBLEU metric suite to complement the existing ChrF and API Recall measures.
+This addition provides structural, syntactic, and semantic assessments of generated Python code, enabling deeper insight into library usage correctness and overall generation fidelity.
+
+### **Context Composition Improvements**
+- Introduced new retrieval and prompt construction strategies:
+  - BM25-based retrieval combined with function-level header context
+  - These context variations allow targeted experimentation on the influence of structural information on code generation quality.
+
+### **Updated Model Coverage**
+- Benchmarked additional, more recent language models not originally included in the JetBrains evaluation setup, like gpt-5 models which required code adjustments to be used.
+
+### **Extra**
+In `src/evaluation/evaluate.py`, the file runs evaluations on a series of models and different BM25 context sizes, so ensure you configure and adjust the parameters according to your needs. Comments on steps are provided in the file as well for adjustments.
