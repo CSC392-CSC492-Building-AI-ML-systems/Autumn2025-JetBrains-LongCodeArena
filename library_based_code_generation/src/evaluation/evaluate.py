@@ -44,6 +44,7 @@ def evaluate(model: ExampleGenerationModel, metrics: list[Metric], data_path: st
     scores = defaultdict(list)
 
     for i, sample in tqdm(enumerate(dataset)):
+        # To avoid issues with caching, comment out the lines 48-56 below and uncomment line 58:
         generated_file = os.path.join(evaluation_result_path, f"{i}.py")
         if os.path.exists(generated_file):
             with open(generated_file, "r", encoding="utf-8") as fin:
@@ -53,8 +54,8 @@ def evaluate(model: ExampleGenerationModel, metrics: list[Metric], data_path: st
             generated_example = model.generate(sample["instruction"], sample["project_defined_elements"])
             with open(generated_file, "w", encoding="utf-8") as fout:
                 fout.write(generated_example)
-
-
+        # uncomment the line below:
+        # generated_example = model.generate(sample["instruction"], sample["project_defined_elements"])
         generated_example = extract_code(generated_example)
         for metric in metrics:
             score = metric.score(generated_example, sample["clean_reference"], sample["unique_apis"])
@@ -86,7 +87,8 @@ def evaluate_together(model_name, use_bm25=False, n_selections=0):
 
 
 if __name__ == "__main__":   
-
+    # ===== Update the list of models and n_selections to use desired models instead:
+    
     openai_models = ["gpt-3.5-turbo-0125", "gpt-4-0125-preview", "gpt-4.1-2025-04-14"]
     together_ai_models = ["mistralai/Mixtral-8x7B-Instruct-v0.1", "codellama/CodeLlama-70b-Instruct-hf"]
     
